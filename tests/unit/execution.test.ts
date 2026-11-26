@@ -113,13 +113,22 @@ test('preview revision/freshness, preamble, viewport/reset and frame generation 
   const dom = new JSDOM('<div><iframe id="p" style="border: 0"></iframe></div>');
   const frame=dom.window.document.querySelector('iframe') as unknown as HTMLIFrameElement;
   let revision='r1',generation='g1'; const receipt=()=>({consoleOutput:[],perchanceErrors:[],syntaxErrors:[],appliedRevision:revision,previewGeneration:generation,result:42});
-  const adapter=new PreviewAdapter({frame:()=>frame,revision:async()=>revision,bridge:{refresh:async()=>receipt(),evaluate:async()=>receipt()},verified:{refresh:true,evaluate:true}});
+  const adapter=new PreviewAdapter({frame:()=>frame,revision:async()=>revision,
+    bridge:{refresh:async()=>receipt(),evaluate:async(js:string)=>js.includes('innerWidth')
+      ? {...receipt(),result:{width:frame.style.width?parseInt(frame.style.width):917,
+        height:frame.style.height?parseInt(frame.style.height):505}}
+      : receipt()},
+    verified:{refresh:true,evaluate:true}});
   await adapter.call('page_refresh',{});
   assert.deepEqual((await adapter.call('page_eval',{js:'return 42'} ) as {result:number}).result,42);
   revision='r2';assert.equal((await adapter.freshness()).pendingSrcChanges,true);
   await assert.rejects(adapter.call('page_refresh',{preambleJs:'window.x=1'}),/preamble/);
-  adapter.call('set_viewport_size',{width:1024,height:768});assert.equal(frame.style.width,'1024px');
-  await adapter.call('set_viewport_size',{reset:true});assert.equal(frame.getAttribute('style'),'border: 0');
+  const set=await adapter.call('set_viewport_size',{width:1024,height:768}) as {width:number;height:number};
+  assert.equal(set.width,1024);assert.equal(set.height,768);
+  assert.equal(frame.style.width,'1024px');
+  const reset=await adapter.call('set_viewport_size',{reset:true}) as {width:number;emulationActive:boolean};
+  assert.equal(frame.getAttribute('style'),'border: 0');
+  assert.equal(reset.width,917);assert.equal(reset.emulationActive,false);
   generation='g2';await assert.rejects(adapter.call('page_eval',{js:'return 1'}),/document changed/);
 });
 
