@@ -75,7 +75,7 @@ export interface ManagerOptions {
   synthetic?: true;
 }
 export interface ManagerStatus {
-  connection: "unpaired" | "connected" | "degraded" | "paused" | "offline" | "blocked";
+  connection: "unpaired" | "connecting" | "connected" | "degraded" | "paused" | "offline" | "blocked";
   workspace?: string;
   agent?: string;
   dirty?: boolean;
@@ -355,7 +355,7 @@ export async function buildDiagnosticReport(
       const b = record(local.browser);
       const connection = str(b.connection);
       return {
-        connection: ["unpaired", "connected", "degraded", "paused", "offline", "blocked"].includes(connection) ? connection : "unknown",
+        connection: ["unpaired", "connecting", "connected", "degraded", "paused", "offline", "blocked"].includes(connection) ? connection : "unknown",
         leasePresent: b.leasePresent === true,
         leaseRemainingMs: num(b.leaseRemainingMs),
         stopped: b.stopped === true,
