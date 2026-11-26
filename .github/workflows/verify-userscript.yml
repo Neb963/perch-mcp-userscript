@@ -40,12 +40,15 @@ jobs:
         run: npm run verify:artifacts
       - name: Cloudflare Worker dry-run (no deployment)
         run: npx wrangler deploy --dry-run --config apps/gateway/wrangler.jsonc
+      - name: Publish source snapshot
+        run: git archive --format=zip --output=dist/perch-mcp-source.zip HEAD
       - name: Publish tested installer
         uses: actions/upload-artifact@v4
         with:
           name: perch-mcp-userscript-tested
           path: |
             dist/perch-mcp.user.txt
+            dist/perch-mcp-source.zip
             dist/perch-mcp.user.js
             dist/perch-mcp-cloudflare.zip
             dist/SHA256SUMS.txt
