@@ -360,7 +360,7 @@ export class GatewayTransport {
                 options.signal,
                 AbortSignal.timeout(options.timeoutMs ?? defaultTimeoutMs),
               ])
-            : AbortSignal.timeout(options?.timeoutMs ?? 15000),
+            : AbortSignal.timeout(options?.timeoutMs ?? defaultTimeoutMs),
         });
         break;
       } catch (error) {
