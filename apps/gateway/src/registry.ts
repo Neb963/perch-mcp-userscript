@@ -73,6 +73,10 @@ interface Approval {
   policyRevision: number;
   request?: unknown;
   handleHash: string;
+  /** Sealed only after the OAuth SDK issued the callback. Private; never exported. */
+  completionRedirect?: string;
+  completionGrantId?: string;
+  completionFailed?: boolean;
   effect?: {
     tool: string;
     argsDigest: string;
@@ -491,6 +495,10 @@ export class Registry {
             this.db.put("approval/" + a.id, a);
             return { state: "denied", request: a.request };
           }
+          if (a.state === "consumed")
+            return a.completionRedirect
+              ? { state: "completed", redirectTo: a.completionRedirect }
+              : { state: a.completionFailed ? "failed" : a.completionGrantId ? "processing" : "consumed" };
           if (a.state !== "approved") return { state: a.state };
           const w = this.getWorkspace(a.workspaceId),
             agent = this.getAgent(a.agentId);
@@ -508,8 +516,6 @@ export class Registry {
               "Workspace is unavailable for authorization.",
               403,
             );
-          a.state = "consumed";
-          this.db.put("approval/" + a.id, a);
           this.cleanup();
           if (
             this.db.keys("grant/").length >=
@@ -531,6 +537,9 @@ export class Registry {
             expiresAt: Date.now() + 30 * 86400000,
             revision: 1,
           };
+          a.state = "consumed";
+          a.completionGrantId = g.id;
+          this.db.put("approval/" + a.id, a);
           this.db.put("grant/" + g.id, g);
           return {
             state: "approved",
@@ -545,6 +554,71 @@ export class Registry {
           };
         }),
       );
+    }
+    if (path === "/internal/oauth/redirect-commit") {
+      const b = await parseBody(request, 8192);
+      fields(b, ["id", "handle", "grantId", "redirectTo"]);
+      const approvalId = id(b.id),
+        handleHash = await digest(str(b.handle, "handle", 128)),
+        grantId = id(b.grantId),
+        redirectTo = str(b.redirectTo, "redirectTo", 4096);
+      return json(this.db.transaction(() => {
+        const a = this.db.get<Approval>("approval/" + approvalId);
+        if (!a || a.handleHash !== handleHash)
+          throw new ApiError("AUTH_REQUIRED", "Invalid authorization handle.", 401);
+        if (a.state !== "consumed" || a.completionGrantId !== grantId || a.completionFailed)
+          throw new ApiError("CONFLICT", "Authorization is not awaiting this redirect.", 409);
+        if (a.completionRedirect) {
+          if (a.completionRedirect !== redirectTo)
+            throw new ApiError("CONFLICT", "Authorization redirect cannot change.", 409);
+          return { ok: true };
+        }
+        // Defense in depth: SDK validated redirect URI, but reject any
+        // off-client callback. It contains a PKCE authorization code:
+        // never include it in logs, audit events or admin projections.
+        const expected = new URL(a.redirectUri), received = new URL(redirectTo);
+        if (
+          expected.protocol !== "https:" ||
+          expected.origin !== received.origin ||
+          expected.pathname !== received.pathname ||
+          received.username || received.password || received.hash ||
+          !received.searchParams.get("code") ||
+          [...expected.searchParams].some(([key, value]) =>
+            received.searchParams.get(key) !== value)
+        ) throw new ApiError("INVALID_INPUT", "OAuth callback redirect does not match the approved client.");
+        const g = this.db.get<GrantRecord>("grant/" + grantId);
+        if (!g || g.state !== "active" || g.agentId !== a.agentId ||
+            g.workspaceId !== a.workspaceId || g.clientId !== a.clientId)
+          throw new ApiError("REVOKED", "OAuth grant was invalidated.", 403);
+        a.completionRedirect = redirectTo;
+        this.db.put("approval/" + a.id, a);
+        return { ok: true };
+      }));
+    }
+    if (path === "/internal/oauth/abort-completion") {
+      const b = await parseBody(request, 1024);
+      fields(b, ["id", "handle", "grantId"]);
+      const approvalId = id(b.id),
+        handleHash = await digest(str(b.handle, "handle", 128)),
+        grantId = id(b.grantId);
+      return json(this.db.transaction(() => {
+        const a = this.db.get<Approval>("approval/" + approvalId);
+        if (!a || a.handleHash !== handleHash)
+          throw new ApiError("AUTH_REQUIRED", "Invalid authorization handle.", 401);
+        if (a.state !== "consumed" || a.completionGrantId !== grantId)
+          throw new ApiError("CONFLICT", "Authorization cannot be aborted.", 409);
+        if (a.completionRedirect)
+          return { ok: false, alreadyCompleted: true };
+        a.completionFailed = true;
+        this.db.put("approval/" + a.id, a);
+        const g = this.db.get<GrantRecord>("grant/" + grantId);
+        if (g && g.state === "active") {
+          g.state = "revoked";
+          g.revision++;
+          this.db.put("grant/" + g.id, g);
+        }
+        return { ok: true };
+      }));
     }
     if (path === "/internal/resource-tool") {
       const b = await parseBody(request);
