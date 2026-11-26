@@ -85,7 +85,10 @@ async function start(): Promise<void> {
   const client: ManagerClient = {
     request: (method, path, body) => transport.request(method, path, body),
     health: (origin) => transport.health(origin),
-    diagnostics: () => transport.diagnostics(),
+    diagnostics: () => ({
+      ...transport.diagnostics(),
+      browser: controller.diagnostics(),
+    }),
     promptSecret: async (purpose) => {
       if (typeof GM_info === "undefined" || GM_info.injectInto !== "content")
         throw new Error(
