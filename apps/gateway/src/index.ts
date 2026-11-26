@@ -22,6 +22,8 @@ import {
   permissionsForTool,
 } from "../../../packages/contracts/src/index.js";
 import {
+  HAR_NATIVE_ACTIONS,
+  permitsHarNativeAction,
   ApiError,
   MAX_BODY,
   VERSION,
@@ -229,8 +231,9 @@ function oauthServer(config: Configuration) {
   });
 }
 function capabilityAvailable(name: string, env: Env): boolean {
-  if (["save_generator","rename_generator","set_listing"].includes(name))
-    return env.NATIVE_ACTIONS_ENABLED === "true" || env.PROVIDER_WRITES_ENABLED === "true";
+  if (Object.prototype.hasOwnProperty.call(HAR_NATIVE_ACTIONS,name))
+    return env.PROVIDER_WRITES_ENABLED === "true" ||
+      permitsHarNativeAction(env,name,[HAR_NATIVE_ACTIONS[name]]);
   if (name === "generate_music")
     return (
       env.PAID_MEDIA_ENABLED === "true" &&
