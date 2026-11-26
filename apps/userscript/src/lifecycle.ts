@@ -96,7 +96,8 @@ export class NativeLifecycle {
         if(attempt)await new Promise<void>(resolve=>setTimeout(resolve,160*attempt));
         try {
           const candidate=await this.readback.readGenerator(slug);
-          if(candidate.identity.generatorId===intent.identity.generatorId &&
+          if((intent.tool==='duplicate_generator' ||
+              candidate.identity.generatorId===intent.identity.generatorId) &&
              (intent.tool!=='set_listing'||candidate.listing===intent.args.listing)){
             observed=candidate;break;
           }
