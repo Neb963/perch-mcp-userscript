@@ -292,6 +292,7 @@ export class GatewayTransport {
     // Only idempotent GETs may be retried. Never automatically replay a
     // management write, tab operation or an uncertain OAuth-related effect.
     const attempts = method === "GET" && !binary ? 2 : 1;
+    const defaultTimeoutMs = method === "GET" && !binary ? 15000 : 30000;
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         response = await this.fetcher(url, {
@@ -305,7 +306,7 @@ export class GatewayTransport {
           signal: options?.signal
             ? AbortSignal.any([
                 options.signal,
-                AbortSignal.timeout(options.timeoutMs ?? 15000),
+                AbortSignal.timeout(options.timeoutMs ?? defaultTimeoutMs),
               ])
             : AbortSignal.timeout(options?.timeoutMs ?? 15000),
         });
