@@ -58,6 +58,7 @@ test("diagnostic export contains OAuth trace and transport failure but no creden
   assert.match(text, /GATEWAY_UNAVAILABLE/);
   assert.match(text, /a4eef3e9-ce3f-40be-961f-5c2d47d50250/);
   assert.doesNotMatch(text, /LEAK-ME|deadbeef|private-editor|\/decision\?token=/);
+  assert.equal((result.oauthHandoff as Record<string, unknown>).tokenExchangeObservedAfterLastRedirect, false);
 });
 test("offline diagnostic export stays useful and projects only stable failure codes", async () => {
   const client = fixture(async () => {
