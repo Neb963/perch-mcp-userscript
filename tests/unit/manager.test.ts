@@ -284,3 +284,73 @@ test('unpublished Resource drafts export separately without replacing settings o
     assert.equal(f.requests.some(r => r.method !== 'GET'), false);
     assert.match(f.root.textContent ?? '', /Published Resources and settings are unchanged/);
 });
+
+test('Recovery shows authoritative terminal and running holds with exact operation acknowledgment',async()=>{
+ const resolutions:Record<string,unknown>[]=[];
+ const f=fixture({reconcileOperation:async op=>{resolutions.push(op);}});
+ const delegate=f.client.request;
+ f.client.request=async(method,path,body)=>path.endsWith('/recovery')?{
+   schemaVersion:1,workspaceId:'workspace-1',activeLease:null,pendingClaimUntil:null,
+   action:'RECONCILE',blockingOperations:[
+     {operationId:'running-1',tool:'page_eval',phase:'RUNNING',epoch:4,bindingRevision:2,
+       deadlineMs:Date.now()+30000,resolvable:false},
+     {operationId:'unknown-1',tool:'save_generator',phase:'UNKNOWN',epoch:3,bindingRevision:2,
+       deadlineMs:Date.now()-1000,resolvable:true}
+   ]
+ }:delegate(method,path,body);
+ await f.handle.open('Recovery');
+ assert.match(f.root.textContent??'',/running-1/);
+ assert.match(f.root.textContent??'',/unknown-1/);
+ assert.equal([...f.root.querySelectorAll('button')].filter(b=>b.textContent==='Inspect and resolve…').length,1);
+ click(f.root,'Inspect and resolve…');
+ click(f.root,'Record resolution');await tick();assert.equal(resolutions.length,0);
+ const evidence=f.root.querySelector<HTMLInputElement>('[aria-label="Observed source and provider evidence (required)"]')!;
+ evidence.value='Inspected exact revision and independent provider stored bytes.';
+ f.root.querySelector<HTMLInputElement>('.check-row input')!.checked=true;
+ click(f.root,'Record resolution');await until(()=>resolutions.length===1);
+ assert.equal(resolutions[0]!.operationId,'unknown-1');
+ assert.equal(resolutions[0]!.epoch,3);
+ assert.equal(resolutions[0]!.bindingRevision,2);
+ assert.equal(f.requests.some(x=>x.method!=='GET'),false);
+});
+
+test('Blocked Reconnect opens Recovery instead of stranding the operator at TAB_BUSY',async()=>{
+ const f=fixture({attach:async()=>{throw Object.assign(new Error('Active lease'),{code:'TAB_BUSY'});}});
+ const delegate=f.client.request;
+ f.client.request=async(method,path,body)=>path.endsWith('/recovery')?{
+   workspaceId:'workspace-1',activeLease:{epoch:8,expiresAt:Date.now()+180000},
+   pendingClaimUntil:null,action:'WAIT_FOR_LEASE',blockingOperations:[],
+ }:delegate(method,path,body);
+ await f.handle.open('Workspaces');
+ click(f.root,'Reconnect');
+ await until(()=>/Another document.s lease is active/.test(f.root.textContent??''));
+ assert.match(f.root.textContent??'',/Recovery/);
+ assert.match(f.root.textContent??'',/Reconnect blocked \(TAB_BUSY\)/);
+});
+
+test('Recovery presents local journal holds separately and only acknowledges selected journal',async()=>{
+ const acknowledgments:string[]=[];
+ const f=fixture({
+  localRecovery:async()=>({revision:'9:'+'b'.repeat(64),holds:[
+   {id:'journal-a',kind:'SOURCE',state:'UNKNOWN',createdAt:1,paths:['main.pjs'],baseRevision:'old'},
+   {id:'journal-b',kind:'IMPORT',state:'PARTIAL',createdAt:2,paths:['imports/x/main.pjs'],baseRevision:'old'}]}),
+  resolveLocalHold:async(_workspace,journal,revision,evidence)=>{
+   assert.equal(revision,'9:'+'b'.repeat(64));assert.match(evidence,/inspected/);
+   acknowledgments.push(journal);
+  },
+ });
+ const delegate=f.client.request;
+ f.client.request=async(method,path,body)=>path.endsWith('/recovery')?{
+   workspaceId:'workspace-1',activeLease:null,pendingClaimUntil:null,
+   action:'RECONNECT',blockingOperations:[]
+ }:delegate(method,path,body);
+ await f.handle.open('Recovery');
+ assert.match(f.root.textContent??'',/journal-a/);
+ assert.match(f.root.textContent??'',/journal-b/);
+ click(f.root,'Inspect local intent…');
+ const evidence=f.root.querySelector<HTMLInputElement>('[aria-label="Local inspection evidence (required)"]')!;
+ evidence.value='inspected source and local manifest';
+ f.root.querySelector<HTMLInputElement>('.check-row input')!.checked=true;
+ click(f.root,'Record local resolution');await until(()=>acknowledgments.length===1);
+ assert.deepEqual(acknowledgments,['journal-a']);
+});

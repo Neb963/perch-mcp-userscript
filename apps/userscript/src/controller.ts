@@ -376,23 +376,19 @@ export class BrowserController {
       cursor = page.cursor ?? undefined;
       if (workspace) break;
     } while (cursor);
-    if (
-      !workspace ||
-      !(
-        workspace.binding ||
-        (workspace.recoveryBinding as { binding?: unknown } | undefined)
-          ?.binding
-      ) ||
-      !equalIdentity(
-        (workspace.binding ||
-          (workspace.recoveryBinding as { binding?: unknown })
-            .binding) as unknown as NativeIdentity,
-        await this.adapter.identity(),
-      )
-    )
-      throw new Error(
-        "Open the operation’s exact Generator and Draft before resolving.",
-      );
+    const assigned = (workspace?.binding ||
+      (workspace?.recoveryBinding as {binding?:unknown}|undefined)?.binding) as NativeIdentity|undefined;
+    const nativeIdentity=await this.adapter.identity();
+    const sameIdentity=assigned && equalIdentity(assigned,nativeIdentity);
+    // Rename may navigate from the old Slug while retaining the exact
+    // persisted Generator ID/Draft. This is a human resolution of uncertainty,
+    // not an automatic proof of success or a rebind to the new Slug.
+    const renamedSameGenerator=operation.tool==='rename_generator' && assigned &&
+      assigned.generatorId===nativeIdentity.generatorId &&
+      assigned.draftId===nativeIdentity.draftId &&
+      (assigned.publicId===undefined || assigned.publicId===nativeIdentity.publicId);
+    if(!workspace||!assigned||(!sameIdentity&&!renamedSameGenerator))
+      throw new Error('Open the exact assigned Generator and Draft (or the same Generator ID after URL rename) before resolving.');
     const vfs = new VirtualFileSystem(this.adapter, this.store, workspaceId),
       snapshot = await vfs.snapshot();
     const observedDigest = snapshot.revision.split(":")[1];
@@ -411,7 +407,9 @@ export class BrowserController {
       },
     );
     // Local source acknowledgement is a separate durable record; the original effect status is retained.
-    for (const journal of await vfs.unresolved())
+    // Only the journal owned by this exact external operation may be
+    // acknowledged. Other unknown writes/imports are independent holds.
+    for (const journal of (await vfs.unresolved()).filter(j=>j.id===operationId))
       await vfs.acknowledgeReconciliation(journal.id, snapshot.revision);
     const key = `perch:operation:${workspaceId}:${operationId}`,
       local = await this.store.get<LocalOperation>(key);
@@ -426,6 +424,47 @@ export class BrowserController {
       reason:
         "Operator resolution recorded. Reconnect explicitly; original effect remains uncertain.",
     });
+  }
+  /** Read-only local journal status; does not require a live gateway lease. */
+  async localRecovery(workspaceId:string):Promise<{revision:string;holds:Array<{
+    id:string;kind:string;state:string;createdAt:number;paths:string[];baseRevision:string;
+  }>}> {
+    if(!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId))throw new Error('Invalid Workspace ID.');
+    const w=await this.getRecoveryWorkspace(workspaceId);
+    await this.assertRecoveryIdentity(w);
+    const vfs=new VirtualFileSystem(this.adapter,this.store,workspaceId);
+    const snapshot=await vfs.snapshot();
+    return {revision:snapshot.revision,holds:(await vfs.unresolved()).map(j=>({
+      id:j.id,kind:j.kind??'SOURCE',state:j.state,createdAt:j.createdAt,
+      paths:j.paths.slice(0,30),baseRevision:j.baseRevision,
+    }))};
+  }
+  async resolveLocalHold(workspaceId:string,journalId:string,
+    expectedRevision:string,evidence:string):Promise<void> {
+    if(!/^[A-Za-z0-9_-]{1,128}$/.test(journalId)||
+       !evidence.trim()||evidence.length>512)throw new Error('Exact hold and inspection evidence required.');
+    if(this.executing)throw new Error('Wait for the active operation before local reconciliation.');
+    const w=await this.getRecoveryWorkspace(workspaceId);
+    await this.assertRecoveryIdentity(w);
+    const vfs=new VirtualFileSystem(this.adapter,this.store,workspaceId);
+    const snapshot=await vfs.snapshot();
+    if(snapshot.revision!==expectedRevision)throw new Error('Native source changed: inspect again before resolution.');
+    if(!(await vfs.unresolved()).some(j=>j.id===journalId))
+      throw new Error('This local hold was already resolved or no longer exists.');
+    // Evidence is a mandatory operator acknowledgement; never stored with
+    // private source or repeated to the gateway for this browser-local hold.
+    await vfs.acknowledgeReconciliation(journalId,expectedRevision,evidence);
+  }
+  private async getRecoveryWorkspace(workspaceId:string):Promise<Record<string,unknown>> {
+    if(!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId))throw new Error('Invalid Workspace ID.');
+    const w=await this.transport.request('GET','/api/v1/admin/workspaces/'+workspaceId);
+    if(!w||typeof w!=='object'||Array.isArray(w))throw new Error('Workspace unavailable.');
+    return w as Record<string,unknown>;
+  }
+  private async assertRecoveryIdentity(workspace:Record<string,unknown>):Promise<void> {
+    const w=workspace.binding || (workspace.recoveryBinding as {binding?:unknown}|undefined)?.binding;
+    if(!w || !equalIdentity(w as NativeIdentity,await this.adapter.identity()))
+      throw new Error('Open the exact assigned Generator and Draft before reconciling local writes.');
   }
   async localArtifacts() {
     return this.artifacts.list();
@@ -881,9 +920,9 @@ export class BrowserController {
         };
         if (decision.observedDigest !== snapshot.revision.split(":")[1])
           throw new Error("Resolution digest differs from current source.");
-        for (const journal of held.filter(
-          (j) => j.createdAt <= (decision.timestamp ?? 0),
-        ))
+        // A resolved gateway operation is not authority to erase unrelated
+        // local journal failures merely because they predate its timestamp.
+        for (const journal of held.filter(j=>j.id===String(resolved.operationId)))
           await vfs.acknowledgeReconciliation(journal.id, snapshot.revision);
         return;
       }

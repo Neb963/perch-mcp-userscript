@@ -31,6 +31,11 @@ export interface ManagerClient {
       operatorEvidence: string;
     },
   ): Promise<void>;
+  localRecovery?(workspaceId:string):Promise<{
+    revision:string;
+    holds:Array<{id:string;kind:string;state:string;createdAt:number;paths:string[];baseRevision:string}>;
+  }>;
+  resolveLocalHold?(workspaceId:string,journalId:string,expectedRevision:string,evidence:string):Promise<void>;
   localArtifacts?(): Promise<
     {
       id: string;
@@ -89,7 +94,7 @@ export interface ManagerHandle {
   refresh(): Promise<void>;
   setStatus(status: ManagerStatus): void;
 }
-type Tab = "Workspaces" | "Agents" | "Library" | "Activity" | "Settings";
+type Tab = "Workspaces" | "Agents" | "Library" | "Activity" | "Recovery" | "Settings";
 type Row = Record<string, unknown>;
 interface List {
   items: Row[];
@@ -442,6 +447,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     draftFile = "",
     draftPending: Promise<void> = Promise.resolve(),
     editorDirty = false;
+  let recoveryWorkspaceId = "";
   let sortField = "label",
     sortDirection = 1,
     filterValue = "",
@@ -739,6 +745,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       if (tab === "Agents") await renderAgents(own);
       if (tab === "Library") await renderLibrary(own);
       if (tab === "Activity") await renderActivity(own);
+      if (tab === "Recovery") await renderRecovery(own);
       if (tab === "Settings") renderSettings();
       if (own === generation) announce("Updated.");
     } catch (e) {
@@ -824,6 +831,13 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       activateButton(create);
     });
     body.append(form);
+    if(status.connection==='blocked'){
+      p('The current Workspace cannot claim a lease. Recovery identifies the exact active lease or uncertain operation without clearing evidence.',body);
+      body.append(button('Open Recovery',async()=>{
+        if(status.workspace)recoveryWorkspaceId=status.workspace;
+        tab='Recovery';updateTabs();await refresh();
+      }));
+    }
     search();
     table(
       [
@@ -932,10 +946,23 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
                 await refresh();
               }),
               button("Reconnect", async () => {
-                await client.attach?.(w);
-                announce(
-                  "Reconnect requested. Identity and lease checks still apply.",
-                );
+                try {
+                  await client.attach?.(w);
+                  announce("Connected to the verified native editor.");
+                } catch (error) {
+                  const code = error && typeof error === 'object' && 'code' in error
+                    ? String((error as {code:unknown}).code) : '';
+                  if (code !== 'EFFECT_UNKNOWN' && code !== 'TAB_BUSY') throw error;
+                  recoveryWorkspaceId = str(w.id);
+                  tab = 'Recovery';
+                  updateTabs();
+                  await refresh();
+                  announce(`Reconnect blocked (${code}). The Recovery view shows the exact hold and available next action.`,true);
+                }
+              }),
+              button("Inspect blockers", async()=>{
+                recoveryWorkspaceId=str(w.id);
+                tab='Recovery';updateTabs();await refresh();
               }),
               button(
                 "Detach",
@@ -2037,6 +2064,105 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     body.prepend(panel);
     panel.scrollIntoView?.({ block: "start" });
   }
+  /** Recovery reads the authoritative Workspace Durable Object, including
+   * nonterminal operations that are not yet present in Registry Activity. */
+  async function renderRecovery(own:number){
+    heading('Recovery');
+    p('Inspect the exact Gateway lease and operation holds. Reads are safe; no operation is retried or declared successful.',body,'muted');
+    if(!workspaces.items.length){p('No Workspaces are configured.',body);return;}
+    const chooser=select('Workspace',workspaces.items.map(w=>({
+      value:str(w.id),label:str(w.label)+' · '+str(record(w.binding).slug||record(record(w.recoveryBinding).binding).slug||'unbound')
+    })),workspaces.items.some(w=>w.id===recoveryWorkspaceId)?recoveryWorkspaceId:str(workspaces.items[0]!.id));
+    recoveryWorkspaceId=chooser.input.value;
+    const toolbar=el('div',undefined,'row');
+    toolbar.append(chooser.label,button('Inspect again',async()=>refresh()),
+      button('Reconnect this Workspace',async()=>{
+        const w=workspaces.items.find(item=>item.id===recoveryWorkspaceId);
+        if(!w)throw new Error('Workspace selection changed. Refresh.');
+        await client.attach?.(w);
+        await refresh();
+        announce('New lease acquired after identity and operation checks.');
+      }));
+    on(chooser.input,'change',()=>{recoveryWorkspaceId=chooser.input.value;void refresh();});
+    body.append(toolbar);
+    const workspaceId=recoveryWorkspaceId;
+    const snapshot=record(await client.request('GET',`${ADMIN}/workspaces/${encodeURIComponent(workspaceId)}/recovery`));
+    if(own!==generation || workspaceId!==recoveryWorkspaceId)return;
+    const lease=record(snapshot.activeLease),pending=Number(snapshot.pendingClaimUntil);
+    const blockers=Array.isArray(snapshot.blockingOperations)
+      ? snapshot.blockingOperations.filter(x=>x&&typeof x==='object'&&!Array.isArray(x)).map(record):[];
+    const action=str(snapshot.action);
+    const readable=(timestamp:unknown)=>{
+      const n=Number(timestamp);
+      return Number.isFinite(n)&&n>0?new Date(n).toLocaleString():'unknown';
+    };
+    if(lease.expiresAt){
+      p(`Another document's lease is active until ${readable(lease.expiresAt)} (epoch ${str(lease.epoch)}). Do not force a takeover; close or Stop that document, or wait for expiry.`,body);
+    }else if(pending && Number.isFinite(pending)){
+      p(`A lease claim is still in progress until ${readable(pending)}. Inspect again after it expires.`,body);
+    }
+    if(action==='RECONNECT') p('No blocking lease or operation is present. Reconnect this Workspace to the matching native editor.',body);
+    if(action==='WAIT_FOR_TERMINAL') p('An operation has not reached a terminal outcome. Inspect again after its deadline; do not replay it or force a resolution while it may still execute.',body);
+    if(action==='RECONCILE') p('At least one operation has a terminal uncertain outcome. Inspect the native source and independent provider state before acknowledging uncertainty.',body);
+    if(!blockers.length)p('No unresolved Workspace operation is blocking a new lease.',body,'muted');
+    else table([
+      {key:'operationId',label:'Operation',render(a,td){p(str(a.tool),td);p(str(a.operationId),td,'muted');}},
+      {key:'phase',label:'State',render(a,td){p(str(a.phase),td);p(`Epoch ${str(a.epoch)} · binding ${str(a.bindingRevision)}`,td,'muted');p('Deadline: '+readable(a.deadlineMs),td,'muted');}},
+      {key:'resolvable',label:'Next action',render(a,td){
+        if(a.resolvable!==true){p('Wait for terminal status, then inspect again.',td,'muted');return;}
+        if(!client.reconcileOperation){p('Recovery adapter unavailable in this browser.',td);return;}
+        td.append(button('Inspect and resolve…',async()=>{
+          const confirm=el('div',undefined,'confirm');
+          p('This does not assert success. Open the exact Generator and Draft, inspect native edits and independent provider state, then record what you found. The original uncertain outcome remains in Activity.',confirm);
+          p(`Operation ${str(a.operationId)} · ${str(a.tool)} · epoch ${str(a.epoch)}`,confirm,'muted');
+          const evidence=field('Observed source and provider evidence (required)');
+          evidence.input.maxLength=512;
+          const ack=el('label',undefined,'check-row'),check=el('input');check.type='checkbox';
+          ack.append(check,doc.createTextNode('I independently inspected the state; I accept that the original effect remains uncertain.'));
+          confirm.append(evidence.label,ack,button('Record resolution',async()=>{
+            if(!check.checked||!evidence.input.value.trim())throw new Error('Evidence and explicit acknowledgement are required.');
+            await client.reconcileOperation!({workspaceId,operationId:str(a.operationId),
+              epoch:num(a.epoch),bindingRevision:num(a.bindingRevision),
+              tool:str(a.tool),operatorEvidence:evidence.input.value.trim()});
+            await refresh();announce('Resolution recorded. Reconnect explicitly; the original effect remains uncertain.');
+          }),button('Cancel',()=>confirm.remove()));
+          td.append(confirm);evidence.input.focus();
+        }));
+      }}
+    ],blockers);
+    heading('Local browser holds');
+    p('Local source/write journals are independent from Gateway operations. Resolving one Gateway operation must not erase a different local failure.',body,'muted');
+    if(!client.localRecovery){p('Local journal reader is unavailable.',body,'muted');return;}
+    let local: Awaited<ReturnType<NonNullable<ManagerClient['localRecovery']>>>;
+    try{local=await client.localRecovery(workspaceId);}
+    catch(error){
+      if(own===generation)
+        p('Local journal inspection requires the exact bound Generator and Draft in this tab. '+errorText(error),body,'muted');
+      return;
+    }
+    if(own!==generation)return;
+    if(!local.holds.length){p('No unresolved browser-local journal entries.',body,'muted');return;}
+    p('Current inspected revision: '+local.revision,body,'muted');
+    table([
+      {key:'id',label:'Local intent',render(a,td){p(str(a.kind)+' · '+str(a.state),td);p(str(a.id),td,'muted');p(arrayStrings(a.paths).slice(0,10).join(', '),td,'muted');}},
+      {key:'id',label:'Reconciliation',render(a,td){
+        if(!client.resolveLocalHold)return;
+        td.append(button('Inspect local intent…',async()=>{
+          const box=el('div',undefined,'confirm');
+          p('Inspect all affected file paths and the current native source. This acknowledges this one local intent only, without replaying any edit or claiming it succeeded.',box);
+          const input=field('Local inspection evidence (required)');input.input.maxLength=512;
+          const line=el('label',undefined,'check-row'),check=el('input');check.type='checkbox';
+          line.append(check,doc.createTextNode('I verified the current files and accept this local uncertain result.'));
+          box.append(input.label,line,button('Record local resolution',async()=>{
+            if(!check.checked||!input.input.value.trim())throw new Error('Evidence and acknowledgement required.');
+            await client.resolveLocalHold!(workspaceId,str(a.id),local.revision,input.input.value.trim());
+            await refresh();announce('Exact local intent acknowledged. Other holds remain unchanged.');
+          }),button('Cancel',()=>box.remove()));
+          td.append(box);input.input.focus();
+        }));
+      }}
+    ],local.holds as unknown as Row[]);
+  }
   async function renderActivity(own: number) {
     const response = list(await client.request("GET", `${ADMIN}/activity`));
     if (own !== generation) return;
@@ -2047,7 +2173,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       "muted",
     );
     search();
-    table(
+    const renderRows=(items:Row[])=>table(
       [
         {
           key: "timestamp",
@@ -2132,21 +2258,23 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           },
         },
       ],
-      response.items,
+      items,
     );
-    if (response.cursor)
-      body.append(
-        button("Load next page", async () => {
-          const next = list(
-            await client.request(
-              "GET",
-              `${ADMIN}/activity?cursor=${encodeURIComponent(response.cursor!)}`,
-            ),
-          );
-          const pre = el("pre", json(next.items));
-          body.append(pre);
-        }),
-      );
+    renderRows(response.items);
+    let cursor=response.cursor;
+    if(cursor){
+      const nextButton=button('Load next page',async()=>{
+        if(!cursor)return;
+        const next=list(await client.request('GET',`${ADMIN}/activity?cursor=${encodeURIComponent(cursor)}`));
+        if(next.revision!==response.revision)
+          throw new Error('Activity changed during pagination. Refresh and try again.');
+        if(own!==generation)return;
+        renderRows(next.items);
+        cursor=next.cursor;
+        if(!cursor)nextButton.remove();
+      });
+      body.append(nextButton);
+    }
     if (client.localArtifacts) {
       const artifacts = await client.localArtifacts();
       if (own !== generation) return;
@@ -2697,6 +2825,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     "Agents",
     "Library",
     "Activity",
+    "Recovery",
     "Settings",
   ] as Tab[]) {
     const b = button(name, async () => {
