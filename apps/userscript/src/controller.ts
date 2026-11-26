@@ -1021,12 +1021,10 @@ export class BrowserController {
         sourceWriteBlocked?:string[];
       } | undefined;
       const authorized = [...new Set(lease.permissions)].sort();
-      let gatewayPolicy: boolean | null = null;
-      try {
-        const health = await this.transport.health() as {providerWritesEnabled?:unknown};
-        if (typeof health.providerWritesEnabled === 'boolean')
-          gatewayPolicy = health.providerWritesEnabled;
-      } catch { /* Unknown gateway policy is never treated as allowed. */ }
+      const gatewayObservation=this.transport.gatewayPolicySnapshot();
+      const gatewayPolicy=gatewayObservation.providerWritesEnabled;
+      // Cached policy is diagnostic, not authorization. The authoritative
+      // Registry rechecks the current policy for every tool admission.
       const nativeDetected = caps?.nativeSave === true;
       const adapterAccepted = this.adapter.options.externalWritesVerified === true;
       const hasSaveGrant = authorized.includes('SAVE');
@@ -1057,6 +1055,8 @@ export class BrowserController {
             reasons:caps?.sourceWriteBlocked ?? [] },
           saveGenerator: {
             detected:nativeDetected,adapterAccepted,gatewayPolicy,
+            gatewayPolicyObservedAt:gatewayObservation.observedAt,
+            gatewayPolicyIsLastObservation:true,
             authorized:hasSaveGrant,available:reasons.length===0,reasons,
           },
           preview: this.tools?.capabilityReport?.(context) ?? {
