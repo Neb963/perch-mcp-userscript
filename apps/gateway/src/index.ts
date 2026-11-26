@@ -588,8 +588,16 @@ async function route(
       handle: form.get("handle"),
     });
     if (result.state === "pending")
+      // Preserve the one-time authorization handle so an early click can be
+      // retried in place; never require browser Back or a new OAuth flow.
       return html(
-        "<h1>Approval pending</h1><p>Approve the exact request in the userscript manager, then use Back and Continue.</p>",
+        '<h1>Approval pending</h1><p>Open Perch MCP → Agents and approve the matching request. Return here and check again.</p>' +
+          '<form method="POST" action="/authorize/complete"><input type="hidden" name="id" value="' +
+          escape(form.get("id") ?? "") +
+          '"><input type="hidden" name="handle" value="' +
+          escape(form.get("handle") ?? "") +
+          '"><button type="submit">Check approval again</button></form>' +
+          "<p>Requests expire five minutes after they are created.</p>",
       );
     if (result.state === "denied" && result.request)
       return Response.redirect(
