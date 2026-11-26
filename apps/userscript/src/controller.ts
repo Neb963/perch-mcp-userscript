@@ -64,6 +64,8 @@ export interface RuntimeContext {
 }
 export interface AdditionalTools {
   dispose?(): void;
+  /** Read-only, no network or source effects; scoped to the bound Workspace. */
+  capabilityReport?(context: RuntimeContext): Record<string, unknown>;
   supports(name: string): boolean;
   call(
     name: string,
@@ -1009,6 +1011,61 @@ export class BrowserController {
         ...artifact,
         delivery:
           "Authenticated operator download in Activity. This artifact has no public URL.",
+      };
+    }
+    if (name === 'workspace_status' && this.source) {
+      const base = await this.source.call(name, args) as Record<string, unknown>;
+      const caps = base.capabilities as {
+        nativeSave?:boolean;sourceRead?:boolean;sourceWrite?:boolean;
+        sourceWriteBlocked?:string[];
+      } | undefined;
+      const authorized = [...new Set(lease.permissions)].sort();
+      let gatewayPolicy: boolean | null = null;
+      try {
+        const health = await this.transport.health() as {providerWritesEnabled?:unknown};
+        if (typeof health.providerWritesEnabled === 'boolean')
+          gatewayPolicy = health.providerWritesEnabled;
+      } catch { /* Unknown gateway policy is never treated as allowed. */ }
+      const nativeDetected = caps?.nativeSave === true;
+      const adapterAccepted = this.adapter.options.externalWritesVerified === true;
+      const hasSaveGrant = authorized.includes('SAVE');
+      const leaseHeld = this.lease === lease && !this.stopped && Date.now() < lease.expiresAt;
+      const reasons = [
+        ...(!nativeDetected ? ['NATIVE_SAVE_INTERFACE_UNAVAILABLE'] : []),
+        ...(!adapterAccepted ? ['NATIVE_SAVE_ACCEPTANCE_NOT_VERIFIED'] : []),
+        ...(gatewayPolicy !== true ? [gatewayPolicy === false ? 'GATEWAY_PROVIDER_WRITES_DISABLED' : 'GATEWAY_POLICY_UNKNOWN'] : []),
+        ...(!hasSaveGrant ? ['SAVE_PERMISSION_NOT_GRANTED'] : []),
+        ...(!leaseHeld ? ['WRITER_LEASE_NOT_HELD'] : []),
+        ...((caps?.sourceWriteBlocked ?? []).length ? ['NATIVE_EDITOR_MUTATION_BLOCKED'] : []),
+      ];
+      return {
+        ...base,
+        lease: {
+          held: leaseHeld, epoch: lease.epoch,
+          bindingRevision: lease.bindingRevision,
+          remainingMs: Math.max(0, lease.expiresAt - Date.now()),
+        },
+        effectivePermissions: authorized,
+        effectiveCapabilities: {
+          sourceRead: { detected:caps?.sourceRead === true,
+            authorized:authorized.includes('READ_SOURCE'),
+            available:leaseHeld && caps?.sourceRead === true && authorized.includes('READ_SOURCE') },
+          sourceWrite: { detected:caps?.sourceWrite === true,
+            authorized:authorized.includes('WRITE_SOURCE'),
+            available:leaseHeld && caps?.sourceWrite === true && authorized.includes('WRITE_SOURCE'),
+            reasons:caps?.sourceWriteBlocked ?? [] },
+          saveGenerator: {
+            detected:nativeDetected,adapterAccepted,gatewayPolicy,
+            authorized:hasSaveGrant,available:reasons.length===0,reasons,
+          },
+          preview: this.tools?.capabilityReport?.(context) ?? {
+            inspection:'NOT_INSTRUMENTED',
+          },
+          policyBoundary: {
+            privilegedSaveAndLifecycle:'gated',
+            generatorRuntime:'Preview JavaScript can make normal generator requests; this is not equivalent to authorized privileged editor Save.',
+          },
+        },
       };
     }
     if (this.source?.supports(name)) return this.source.call(name, args);
