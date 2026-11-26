@@ -2,6 +2,10 @@
 
 Date: 2026-11-26. Classification: **verification candidate, not release-ready and not full functional parity**. The accepted scope C01–C21 has not been reduced. A tool schema, a candidate adapter, or a synthetic provider receipt is not a passing live parity gate.
 
+## HAR-confirmed native owner actions (v0.1.11 candidate)
+
+The owner-provided 2026-11-26 HAR confirms native UI success for Listed/Unlisted, Generator URL change, and Save. Implementation and sanitized schemas are recorded in [Epoch 9](verification/epoch9-har-native-actions-v0111.md). The 0.1.11 userscript wires three existing MCP tools using fixed native interfaces and independently verified public state. Its gateway v0.1.6 selectively admits exactly SAVE, RENAME and LISTING via `NATIVE_ACTIONS_ENABLED=true` without enabling broad provider mutation. Local automated tests do not establish live MCP execution of these actions. Real disposable-generator acceptance, special rename handoff reconciliation and gateway upgrade remain required. No owner generator was modified during implementation.
+
 ## Implemented and locally exercised
 
 - Single bundled userscript plus byte-identical TXT mirror; bundled isolated compute Worker and original default knowledge; no runtime package/CDN import.
