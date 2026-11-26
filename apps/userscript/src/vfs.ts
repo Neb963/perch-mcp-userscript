@@ -1,6 +1,6 @@
 import { NativeAdapter } from './adapter.js';
 import { ChunkStore } from './storage.js';
-import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, digest, equalIdentity, snapshotRevision, utf8, type FileWrite, type KeyValueStore, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
+import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, digest, equalIdentity, isUint8Array, snapshotRevision, utf8, type FileWrite, type KeyValueStore, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
 export interface WorkspaceSnapshot extends NativeSnapshot { nativeRevision: string; generation: number }
 interface StoredSource { version: 1; identity: NativeIdentity; files: Record<string, string>; revision: string; createdAt: number; label: string; pinned: boolean }
 interface LocalState { version: 1; files: Record<string, string>; lastHash: string; generation: number }
@@ -174,12 +174,33 @@ export class VirtualFileSystem {
       if ((await this.unresolved()).length) throw new BrowserError('EFFECT_UNKNOWN','Unresolved native effects block new import publication.');
       const before = await this.snapshot(); if (expectedRevision && before.revision !== expectedRevision) throw new BrowserError('STALE_REVISION', 'Workspace changed before import publication.');
       const sourcePaths = Object.keys(files).sort(); if (sourcePaths.length > 1000 || !sourcePaths.length) throw new BrowserError('LIMIT_EXCEEDED', 'Import requires 1–1000 files.');
-      const staged: Record<string,string> = {}; const seen = new Set<string>();
-      for (const path of sourcePaths) { canonicalPath(path); if (path.startsWith('scratch/') || path.startsWith('imports/')) throw new BrowserError('PATH_DENIED', 'Imports accept public native source paths only.'); const target = canonicalPath(`imports/${id}/${path}`); if (seen.has(target.toLowerCase())) throw new BrowserError('PATH_DENIED', 'Import path case collision.'); seen.add(target.toLowerCase()); const bytes = files[path]!; if (!(bytes instanceof Uint8Array)) throw new BrowserError('INVALID_INPUT', 'Import requires exact byte arrays.'); staged[target] = bytesToBase64(bytes); }
-      const local = await this.local(); for (const path of Object.keys(local.files)) if (path.startsWith(`imports/${id}/`)) delete local.files[path]; Object.assign(local.files, staged);
-      const total = Object.values(local.files).reduce((n, b) => n + base64ToBytes(b).length, 0);
-      const nativeBytes = Object.entries(before.files).filter(([path]) => !path.startsWith('scratch/') && !path.startsWith('imports/')).reduce((n, [, b]) => n + b.length, 0);
-      if (total + nativeBytes > this.maxBytes) throw new BrowserError('QUOTA_EXCEEDED', 'Imported snapshot exceeds Workspace budget.');
+      const prefix = `imports/${id}/`;
+      const retained = Object.entries(before.files).filter(([path]) => !path.startsWith(prefix));
+      let total = retained.reduce((n, [, bytes]) => n + bytes.length, 0);
+      const seen = new Set(retained.map(([path]) => path.toLowerCase()));
+      const planned: [string, Uint8Array][] = [];
+      for (const [index, path] of sourcePaths.entries()) {
+        canonicalPath(path);
+        if (path.startsWith('scratch/') || path.startsWith('imports/'))
+          throw new BrowserError('PATH_DENIED', 'Import preflight: only public native source paths are allowed.');
+        const target = canonicalPath(`${prefix}${path}`);
+        if (seen.has(target.toLowerCase()))
+          throw new BrowserError('PATH_DENIED', `Import preflight: file #${index + 1} collides with another path.`);
+        seen.add(target.toLowerCase());
+        const bytes = files[path];
+        if (!isUint8Array(bytes))
+          throw new BrowserError('INVALID_INPUT', `Import preflight: file #${index + 1} is not a Uint8Array.`);
+        if (bytes.byteLength > 16 * 1024 * 1024)
+          throw new BrowserError('QUOTA_EXCEEDED', `Import preflight: file #${index + 1} exceeds the 16 MiB file limit.`);
+        total += bytes.byteLength;
+        if (total > this.maxBytes)
+          throw new BrowserError('QUOTA_EXCEEDED', 'Import preflight: snapshot exceeds Workspace byte budget.');
+        planned.push([target, new Uint8Array(bytes)]);
+      }
+      const staged = Object.fromEntries(planned.map(([path, bytes]) => [path, bytesToBase64(bytes)]));
+      const local = await this.local();
+      for (const path of Object.keys(local.files)) if (path.startsWith(prefix)) delete local.files[path];
+      Object.assign(local.files, staged);
       if ((await this.snapshot()).revision !== before.revision) throw new BrowserError('STALE_REVISION', 'Workspace changed during import preflight.');
       const journal:Journal={id:crypto.randomUUID(),state:'INTENT',kind:'IMPORT',paths:Object.keys(staged),baseRevision:before.revision,createdAt:Date.now()}; const journalKey=`${this.prefix}:journal:${journal.id}`;
       await this.store.set(journalKey,journal); // Durable intent precedes the cache manifest pointer.
@@ -187,7 +208,8 @@ export class VirtualFileSystem {
       catch(error) {
         journal.state=error instanceof BrowserError&&error.code==='QUOTA_EXCEEDED'?'REJECTED':'UNKNOWN';
         try { await this.store.set(journalKey,journal); } catch { throw new BrowserError('EFFECT_UNKNOWN','Import publication failed and its terminal journal could not be persisted.','Inspect the retained intent and current imports without replaying publication.'); }
-        throw error;
+        if (journal.state === 'REJECTED') throw error;
+        throw new BrowserError('EFFECT_UNKNOWN', 'Import manifest publication is uncertain; retained journal requires reconciliation.');
       }
       try {
         const after=await this.snapshot(); const expectedFiles={...before.files}; for(const path of Object.keys(expectedFiles))if(path.startsWith(`imports/${id}/`))delete expectedFiles[path]; for(const [path,value]of Object.entries(staged))expectedFiles[path]=base64ToBytes(value);
