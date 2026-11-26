@@ -744,14 +744,34 @@ export class BrowserController {
           !knownNoEffect.includes(code ?? "") &&
           toolByName.get(envelope.tool)?.mutating);
       const partial = e.effectState === "PARTIAL";
+      // Only expose bounded, code-authored public API errors. Never forward
+      // arbitrary native/preview/provider messages, source, URLs or tokens.
+      const message = envelope.tool === 'fetch_generator' &&
+        typeof (error as {message?:unknown}).message === 'string' &&
+        /^(?:Public (?:metadata|asset|generator|source|manifest)|Use a canonical public)/.test((error as Error).message)
+          ? `fetch_generator/public-api: ${(error as Error).message.slice(0,260)}`
+          : code === 'UNSUPPORTED_INTERFACE' && envelope.tool === 'save_generator'
+            ? 'Save is disabled until gateway policy, native adapter acceptance and independent saved-source verification all pass.'
+            : code === 'STALE_REVISION'
+              ? 'Source revision changed; reread the affected state before a new operation.'
+              : code === 'BINDING_MISMATCH'
+                ? 'Bound Generator, Draft or native preview identity no longer matches.'
+                : code === 'INVALID_INPUT'
+                  ? `Tool input or provider response failed validation for ${envelope.tool}; no untrusted details are returned.`
+                  : code === 'UNSUPPORTED_INTERFACE'
+                    ? `A required verified native interface is unavailable for ${envelope.tool}.`
+                    : code === 'PROVIDER_REJECTED'
+                      ? `Public/provider operation ${envelope.tool} was rejected; inspect public API stage and network policy.`
+                      : code === 'NATIVE_CONFLICT'
+                        ? 'A native snapshot/manifest/preview readback differs from the intended revision.'
+                        : 'Operation could not be completed; inspect its code, effect state and Workspace before further changes.';
       result = {
         operationId: envelope.operationId,
         status: partial ? "PARTIAL" : unknown ? "UNKNOWN" : "REJECTED",
         effectState: partial ? "PARTIAL" : unknown ? "POSSIBLE" : "NONE",
         error: {
           code: code ?? "EFFECT_UNKNOWN",
-          message:
-            "Tool did not complete. Inspect the operation and local source before retrying.",
+          message,
           retryable: false,
           recovery:
             "Use operation_status; reconcile uncertain effects before further writes.",
