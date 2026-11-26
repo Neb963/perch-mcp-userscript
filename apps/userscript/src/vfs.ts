@@ -58,9 +58,59 @@ export class VirtualFileSystem {
       return { status: 'SUCCEEDED', revision: after.revision, committed: writes.map(w => w.path) };
     } catch { journal.state = nativeWrites.length ? 'PARTIAL' : 'UNKNOWN'; await this.store.set(`${this.prefix}:journal:${journal.id}`, journal); return { status: journal.state, revision: before.revision, committed: nativeResult.committed, error: { code: 'PARTIAL_EFFECT', message: 'Commit or durable terminal record failed; preserve current state.', recovery: 'Inspect local journal and checkpoint. Do not replay uncertain writes.' } }; }
   }
-  async checkpoint(label = 'Checkpoint', pinned = false): Promise<{ id: string; revision: string }> { return this.createCheckpoint(label, pinned); }
-  private async createCheckpoint(label: string, pinned: boolean, snapshot?: WorkspaceSnapshot): Promise<{ id: string; revision: string }> { const source = snapshot ?? await this.snapshot(); const id = crypto.randomUUID(); const data: StoredSource = { version: 1, identity: source.identity, files: Object.fromEntries(Object.entries(source.files).map(([path, bytes]) => [path, bytesToBase64(bytes)])), revision: source.revision, createdAt: Date.now(), label: label.slice(0, 200), pinned }; const encoded = utf8.encode(JSON.stringify(data)); const checkpoints = await this.checkpointList(); const retainedBytes = checkpoints.reduce((total, c) => total + c.bytes, 0); if (retainedBytes + encoded.length > this.maxBytes) throw new BrowserError('QUOTA_EXCEEDED', 'Checkpoint budget exhausted. Export or delete unpinned checkpoints before mutation.'); await this.chunks.put(`checkpoint:${id}`, encoded); await this.store.set(`${this.prefix}:checkpoint:${id}`, { id, revision: data.revision, createdAt: data.createdAt, label: data.label, pinned, bytes: encoded.length }); return { id, revision: source.revision }; }
-  async checkpointList(): Promise<{ id: string; revision: string; createdAt: number; label: string; pinned: boolean; bytes: number }[]> { const result = []; for (const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:checkpoint:`))) { const item = await this.store.get<{ id: string; revision: string; createdAt: number; label: string; pinned: boolean; bytes: number }>(key); if (item) result.push(item); } return result.sort((a, b) => b.createdAt - a.createdAt); }
+  async checkpoint(label = 'Checkpoint', pinned = false): Promise<{
+    id: string; revision: string; sha256: string; bytes: number;
+    identity: NativeIdentity; pinned: boolean; fileCount: number; sourceBytes: number;
+  }> { return this.createCheckpoint(label, pinned); }
+
+  private async createCheckpoint(label: string, pinned: boolean, snapshot?: WorkspaceSnapshot): Promise<{
+    id: string; revision: string; sha256: string; bytes: number;
+    identity: NativeIdentity; pinned: boolean; fileCount: number; sourceBytes: number;
+  }> {
+    const source = snapshot ?? await this.snapshot();
+    const id = crypto.randomUUID();
+    const entries = Object.entries(source.files);
+    const sourceBytes = entries.reduce((sum,[,bytes]) => sum + bytes.length, 0);
+    const data: StoredSource = {
+      version: 1, identity: source.identity,
+      files: Object.fromEntries(entries.map(([path,bytes]) => [path,bytesToBase64(bytes)])),
+      revision: source.revision, createdAt: Date.now(), label: label.slice(0,200), pinned,
+    };
+    const encoded = utf8.encode(JSON.stringify(data));
+    const sha256 = await digest(encoded);
+    const checkpoints = await this.checkpointList();
+    const retainedBytes = checkpoints.reduce((sum,row) => sum + row.bytes, 0);
+    if (retainedBytes + encoded.length > this.maxBytes)
+      throw new BrowserError('QUOTA_EXCEEDED',
+        'Checkpoint budget exhausted. Export or delete unpinned checkpoints before mutation.');
+    await this.chunks.put(`checkpoint:${id}`, encoded);
+    const observed = await this.chunks.get(`checkpoint:${id}`);
+    if (!observed || await digest(observed) !== sha256)
+      throw new BrowserError('STORAGE_CORRUPT',
+        'Checkpoint bytes did not survive readback. Source unchanged; do not rely on this checkpoint.');
+    await this.store.set(`${this.prefix}:checkpoint:${id}`,{
+      id,revision:data.revision,createdAt:data.createdAt,label:data.label,
+      pinned,bytes:encoded.length,sha256,fileCount:entries.length,sourceBytes,
+    });
+    return {id,revision:source.revision,sha256,bytes:encoded.length,
+      identity:structuredClone(source.identity),pinned,fileCount:entries.length,sourceBytes};
+  }
+
+  async checkpointList(): Promise<{
+    id: string; revision: string; createdAt: number; label: string; pinned: boolean;
+    bytes: number; sha256?: string; fileCount?: number; sourceBytes?: number;
+  }[]> {
+    const result=[];
+    for(const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:checkpoint:`))){
+      const row=await this.store.get<{
+        id:string;revision:string;createdAt:number;label:string;
+        pinned:boolean;bytes:number;sha256?:string;fileCount?:number;sourceBytes?:number;
+      }>(key);
+      if(row)result.push(row);
+    }
+    return result.sort((a,b) => b.createdAt-a.createdAt);
+  }
+
   async restore(id: string, expectedRevision: string): Promise<MutationResult> { if (!/^[a-f0-9-]{36}$/.test(id)) throw new BrowserError('INVALID_INPUT', 'Invalid Checkpoint ID.'); const raw = await this.chunks.get(`checkpoint:${id}`); if (!raw) throw new BrowserError('FILE_NOT_FOUND', 'Checkpoint missing.'); const saved = JSON.parse(new TextDecoder().decode(raw)) as StoredSource; const before = await this.snapshot(); if (saved.version !== 1 || !equalIdentity(saved.identity, before.identity)) throw new BrowserError('BINDING_MISMATCH', 'Checkpoint belongs to another generator or draft.'); const paths = new Set([...Object.keys(before.files), ...Object.keys(saved.files)]); const writes = [...paths].filter(path => !path.startsWith('imports/')).map(path => ({ path, bytes: saved.files[path] === undefined ? null : base64ToBytes(saved.files[path]!) })); return this.writeBatch(writes, expectedRevision); }
   /** Trusted public-source adapter only. Agent write tools cannot mutate this revision-pinned cache. */
   async importSnapshot(id: string, files: Record<string, Uint8Array>, expectedRevision?: string): Promise<{ revision: string; paths: string[]; sha256: string }> {
