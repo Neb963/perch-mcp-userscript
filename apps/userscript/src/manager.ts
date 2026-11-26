@@ -291,6 +291,7 @@ export async function buildDiagnosticReport(
       method: ["GET", "POST", "PATCH", "PUT", "DELETE"].includes(str(event.method)) ? event.method : "other",
       route: /^\/(?:api\/v1\/(?:admin|tab)\/|health$)/.test(str(event.route))
         ? str(event.route).split("?")[0]!.slice(0, 120)
+            .replace(/\/(workspaces|agents|approvals|grants|resources)\/[^/]+/g, "/$1/:id")
             .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ":id")
         : "redacted",
       status: num(event.status),
