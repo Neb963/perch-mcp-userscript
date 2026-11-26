@@ -235,6 +235,8 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
       token_endpoint_auth_method: "none",
     },
     "",
+    "POST",
+    { Origin: "https://chatgpt.com" },
   );
   const client = (await registration.json()) as { client_id: string };
   assert.equal(registration.status, 201, JSON.stringify(client));
@@ -252,7 +254,7 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
     code_challenge_method: "S256",
     resource: String(a.endpoint),
   });
-  const authorize = await request("/authorize?" + params, undefined, "");
+  const authorize = await request("/authorize?" + params, undefined, "", "GET", { Origin: "https://chatgpt.com" });
   const page = await authorize.text();
   assert.equal(authorize.status, 200, page);
   const approvalId = /name="id" value="([^"]+)"/.exec(page)?.[1];
@@ -293,7 +295,7 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
   assert.equal(callback.searchParams.get("iss"), base);
   const exchange = await mf.dispatchFetch(base + "/token", {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: "https://chatgpt.com" },
     body: new URLSearchParams({
       grant_type: "authorization_code",
       client_id: client.client_id,
@@ -592,4 +594,31 @@ test("CORS accepts exact editor origin and rejects opaque/hostile origins", asyn
     Origin: "null",
   });
   assert.equal(opaque.status, 403);
+});
+
+test("ChatGPT public OAuth/MCP CORS is allowed without exposing private management routes", async () => {
+  const origin = "https://chatgpt.com";
+  const publicPaths = ["/authorize", "/register", "/token", "/.well-known/oauth-authorization-server", "/mcp/" + a.id, "/.well-known/oauth-protected-resource/mcp/" + a.id];
+  for (const path of publicPaths) {
+    const response = await mf.dispatchFetch(base + path, {
+      method: "OPTIONS",
+      headers: { Origin: origin, "Access-Control-Request-Method": "POST" },
+    });
+    assert.equal(response.status, 204, path);
+    assert.equal(response.headers.get("Access-Control-Allow-Origin"), origin, path);
+  }
+  for (const path of ["/api/v1/admin/state", "/api/v1/admin/approvals", "/api/v1/tab/claim", "/authorize/complete"]) {
+    const response = await mf.dispatchFetch(base + path, {
+      method: "OPTIONS",
+      headers: { Origin: origin, "Access-Control-Request-Method": "POST" },
+    });
+    assert.equal(response.status, 403, "private route " + path);
+    assert.equal(response.headers.get("Access-Control-Allow-Origin"), null);
+    assert.equal((await response.json() as { code: string }).code, "SCOPE_DENIED");
+  }
+  const hostile = await mf.dispatchFetch(base + "/token", {
+    method: "OPTIONS",
+    headers: { Origin: "https://evil.example", "Access-Control-Request-Method": "POST" },
+  });
+  assert.equal(hostile.status, 403);
 });
