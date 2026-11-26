@@ -31,7 +31,7 @@ test("complete public snapshot verifies exact binary and zero bytes without cred
     calls.every((c) => c.credentials === "omit" && c.redirect === "error"),
   );
 });
-test("saved revision drift or incomplete manifest rejects instead of returning partial success", async () => {
+test("saved revision drift rejects; absent manifest is explicitly panels-only, never a complete backup", async () => {
   let n = 0;
   const f = (async (url: string | URL | Request) =>
     String(url).includes("getGeneratorPageData")
@@ -48,13 +48,14 @@ test("saved revision drift or incomplete manifest rejects instead of returning p
     readPublicGenerator("fixture", f),
     (e) => (e as { code: string }).code === "STALE_REVISION",
   );
-  await assert.rejects(
-    readPublicGenerator("fixture", (async () =>
-      Response.json({
-        status: "success",
-        generator: { ...generator, srcManifest: undefined },
-      })) as typeof fetch),
-  );
+  const partial = await readPublicGenerator("fixture", (async () =>
+    Response.json({
+      status: "success",
+      generator: { ...generator, srcManifest: undefined },
+    })) as typeof fetch);
+  assert.equal(partial.completeness, 'panels-only');
+  assert.equal(partial.missingManifest, true);
+  assert.deepEqual(Object.keys(partial.files).sort(), ['index.html','main.pjs']);
 });
 
 test('realistic public API envelope without status and string-key srcManifest fetches complete snapshot',async()=>{
