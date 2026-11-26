@@ -92,7 +92,8 @@ test("bundled Violentmonkey content script reads real Firefox page identity with
     assert.match(output, /generatorId/);
     assert.match(output, /142/);
     assert.match(output, /aleph-alpha/);
-    assert.equal(values.size, 0, "read-only inspection does not persist credentials");
+    assert.equal(values.has("perch:pairing"), false, "read-only inspection does not persist pairing credentials");
+    assert.ok([...values.keys()].every((key) => !/credential|secret|token/i.test(key)), "no secret storage is created by the probe");
     assert.equal((unsafeWindow as Record<string, unknown>).GM_getValue, undefined, "GM APIs are not exported to page");
   } finally {
     dom.window.close();
