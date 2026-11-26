@@ -69,6 +69,12 @@ export class GatewayTransport {
   }
   private pairing?: Pairing;
   private suggestedOrigin = "";
+  private lastGatewayPolicy?: { providerWritesEnabled: boolean; observedAt: number };
+  /** A last-observed policy is diagnostic only; Registry remains authoritative on every admission. */
+  gatewayPolicySnapshot(): {providerWritesEnabled: boolean|null; observedAt: number|null} {
+    return {providerWritesEnabled:this.lastGatewayPolicy?.providerWritesEnabled??null,
+      observedAt:this.lastGatewayPolicy?.observedAt??null};
+  }
   constructor(
     private readonly store: KeyValueStore,
     private readonly fetcher: typeof fetch = fetch,
@@ -108,7 +114,15 @@ export class GatewayTransport {
   async health(origin = this.pairing?.origin): Promise<unknown> {
     if (!origin)
       throw new TransportError("AUTH_REQUIRED", "Pair a gateway first.");
-    return this.send(gatewayOrigin(origin), "GET", "/health");
+    const target=gatewayOrigin(origin);
+    const response=await this.send(target, "GET", "/health");
+    if(target===this.pairing?.origin && response && typeof response==='object') {
+      const value=(response as Record<string,unknown>).providerWritesEnabled;
+      if(typeof value==='boolean')
+        this.lastGatewayPolicy={providerWritesEnabled:value,observedAt:Date.now()};
+      else this.lastGatewayPolicy=undefined;
+    }
+    return response;
   }
   async pair(origin: string, bootstrapSecret: string): Promise<void> {
     const approvedOrigin = gatewayOrigin(origin);
@@ -146,6 +160,7 @@ export class GatewayTransport {
     };
     await this.store.set("perch:pairing", next);
     this.pairing = next;
+    this.lastGatewayPolicy=undefined;
   }
   async request(
     method: string,
