@@ -690,22 +690,75 @@ async function route(
     await rpc(registry(env), "/internal/registration-budget", {});
   return authorizationServer.fetch(request, env, ctx as never);
 }
+type AuditRoute = "authorize" | "authorize_complete" | "token" | "register";
+function auditRoute(path: string): AuditRoute | null {
+  if (path === "/authorize") return "authorize";
+  if (path === "/authorize/complete") return "authorize_complete";
+  if (path === "/token") return "token";
+  if (path === "/register") return "register";
+  return null;
+}
+function originClass(request: Request): string {
+  const value = request.headers.get("origin");
+  if (!value) return "missing";
+  if (value === "null") return "null";
+  if (value === new URL(request.url).origin) return "same";
+  if (value === "https://perchance.org") return "perchance";
+  if (value === "https://chatgpt.com" || value === "https://chat.openai.com") return "chatgpt";
+  return "other";
+}
+function auditOAuth(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  status: number,
+  code: string,
+  traceId: string,
+): void {
+  const routeName = auditRoute(new URL(request.url).pathname);
+  if (!routeName || !["GET", "POST"].includes(request.method)) return;
+  // Audit is best effort; a logging outage must never prevent authorization.
+  // Do not persist raw URL, Origin, query, OAuth credentials, handles or bodies.
+  ctx.waitUntil(
+    rpc(registry(env), "/internal/diagnostic-event", {
+      route: routeName,
+      method: request.method,
+      originClass: originClass(request),
+      status,
+      code,
+      traceId,
+    }).then(() => undefined).catch(() => undefined),
+  );
+}
 export default {
   async fetch(
     request: Request,
     env: Env,
     ctx: ExecutionContext,
   ): Promise<Response> {
-    let issuer: string | null = env.ISSUER_URL ?? null;
+    const issuer: string | null = env.ISSUER_URL ?? null;
     try {
       if (!allowedOrigin(request, env, issuer))
         throw new ApiError("SCOPE_DENIED", "Origin is not allowed.", 403);
       if (request.method === "OPTIONS")
         return cors(new Response(null, { status: 204 }), request, env, issuer);
       const response = await route(request, env, ctx);
+      auditOAuth(
+        request, env, ctx, response.status,
+        response.status === 302 ? "COMPLETE" :
+          response.status >= 400 ? "HTTP_ERROR" : "PENDING_OR_INFO",
+        crypto.randomUUID(),
+      );
       return cors(response, request, env, issuer);
     } catch (error) {
-      return cors(errorResponse(error), request, env, issuer);
+      const traceId = crypto.randomUUID();
+      const response = errorResponse(error, traceId);
+      auditOAuth(
+        request, env, ctx, response.status,
+        error instanceof ApiError ? error.code : "INTERNAL_ERROR",
+        traceId,
+      );
+      return cors(response, request, env, issuer);
     }
   },
 };
