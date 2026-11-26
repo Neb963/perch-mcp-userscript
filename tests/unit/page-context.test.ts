@@ -24,7 +24,7 @@ test("Firefox wrapper on window is used when unsafeWindow has no page reference"
   );
 });
 
-test("unavailable page wrapper does not create synthetic identity or expose privileged callbacks", () => {
+test("unavailable page wrapper falls back without synthesizing identity", () => {
   const contentGlobal = { GM_getValue: () => "secret" };
   assert.equal(resolveNativePageRealm(contentGlobal, contentGlobal), contentGlobal);
   assert.equal(resolveNativePageRealm(contentGlobal, undefined), contentGlobal);
