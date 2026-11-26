@@ -315,6 +315,7 @@ export class Registry {
         paired: c.paired,
         configured: !!c.issuer,
         providerWritesEnabled: this.env.PROVIDER_WRITES_ENABLED === "true",
+        nativeActionsEnabled: this.env.NATIVE_ACTIONS_ENABLED === "true",
         protocolVersions: ["2026-07-28", "2025-11-25", "2025-06-18"],
       });
     }
@@ -993,7 +994,15 @@ export class Registry {
         "MEDIA",
         "PRODUCTION_RESTORE",
       ].some((p) => needed.includes(p)) &&
-      this.env.PROVIDER_WRITES_ENABLED !== "true"
+      this.env.PROVIDER_WRITES_ENABLED !== "true" &&
+      !(this.env.NATIVE_ACTIONS_ENABLED === "true" &&
+        (b.tool === "save_generator" && needed.includes("SAVE") ||
+         b.tool === "rename_generator" && needed.includes("RENAME") ||
+         b.tool === "set_listing" && needed.includes("LISTING")) &&
+        !needed.some(p=>[
+          "CREATE","DUPLICATE","DELETE","UPLOAD_PUBLIC",
+          "MEDIA","PRODUCTION_RESTORE",
+        ].includes(p)))
     )
       throw new ApiError(
         "UNSUPPORTED_INTERFACE",
