@@ -4,7 +4,7 @@ import type {
   DurableObjectStub,
   KVNamespace,
 } from "@cloudflare/workers-types";
-export const VERSION = "0.1.5";
+export const VERSION = "0.1.6";
 export const DEFAULT_PERMISSIONS = [
   "READ_SOURCE",
   "WRITE_SOURCE",
@@ -256,6 +256,8 @@ export interface Env {
   ISSUER_URL?: string;
   ALLOWED_ORIGINS?: string;
   PROVIDER_WRITES_ENABLED?: string;
+  /** Restricts external mutations to HAR-confirmed native Save/Rename/Listing. */
+  NATIVE_ACTIONS_ENABLED?: string;
   ELEVENLABS_API_KEY?: string;
   PAID_MEDIA_ENABLED?: string;
   REGISTRY_WORKSPACE_BUDGET?: string;
