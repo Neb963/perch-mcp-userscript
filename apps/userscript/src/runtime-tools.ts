@@ -487,7 +487,12 @@ export class RuntimeTools implements AdditionalTools {
         bytes: snapshot.bytes,
         count: snapshot.count,
         revisionChanged: false,
-        skipped: [],
+        completeness: snapshot.completeness,
+        missingManifest: snapshot.missingManifest,
+        source: 'public-api:getGeneratorPageData',
+        skipped: snapshot.missingManifest
+          ? [{ kind: 'src-manifest', reason: 'Public API did not supply a complete src manifest; imported panels only. Not a complete backup.' }]
+          : [],
       };
     }
     if (name === "read_image")
