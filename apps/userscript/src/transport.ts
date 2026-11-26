@@ -1,10 +1,20 @@
 import type { KeyValueStore } from "./native-types.js";
 
+export interface TransportDiagnostic {
+  at: number;
+  route: string;
+  method: string;
+  elapsedMs: number;
+  code: string;
+  status: number;
+  traceId?: string;
+}
 export class TransportError extends Error {
   constructor(
     readonly code: string,
     message: string,
     readonly status = 0,
+    readonly traceId?: string,
   ) {
     super(message);
     this.name = "TransportError";
@@ -49,6 +59,14 @@ export function gatewayOrigin(value: string): string {
 }
 /** Isolated-context fetch; redirect:error prevents credential forwarding BEFORE any redirect. */
 export class GatewayTransport {
+  private readonly recent: TransportDiagnostic[] = [];
+  diagnostics(): { schemaVersion: 1; events: TransportDiagnostic[] } {
+    return { schemaVersion: 1, events: this.recent.map((e) => ({ ...e })) };
+  }
+  private recordDiagnostic(event: TransportDiagnostic): void {
+    this.recent.push(event);
+    if (this.recent.length > 100) this.recent.splice(0, this.recent.length - 100);
+  }
   private pairing?: Pairing;
   private suggestedOrigin = "";
   constructor(
@@ -251,6 +269,39 @@ export class GatewayTransport {
     binary = false,
     options?: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<unknown> {
+    const started = Date.now();
+    // Only the bounded route template is recorded. Never record Origin
+    // headers, query strings, payloads, authentication headers or credentials.
+    const route = path.split("?")[0]!
+      .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ":id")
+      .slice(0, 120);
+    try {
+      const result = await this.sendInternal(origin, method, path, body, credential, binary, options);
+      this.recordDiagnostic({
+        at: started, method, route, elapsedMs: Date.now() - started,
+        status: 200, code: "OK",
+      });
+      return result;
+    } catch (error) {
+      const failure = error instanceof TransportError ? error : undefined;
+      this.recordDiagnostic({
+        at: started, method, route, elapsedMs: Date.now() - started,
+        status: failure?.status ?? 0,
+        code: failure?.code ?? "LOCAL_ERROR",
+        ...(failure?.traceId ? { traceId: failure.traceId } : {}),
+      });
+      throw error;
+    }
+  }
+  private async sendInternal(
+    origin: string,
+    method: string,
+    path: string,
+    body?: unknown,
+    credential?: string,
+    binary = false,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<unknown> {
     if (
       !path.startsWith("/") ||
       path.includes("..") ||
@@ -391,10 +442,14 @@ export class GatewayTransport {
           ? data.code
           : `HTTP_${response.status}`;
       // Server/provider text can contain source or secrets: expose stable code, not arbitrary raw messages.
+      const traceId = typeof data === "object" && data !== null &&
+        "traceId" in data && typeof data.traceId === "string" &&
+        /^[0-9a-f-]{36}$/.test(data.traceId) ? data.traceId : undefined;
       throw new TransportError(
         code,
         `Gateway rejected the request (${code}). Refresh authoritative state before retrying.`,
         response.status,
+        traceId,
       );
     }
     return data;
