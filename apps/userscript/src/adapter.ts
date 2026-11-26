@@ -27,6 +27,36 @@ export class NativeAdapter {
     if (!identity.generatorId || !identity.slug) throw new BrowserError('BINDING_MISMATCH', 'Unsaved/provisional generator identity cannot inherit template ownership.');
     return identity;
   }
+  /**
+   * Only project public, explicitly recognized editor metadata. A writable
+   * CodeMirror buffer is not proof of generator ownership or Save permission.
+   * Unknown listing/ownership must remain unknown, never default to false.
+   */
+  generatorMetadata(): {
+    ownership: { known: boolean; owned: boolean | null };
+    editAccess: { known: boolean; allowed: boolean | null };
+    listing: { known: boolean; value: 'listed' | 'unlisted' | null };
+  } {
+    const app = this.page.app;
+    const owned = typeof app?.userOwnsThisGenerator === 'boolean'
+      ? app.userOwnsThisGenerator : null;
+    let allowed: boolean | null = null;
+    try {
+      const access = app?.userCanSaveThisGenerator?.();
+      if (typeof access === 'boolean') allowed = access;
+    } catch { /* A failing native predicate cannot establish authority. */ }
+    const generator = app?.data?.generator as Record<string, unknown> | undefined;
+    const explicitListing = generator?.listing;
+    const listed = explicitListing === 'listed' || explicitListing === 'unlisted'
+      ? explicitListing
+      : typeof generator?.isListed === 'boolean'
+        ? (generator.isListed ? 'listed' : 'unlisted') : null;
+    return {
+      ownership: { known: owned !== null, owned },
+      editAccess: { known: allowed !== null, allowed },
+      listing: { known: listed !== null, value: listed },
+    };
+  }
   bind(identity: NativeIdentity): void { this.boundIdentity = structuredClone(identity); }
   async assertIdentity(): Promise<NativeIdentity> { const identity = await this.identity(); if (this.boundIdentity && !equalIdentity(identity, this.boundIdentity)) throw new BrowserError('BINDING_MISMATCH', 'Generator or Draft changed; explicit rebind is required.'); return identity; }
   async probe(): Promise<CapabilityReport> {
