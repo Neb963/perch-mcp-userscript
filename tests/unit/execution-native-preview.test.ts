@@ -99,6 +99,12 @@ test('PreviewAdapter native refresh attests panel/manifest receipts and makes co
  };
  assert.equal(receipt.previewRevision,'r1');
  assert.equal(receipt.diagnosticScope.syntaxErrorsUnavailable,true);
+ const readiness=(receipt as unknown as {nativeReadiness:Record<string,boolean>}).nativeReadiness;
+ assert.equal(readiness.exactFrameOrigin,true);
+ assert.equal(readiness.nativeManifestAvailable,true);
+ assert.equal(readiness.nativeHardReloadAvailable,true);
+ assert.ok(Object.values(readiness).every(value=>typeof value==='boolean'));
+ assert.ok(!JSON.stringify(readiness).includes(publicId));
  assert.equal(receipt.diagnosticScope.consoleCaptureRequiresInstrumentedRefresh,false);
  assert.equal(receipt.diagnosticsAvailability.console,'captured');
 });
