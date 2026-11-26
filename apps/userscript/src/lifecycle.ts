@@ -65,7 +65,21 @@ export class NativeLifecycle {
       const button=await this.listingButton(args.listing);
       return async()=>{if(!button.isConnected || button.disabled)throw new BrowserError('UNSUPPORTED_INTERFACE','Native listing menu closed before dispatch.');button.click();return undefined;};
     }
-    if(typeof this.page.app?.openSettingsModal!=='function')throw new BrowserError('UNSUPPORTED_INTERFACE','Native settings opener unavailable.');await this.page.app.openSettingsModal();const settings=this.page.settingsModal;if(!settings)throw new BrowserError('UNSUPPORTED_INTERFACE','Native settings object unavailable.');
+    if(typeof this.page.app?.openSettingsModal!=='function')throw new BrowserError('UNSUPPORTED_INTERFACE','Native settings opener unavailable.');
+    await this.page.app.openSettingsModal();
+    // The native opener schedules appExtras loading asynchronously and
+    // returns before settingsModal exists. Wait for the exact native controls.
+    let settings:NativeSettings|undefined;
+    const readyBy=Date.now()+5000;
+    for(;;) {
+      settings=this.page.settingsModal;
+      if(settings && (tool!=='rename_generator' ||
+        (typeof settings.changeGeneratorName==='function' &&
+         !!settings.refs?.newGeneratorName)))break;
+      if(Date.now()>=readyBy)
+        throw new BrowserError('UNSUPPORTED_INTERFACE','Native settings controls did not become ready.');
+      await new Promise<void>(resolve=>setTimeout(resolve,75));
+    }
     if(tool==='rename_generator'){if(typeof args.newName!=='string'||!/^[a-z0-9][a-z0-9-]{3,99}$/.test(args.newName) && args.newName!=='hub')throw new BrowserError('INVALID_INPUT','Native URL requires 4–100 lower-case letters, digits or hyphens (except hub).');const input=settings.refs?.newGeneratorName;if(!input||input.disabled||typeof settings.changeGeneratorName!=='function')throw new BrowserError('UNSUPPORTED_INTERFACE','Native rename field/method unavailable.');const name=args.newName;return async()=>{input.value=name;return settings.changeGeneratorName!();};}
     if(tool==='duplicate_generator'){if(args.name!==undefined&&(typeof args.name!=='string'||!/^[a-z0-9][a-z0-9-]{0,99}$/.test(args.name)))throw new BrowserError('INVALID_INPUT','Invalid duplicate Slug.');if(typeof settings.duplicateGenerator!=='function')throw new BrowserError('UNSUPPORTED_INTERFACE','Verified native duplicate control unavailable.');if(args.name!==undefined&&!settings.refs?.duplicateGeneratorName)throw new BrowserError('UNSUPPORTED_INTERFACE','Native duplicate name field unavailable.');return async()=>{if(typeof args.name==='string')settings.refs!.duplicateGeneratorName!.value=args.name;const result=await settings.duplicateGenerator!();if(result===undefined){const href=settings.refs?.duplicateGeneratorStatus?.querySelector('a[href]')?.getAttribute('href');const match=typeof href==='string'?/^\/([a-z0-9][a-z0-9-]{0,99})#edit$/.exec(href):null;if(match)return{status:'native-control-returned',name:match[1]};}return result;};}
     if(tool==='delete_generator'){if(typeof settings.deleteGenerator!=='function')throw new BrowserError('UNSUPPORTED_INTERFACE','Verified native delete control unavailable.');return async()=>settings.deleteGenerator!();}
