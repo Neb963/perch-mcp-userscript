@@ -151,7 +151,9 @@ export class Registry {
       const notice = this.db.get<{
         expires: number;
         phase: string;
-        event?: { resolution?: unknown; tool?: unknown };
+        event?: { resolution?: unknown; tool?: unknown;
+          workspaceId?: unknown; operationId?: unknown; bindingRevision?: unknown;
+          phase?: unknown; epoch?: unknown };
       }>(key);
       if (
         notice.expires < now &&
@@ -159,6 +161,23 @@ export class Registry {
           notice.event?.resolution ||
           notice.event?.tool === "set_viewport_size")
       ) {
+        // Retention must not erase the only evidence needed to release a
+        // v0.1.4 legacy viewport reservation. Reap by exact identity first.
+        const event=notice.event;
+        if (event?.tool==="set_viewport_size" &&
+            ["PARTIAL","UNKNOWN"].includes(notice.phase) &&
+            event.phase===notice.phase &&
+            typeof event.workspaceId==="string" &&
+            typeof event.operationId==="string" &&
+            Number.isSafeInteger(event.bindingRevision) &&
+            Number.isSafeInteger(event.epoch)) {
+          const w=this.db.get<WorkspaceRecord>("workspace/"+event.workspaceId);
+          const key="reservation/"+(w?.binding?.generatorId??"");
+          const held=this.db.get<{workspaceId:string;operationId:string}>(key);
+          if(w?.binding && w.bindingRevision===event.bindingRevision &&
+             held?.workspaceId===w.id && held.operationId===event.operationId)
+            this.db.delete(key);
+        }
         this.db.delete(key);
         if (notice.event?.resolution)
           this.db.delete(key.replace("terminal-notice/", "resolution/"));
