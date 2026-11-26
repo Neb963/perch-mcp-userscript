@@ -667,6 +667,10 @@ async function route(
       return html(
         "<h1>Authorization could not complete</h1><p>The provisional Grant was revoked. Restart authorization from ChatGPT.</p>",
       );
+    if (result.state === "revoked")
+      return html(
+        "<h1>Authorization revoked</h1><p>The Workspace Grant is no longer active. Restart authorization from ChatGPT after checking the Workspace binding.</p>",
+      );
     if (result.state === "pending")
       // Preserve the one-time authorization handle so an early click can be
       // retried in place; never require browser Back or a new OAuth flow.
@@ -687,7 +691,7 @@ async function route(
       );
     if (result.state !== "approved" || !result.request || !result.props)
       return html(
-        "<h1>Authorization denied or consumed</h1><p>Start connector authorization again if needed.</p>",
+        "<h1>Authorization no longer recoverable</h1><p>This code was issued by an older release, denied or expired. Start a fresh connector authorization in ChatGPT. No duplicate Grant will be issued.</p>",
       );
     const approval = {
       id: form.get("id"),
