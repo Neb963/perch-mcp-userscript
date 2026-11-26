@@ -81,7 +81,7 @@ test('preview diagnostics export exact failure codes and timing but never user J
  });
  const previous=client.diagnostics!;
  client.diagnostics=()=>({
-  ...previous(),
+  ...(previous() as Record<string, unknown>),
   preview:{previewEvents:[
     {at:1795715000000,tool:'page_eval',durationMs:4100,outcome:'error',code:'UNSUPPORTED_INTERFACE',
      js:'LEAK-ME-js-body',privateConsole:'LEAK-ME-console'},
