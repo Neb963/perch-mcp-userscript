@@ -16,3 +16,13 @@ The default policy includes source read/write, preview control and Resource read
 The pinned official SDK v2.4.0 serves the `2026-07-28` per-request profile and the `2025-11-25` / `2025-06-18` legacy profiles. These wire formats and mismatch rejection pass local Worker integration tests. Unsupported or mismatched protocol versions fail explicitly. Real ChatGPT, Claude and Gemini connector compatibility remains an external acceptance gate; their current account UI and plan availability were not verified.
 
 No optional URL bearer-token mode is enabled. The OAuth client owns its access/refresh tokens; the manager never displays them. Do not paste a management credential into a connector.
+
+## ChatGPT OAuth troubleshooting and verified rollout (v0.1.2)
+
+The Cloudflare Worker **and** the Violentmonkey userscript must be updated. If Git-connected auto-deployment is enabled, verify it succeeded instead of creating a second Worker or destroying the existing KV namespace. Open `https://YOUR-WORKER.workers.dev/health` and confirm `version: "0.1.2"`. Install the matching v0.1.2 `perch-mcp.user.txt` using Violentmonkey and reload the Perchance editor. Existing pairing, Workspace bindings, and library contents remain unchanged.
+
+Start a **new** ChatGPT OAuth authorization after upgrading; any five-minute code from the old build is expired. Keep Perch MCP → Agents open: pending authorizations poll automatically every four seconds. Verify the Agent, Workspace, client, callback and code before selecting `Approve exact request`, then return to ChatGPT's authorization page and choose `Continue after approval`. If Continue is pressed too early, the gateway provides a `Check approval again` button rather than losing the one-time authorization handle.
+
+The gateway allows the exact ChatGPT web origin on the **public OAuth/MCP** protocol endpoints; it does not allow ChatGPT access to private `/api/v1/admin/` or `/api/v1/tab/` routes. Browser/OAuth clients must still complete PKCE, exact approval and bound Grant checks. No raw bearer secrets belong in URLs.
+
+A Gateway error on a read-only GET may be retried automatically once; ambiguous management writes are never replayed. Distinct `GATEWAY_TIMEOUT` and `GATEWAY_UNAVAILABLE` diagnostics identify timeout versus connectivity/CORS/CSP failure. On failure, check the browser Console and the deployed Worker version before reauthorizing. The previous Cloudflare `OAUTH_KV` resource should be reused in upgrades—never delete it to fix a failed build.

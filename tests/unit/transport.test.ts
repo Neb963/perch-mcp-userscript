@@ -76,3 +76,36 @@ test("network and hostile gateway errors do not leak credentials/provider messag
       e.message.includes("REVOKED"),
   );
 });
+
+test("transient management GET retries safely, while a failed POST never replays", async () => {
+  const store = new MemoryStore();
+  await store.set("perch:pairing", {
+    schemaVersion: 1,
+    origin: "https://perch.example.workers.dev",
+    adminCredential: "local-management-secret",
+    executionCredential: "local-execution-secret",
+    browserInstallationId: "local",
+  });
+  let calls = 0;
+  const transport = new GatewayTransport(store, (async () => {
+    calls++;
+    if (calls === 1) throw new TypeError("synthetic connectivity glitch");
+    return Response.json({ items: [], revision: 1 });
+  }) as typeof fetch);
+  await transport.initialize();
+  const approvals = await transport.request("GET", "/api/v1/admin/approvals") as { items: unknown[] };
+  assert.deepEqual(approvals.items, []);
+  assert.equal(calls, 2);
+  const rejected = new GatewayTransport(store, (async () => {
+    calls++;
+    throw new TypeError("synthetic failure");
+  }) as typeof fetch);
+  await rejected.initialize();
+  await assert.rejects(
+    rejected.request("POST", "/api/v1/admin/approvals/someid/decision", {
+      decision: "approve",
+    }),
+    (error: unknown) => error instanceof Error && error.message.includes("never automatically retried"),
+  );
+  assert.equal(calls, 3, "mutating POST must not be retried");
+});

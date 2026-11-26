@@ -288,28 +288,48 @@ export class GatewayTransport {
     if (credential) headers.set("Authorization", `Bearer ${credential}`);
     if (!["GET", "HEAD"].includes(method))
       headers.set("Idempotency-Key", crypto.randomUUID());
-    let response: Response;
-    try {
-      response = await this.fetcher(url, {
-        method,
-        headers,
-        body: encoded,
-        credentials: "omit",
-        redirect: "error",
-        cache: "no-store",
-        referrerPolicy: "no-referrer",
-        signal: options?.signal
-          ? AbortSignal.any([
-              options.signal,
-              AbortSignal.timeout(options.timeoutMs ?? 30000),
-            ])
-          : AbortSignal.timeout(options?.timeoutMs ?? 30000),
-      });
-    } catch {
-      throw new TransportError(
-        "GATEWAY_UNAVAILABLE",
-        "Gateway request failed. Check gateway origin, CORS, CSP and connectivity; uncertain writes require reconciliation.",
-      );
+    let response!: Response;
+    // Only idempotent GETs may be retried. Never automatically replay a
+    // management write, tab operation or an uncertain OAuth-related effect.
+    const attempts = method === "GET" && !binary ? 2 : 1;
+    const defaultTimeoutMs = method === "GET" && !binary ? 15000 : 30000;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        response = await this.fetcher(url, {
+          method,
+          headers,
+          body: encoded,
+          credentials: "omit",
+          redirect: "error",
+          cache: "no-store",
+          referrerPolicy: "no-referrer",
+          signal: options?.signal
+            ? AbortSignal.any([
+                options.signal,
+                AbortSignal.timeout(options.timeoutMs ?? defaultTimeoutMs),
+              ])
+            : AbortSignal.timeout(options?.timeoutMs ?? 15000),
+        });
+        break;
+      } catch (error) {
+        if (options?.signal?.aborted)
+          throw new TransportError(
+            "CANCELLED",
+            "The request was cancelled. Do not replay any uncertain write.",
+          );
+        if (attempt + 1 < attempts) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 300));
+          continue;
+        }
+        const timedOut = error instanceof Error &&
+          (error.name === "TimeoutError" || error.name === "AbortError");
+        throw new TransportError(
+          timedOut ? "GATEWAY_TIMEOUT" : "GATEWAY_UNAVAILABLE",
+          timedOut
+            ? "Gateway read timed out. Only safe read-only requests were retried. Refresh and check Cloudflare health."
+            : "Gateway connection was rejected or interrupted. Check browser Console for a blocked CORS/CSP request, then verify Cloudflare health. Writes are never automatically retried.",
+        );
+      }
     }
     if (response.url && new URL(response.url).origin !== origin)
       throw new TransportError(

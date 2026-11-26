@@ -43,14 +43,24 @@ interface Configuration {
   paired: boolean;
   resources: string[];
 }
-function allowedOrigin(
+/**
+ * Privileged installation routes remain Perchance-origin-only.
+ *
+ * OAuth discovery, registration, authorization and token exchange (and MCP
+ * resource requests) are intentionally cross-origin protocols. ChatGPT web
+ * clients can send Origin: https://chatgpt.com. That origin is not an
+ * authorization credential: OAuth PKCE, Grant checks and bearer validation
+ * remain authoritative. Allow the known client origins on public endpoints
+ * only, not on admin/tab/approval management routes.
+ */
+export function allowedOrigin(
   request: Request,
   env: Env,
   issuer?: string | null,
 ): boolean {
   const o = request.headers.get("origin");
   if (!o) return true;
-  return (
+  if (
     o === "https://perchance.org" ||
     o === issuer ||
     o === new URL(request.url).origin ||
@@ -59,7 +69,17 @@ function allowedOrigin(
       .map((s) => s.trim())
       .filter(Boolean)
       .includes(o)
-  );
+  ) return true;
+  const pathname = new URL(request.url).pathname;
+  const publicProtocolPath =
+    pathname === "/authorize" ||
+    pathname === "/register" ||
+    pathname === "/token" ||
+    pathname === "/revoke" ||
+    pathname.startsWith("/.well-known/") ||
+    /^\/mcp\/[a-zA-Z0-9_-]+$/.test(pathname);
+  return publicProtocolPath &&
+    (o === "https://chatgpt.com" || o === "https://chat.openai.com");
 }
 function cors(
   response: Response,
@@ -477,7 +497,7 @@ async function route(
       scope: string[];
     }>(registry(env), "/internal/oauth/pending", { request: auth });
     return html(
-      "<h1>Approve in Perch MCP</h1><p>Open the userscript manager and match code <code>" +
+      "<h1>Approve in Perch MCP</h1><p>Open Perch MCP → Agents in the Perchance editor and match code <code>" +
         escape(pending.code) +
         "</code>.</p><dl><dt>Agent</dt><dd>" +
         escape(pending.agentLabel) +
@@ -558,18 +578,35 @@ async function route(
         "INVALID_INPUT",
         "Exact authorization handle required.",
       );
-    const result = await rpc<{
+    let result: {
       state: string;
       request?: AuthRequest;
       grant?: { id: string; permissions: string[] };
       props?: AuthProps;
-    }>(registry(env), "/internal/oauth/consume", {
-      id: form.get("id"),
-      handle: form.get("handle"),
-    });
+    };
+    try {
+      result = await rpc<typeof result>(registry(env), "/internal/oauth/consume", {
+        id: form.get("id"),
+        handle: form.get("handle"),
+      });
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "EXPIRED")
+        return html(
+          "<h1>Authorization expired</h1><p>The five-minute approval window has closed. Restart connector authorization from ChatGPT; do not retry an expired code.</p>",
+        );
+      throw error;
+    }
     if (result.state === "pending")
+      // Preserve the one-time authorization handle so an early click can be
+      // retried in place; never require browser Back or a new OAuth flow.
       return html(
-        "<h1>Approval pending</h1><p>Approve the exact request in the userscript manager, then use Back and Continue.</p>",
+        '<h1>Approval pending</h1><p>Open Perch MCP → Agents and approve the matching request. Return here and check again.</p>' +
+          '<form method="POST" action="/authorize/complete"><input type="hidden" name="id" value="' +
+          escape(form.get("id") ?? "") +
+          '"><input type="hidden" name="handle" value="' +
+          escape(form.get("handle") ?? "") +
+          '"><button type="submit">Check approval again</button></form>' +
+          "<p>Requests expire five minutes after they are created.</p>",
       );
     if (result.state === "denied" && result.request)
       return Response.redirect(
