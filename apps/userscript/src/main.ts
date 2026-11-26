@@ -111,6 +111,7 @@ async function start(): Promise<void> {
     diagnostics: () => ({
       ...transport.diagnostics(),
       browser: controller.diagnostics(),
+      preview: runtime.diagnostics(),
     }),
     promptSecret: async (purpose) => {
       if (typeof GM_info === "undefined" || GM_info.injectInto !== "content")
