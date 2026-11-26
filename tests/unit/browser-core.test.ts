@@ -6,7 +6,7 @@ import { VirtualFileSystem } from '../../apps/userscript/src/vfs.js';
 import { SourceTools, parsePatch } from '../../apps/userscript/src/source-tools.js';
 import { ChunkStore, MemoryStore } from '../../apps/userscript/src/storage.js';
 import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, copyArrayBuffer, decodeText, equalBytes, isUint8Array, utf8, type NativeSnapshot } from '../../apps/userscript/src/native-types.js';
-function fixture(){let pjs='animal\n  otter\n';let html='<h1>Fixture</h1>\n';let draft='';const files=new Map<string,Uint8Array>([['empty.bin',new Uint8Array()],['bytes.bin',new Uint8Array([0,255,1,128,10])]]);const page={app:{data:{generator:{id:123,name:'fixture',publicId:'public-fixture'}},userOwnsThisGenerator:true,saveGenerator:async()=>({status:'saved'})},modelTextEditor:{state:{readOnly:false},getValue:()=>pjs,setValue:(v:string)=>{pjs=v;},isClean:()=>false},outputTemplateEditor:{state:{readOnly:false},getValue:()=>html,setValue:(v:string)=>{html=v;},isClean:()=>false},srcState:{ready:async()=>{},idle:async()=>{},getDraftId:()=>draft,list:()=>Object.fromEntries([...files.entries()].map(([path,bytes])=>[path,{size:bytes.length}])),readFile:(path:string)=>files.get(path)!,writeFile:(path:string,bytes:Uint8Array)=>{files.set(path,bytes.slice());},deleteFile:(path:string)=>{files.delete(path);},isDirty:()=>true,hasPending:()=>false},aiAgentActivityState:()=>({active:false,unknown:false,reason:'',queueHeldOnly:false}),__aiGeneratorGuard:{blocked:()=>false},__editorReady:true,__draftChoiceSettled:true,currentInterfaceMode:'edit',perchanceSaveState:'unsaved'};const adapter=new NativeAdapter(page);const store=new MemoryStore();const vfs=new VirtualFileSystem(adapter,store,'fixture');return{page,files,adapter,vfs,store,tools:new SourceTools(vfs,adapter),manualPjs:(v:string)=>{pjs=v;},switchDraft:(v:string)=>{draft=v;}};}
+function fixture(){let pjs='animal\n  otter\n';let html='<h1>Fixture</h1>\n';let draft='';const files=new Map<string,Uint8Array>([['empty.bin',new Uint8Array()],['bytes.bin',new Uint8Array([0,255,1,128,10])]]);const page={userOwnsThisGenerator:true,userCanSaveThisGenerator:()=>true,app:{data:{generator:{id:123,name:'fixture',publicId:'public-fixture'}},userOwnsThisGenerator:true,saveGenerator:async()=>({status:'saved'})},modelTextEditor:{state:{readOnly:false},getValue:()=>pjs,setValue:(v:string)=>{pjs=v;},isClean:()=>false},outputTemplateEditor:{state:{readOnly:false},getValue:()=>html,setValue:(v:string)=>{html=v;},isClean:()=>false},srcState:{ready:async()=>{},idle:async()=>{},getDraftId:()=>draft,list:()=>Object.fromEntries([...files.entries()].map(([path,bytes])=>[path,{size:bytes.length}])),readFile:(path:string)=>files.get(path)!,writeFile:(path:string,bytes:Uint8Array)=>{files.set(path,bytes.slice());},deleteFile:(path:string)=>{files.delete(path);},isDirty:()=>true,hasPending:()=>false},aiAgentActivityState:()=>({active:false,unknown:false,reason:'',queueHeldOnly:false}),__aiGeneratorGuard:{blocked:()=>false},__editorReady:true,__draftChoiceSettled:true,currentInterfaceMode:'edit',perchanceSaveState:'unsaved'};const adapter=new NativeAdapter(page);const store=new MemoryStore();const vfs=new VirtualFileSystem(adapter,store,'fixture');return{page,files,adapter,vfs,store,tools:new SourceTools(vfs,adapter),manualPjs:(v:string)=>{pjs=v;},switchDraft:(v:string)=>{draft=v;}};}
 const rejectsCode=(code:string)=>(error:unknown)=>error instanceof BrowserError&&error.code===code;
 test('read-only probe projects identifiers without native store credentials',async()=>{const f=fixture();(f.page.app as unknown as {store:unknown}).store={sessionToken:'SENSITIVE'};const report=await f.adapter.probe();assert.equal(report.ready,true);assert.equal(report.identity?.generatorId,'123');assert.equal(report.identity?.draftId,'');assert.ok(!JSON.stringify(report).includes('SENSITIVE'));});
 test('identity mismatch and unresolved draft picker block mutation',async()=>{const f=fixture();f.adapter.bind((await f.adapter.snapshot()).identity);f.switchDraft('other');await assert.rejects(f.vfs.snapshot(),rejectsCode('BINDING_MISMATCH'));f.switchDraft('');f.page.__draftChoiceSettled=false;await assert.rejects(f.vfs.writeBatch([{path:'main.pjs',bytes:utf8.encode('new')}]),rejectsCode('TAB_BUSY'));});
@@ -83,19 +83,17 @@ test('generator_info distinguishes known ownership from unknown Save and listing
  const f=fixture();
  const first=await f.tools.call('generator_info') as Record<string,unknown>;
  assert.deepEqual(first.ownership,{known:true,owned:true});
- assert.deepEqual(first.editAccess,{known:false,allowed:null});
+ assert.deepEqual(first.editAccess,{known:true,allowed:true});
  assert.deepEqual(first.listing,{known:false,value:null});
- const app=f.page.app as typeof f.page.app & {
-  userCanSaveThisGenerator?:()=>unknown;
-  data:{generator:typeof f.page.app.data.generator & {listing?:string}};
- };
- app.userCanSaveThisGenerator=()=>true;
- app.data.generator.listing='unlisted';
+ const owner=f.page as unknown as Record<string,unknown>;
+ const generator=f.page.app.data.generator as typeof f.page.app.data.generator & {listing?:string};
+ owner.userCanSaveThisGenerator=()=>true;
+ generator.listing='unlisted';
  const second=await f.tools.call('generator_info') as Record<string,unknown>;
  assert.deepEqual(second.editAccess,{known:true,allowed:true});
  assert.deepEqual(second.listing,{known:true,value:'unlisted'});
- app.userCanSaveThisGenerator=()=>{throw new Error('private token LEAK-ME')};
- app.data.generator.listing='unrecognized';
+ owner.userCanSaveThisGenerator=()=>{throw new Error('private token LEAK-ME')};
+ generator.listing='unrecognized';
  const third=await f.tools.call('generator_info') as Record<string,unknown>;
  assert.deepEqual(third.editAccess,{known:false,allowed:null});
  assert.deepEqual(third.listing,{known:false,value:null});
@@ -210,7 +208,7 @@ test('large existing scratch and multi-megabyte public import coexist with exact
 });
 
 test('native metadata handles bounded async predicates, listing conflicts and non-boolean results',async()=>{
- const f=fixture();const app=f.page.app as unknown as Record<string,unknown>;
+ const f=fixture();const app=f.page as unknown as Record<string,unknown>;
  const gen=f.page.app.data.generator as unknown as Record<string,unknown>;
  app.userOwnsThisGenerator=function(this:Record<string,unknown>){return Promise.resolve(this===app)};
  app.userCanSaveThisGenerator=true;gen.isPrivate=true;
