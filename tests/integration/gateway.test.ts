@@ -257,6 +257,7 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
   const authorize = await request("/authorize?" + params, undefined, "", "GET", { Origin: "https://chatgpt.com" });
   const page = await authorize.text();
   assert.equal(authorize.status, 200, page);
+  assert.equal(authorize.headers.get("Referrer-Policy"), "origin", "form navigation must preserve a real Origin");
   const approvalId = /name="id" value="([^"]+)"/.exec(page)?.[1];
   const handle = /name="handle" value="([^"]+)"/.exec(page)?.[1];
   assert.ok(approvalId && handle);
@@ -275,10 +276,31 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
     ).status,
     409,
   );
+  const hostileCompletion = await mf.dispatchFetch(base + "/authorize/complete", {
+    method: "POST",
+    headers: {
+      Origin: "https://evil.example",
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Sec-Fetch-Site": "cross-site",
+    },
+    body: new URLSearchParams({ id: approvalId, handle }),
+  });
+  assert.equal(hostileCompletion.status, 403, "foreign origin cannot consume an approval");
+  const opaqueCrossSite = await mf.dispatchFetch(base + "/authorize/complete", {
+    method: "POST",
+    headers: {
+      Origin: "null",
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Sec-Fetch-Site": "cross-site",
+    },
+    body: new URLSearchParams({ id: approvalId, handle }),
+  });
+  assert.equal(opaqueCrossSite.status, 403, "cross-site opaque origin is rejected");
   const early = await mf.dispatchFetch(base + "/authorize/complete", {
     method: "POST",
     headers: {
-      Origin: base,
+      Origin: "null",
+      "Sec-Fetch-Site": "same-origin",
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: new URLSearchParams({ id: approvalId, handle }),
@@ -286,6 +308,7 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
   assert.equal(early.status, 200);
   const earlyHtml = await early.text();
   assert.match(earlyHtml, /Check approval again/);
+  assert.equal(early.headers.get("Referrer-Policy"), "origin");
   assert.match(earlyHtml, /name="handle"/);
   assert.ok(!earlyHtml.includes(String(approval.digest)), "pending form does not expose the approval digest");
   await data("/api/v1/admin/approvals/" + approvalId + "/decision", {
@@ -297,7 +320,8 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
     redirect: "manual",
     method: "POST",
     headers: {
-      Origin: base,
+      Origin: "null",
+      "Sec-Fetch-Site": "same-origin",
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: new URLSearchParams({ id: approvalId, handle }),
