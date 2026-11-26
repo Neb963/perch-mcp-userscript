@@ -1063,6 +1063,8 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     approvalRefreshTimer = setInterval(() => {
       void loadApprovals().catch(showApprovalsFailure);
     }, 4000);
+    // Never make synthetic Node test runners wait on the UI's polling timer.
+    (approvalRefreshTimer as unknown as { unref?: () => void }).unref?.();
     void (async () => {
       try {
         const grants = await loadList(`${ADMIN}/grants`);
