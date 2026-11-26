@@ -32,3 +32,15 @@ Do not automatically resolve other types of effects. Do not relax providerWrites
 ## Verification and limits
 
 CI tests, strict typecheck, artifact hash verification and Worker dry-run are required before release. Do not infer Cloudflare production deployment or Firefox runtime behavior from CI. The public generator fetch failure now has exact safe failure-stage messages but positive live fetch success remains unverified. External media, Save, screenshot and production-state parity remain separate acceptance gates.
+
+## Production Worker identity and binding safety (critical rollout guard)
+
+The checked-in `apps/gateway/wrangler.jsonc` and packaged `perch-mcp-cloudflare.zip/wrangler.json` default to `name: "perch-mcp-gateway"`. **This operator's installed gateway is a different Worker: `perch-mcp-userscript.peterconemannn.workers.dev`**, whose Worker name is inferred from that workers.dev subdomain. This difference is not a license to create a new service.
+
+**Never execute `npm run deploy`, `npx wrangler deploy`, or the stock Git-connected deploy configuration blindly for this operator.** Those commands could target `perch-mcp-gateway` instead of the existing `perch-mcp-userscript`, and the package's generic `OAUTH_KV` binding may not carry the existing namespace ID. Merely passing `--name perch-mcp-userscript` is not sufficient evidence that persisted OAuth KV and SQLite Durable Object namespaces will be preserved.
+
+Before upgrading, the Cloudflare account owner must inspect the *existing* Worker's settings, bindings, route and deployment source, and make a backup/export where supported. Deploy the exact tested `worker.mjs` / version 0.1.5 through **that existing Worker's deployment pipeline**. The effective Wrangler configuration, if CLI is used, must have the existing Worker name and **existing** `OAUTH_KV` namespace ID, Durable Object binding/migration names and environment, existing secrets, and any existing routes/custom domains. Preserve `BOOTSTRAP_SECRET`, Registry/Workspace DO state, OAuth grant/refresh storage, Worker URL and bindings. Do not perform an unauthorized migration or recreate a KV namespace. Check settings/diff before deployment.
+
+Post-upgrade acceptance: existing URL `/health.version == "0.1.5"`, `paired:true`, `configured:true`; Workspaces/Agents/Grants remain unchanged; exact existing Generator/Draft binding can reclaim the lease after terminal viewport-only PARTIAL. A good dry-run and matching health version do not by themselves prove state continuity. If any binding or OAuth continuity check fails, stop and restore the existing Worker code/config without deleting durable state, and retain the original operation record.
+
+The GitHub CI job does **not** deploy to Cloudflare. The v0.1.8 userscript and v0.1.5 Worker package are deliverables for the operator's existing configured deployment, not an auto-activated fix. The userscript alone cannot override the old v0.1.4 gateway's `/tab/claim` hold. Until Cloudflare is upgraded, use the inspected, explicit Activity resolution path described above.
