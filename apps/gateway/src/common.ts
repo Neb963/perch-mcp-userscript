@@ -49,7 +49,7 @@ export function json(value: unknown, status = 200): Response {
     },
   });
 }
-export function errorResponse(error: unknown): Response {
+export function errorResponse(error: unknown, traceId = crypto.randomUUID()): Response {
   const e =
     error instanceof ApiError
       ? error
@@ -67,7 +67,7 @@ export function errorResponse(error: unknown): Response {
       message: e.message,
       retryable: false,
       recovery: e.recovery,
-      traceId: crypto.randomUUID(),
+      traceId,
     },
     e.status,
   );
