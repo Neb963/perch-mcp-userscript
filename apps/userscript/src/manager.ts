@@ -1054,14 +1054,24 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       }
       announce(errorText(error), true);
     };
-    try {
-      await loadApprovals();
-    } catch (error) {
-      showApprovalsFailure(error);
-    }
+    // Never overlap requests: a stalled gateway must not pile up polling
+    // calls, reorder snapshots or amplify its own outage.
+    let approvalInFlight = false;
+    const pollApprovals = async () => {
+      if (approvalInFlight) return;
+      approvalInFlight = true;
+      try {
+        await loadApprovals();
+      } catch (error) {
+        showApprovalsFailure(error);
+      } finally {
+        approvalInFlight = false;
+      }
+    };
+    await pollApprovals();
     if (own !== generation || destroyed || !opened || tab !== "Agents") return;
     approvalRefreshTimer = setInterval(() => {
-      void loadApprovals().catch(showApprovalsFailure);
+      void pollApprovals();
     }, 4000);
     // Never make synthetic Node test runners wait on the UI's polling timer.
     (approvalRefreshTimer as unknown as { unref?: () => void }).unref?.();
