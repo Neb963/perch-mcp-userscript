@@ -290,7 +290,8 @@ export async function buildDiagnosticReport(
       at: num(event.at),
       method: ["GET", "POST", "PATCH", "PUT", "DELETE"].includes(str(event.method)) ? event.method : "other",
       route: /^\/(?:api\/v1\/(?:admin|tab)\/|health$)/.test(str(event.route))
-        ? str(event.route).slice(0, 120).replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ":id")
+        ? str(event.route).split("?")[0]!.slice(0, 120)
+            .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ":id")
         : "redacted",
       status: num(event.status),
       elapsedMs: num(event.elapsedMs),
