@@ -41,6 +41,7 @@ export class PreviewAdapter {
   private appliedRevision: string | undefined;
   private generation: string | undefined;
   private original: { frame: HTMLIFrameElement; style: string | null } | undefined;
+  private nativeBaseline: { width: number; height: number; parentWidth: number } | undefined;
   private viewport: { width: number; height: number } | undefined;
   private readonly attested = new Set<'refresh' | 'evaluate' | 'preamble'>();
   constructor(private readonly options: PreviewOptions) {}
@@ -114,7 +115,7 @@ export class PreviewAdapter {
     const receipt = checkedReceipt(await deadline(this.options.bridge.refresh(preambleJs), 30_000));
     if (receipt.appliedRevision !== expected || await this.options.revision() !== expected) throw new ExecutionError('NATIVE_CONFLICT', 'Source changed during refresh or the native frame did not attest the intended source revision. Refresh again after inspecting manual edits.', 'PARTIAL');
     this.appliedRevision = expected; this.generation = receipt.previewGeneration;
-    if (this.viewport) this.setViewport(this.viewport.width, this.viewport.height);
+    if (this.viewport) await this.setViewport(this.viewport.width, this.viewport.height);
     return { ...receipt, ...await this.freshness() };
   }
   async evaluate(js: string, options: { reload?: boolean; timeoutMs?: number; resultPath?: string } = {}): Promise<unknown> {
@@ -139,20 +140,95 @@ export class PreviewAdapter {
     }
     return { ...receipt, ...(savedTo ? { savedTo } : {}), ...await this.freshness() };
   }
-  setViewport(width: number, height: number, reset = false): unknown {
-    if (reset) { this.restoreViewport(); return { reset: true }; }
-    const frame = this.options.frame(), max = this.options.maxViewport ?? 16384;
-    if (!frame) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native output frame is unavailable.');
-    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 200 || height < 150 || width > Math.min(131072, max) || height > Math.min(131072, max)) throw new ExecutionError('LIMIT_EXCEEDED', `Viewport must be 200–${max} by 150–${max}; larger native viewports remain unverified.`);
-    if (!this.original || this.original.frame !== frame) { this.restoreViewport(); this.original = { frame, style: frame.getAttribute('style') }; }
-    frame.style.width = `${width}px`; frame.style.height = `${height}px`; frame.style.maxWidth = 'none'; frame.style.maxHeight = 'none'; frame.style.transformOrigin = 'top left';
-    const available = frame.parentElement?.clientWidth ?? width;
-    const scale = Math.min(1, available > 0 ? available / width : 1);
-    frame.style.transform = `scale(${scale})`;
-    this.viewport = { width, height };
-    return { width, height, scale, measuredBrowserLimit: false };
+  /**
+   * The outer iframe style alone is not proof of viewport size. A trusted,
+   * exact-frame native evaluateJs reply measures the actual child innerWidth
+   * and innerHeight after layout. We never claim success on a CSS-only change.
+   */
+  private async measuredViewport(): Promise<{width:number;height:number}> {
+    if (!this.options.bridge)
+      throw new ExecutionError('UNSUPPORTED_INTERFACE',
+        'Native preview viewport verification is unavailable.', 'PARTIAL');
+    await this.requireCapability('evaluate');
+    const receipt=checkedReceipt(await deadline(
+      this.options.bridge.evaluate(
+        'return ({width: window.innerWidth, height: window.innerHeight});', 5000), 6000));
+    const value=receipt.result;
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+      throw new ExecutionError('UNSUPPORTED_INTERFACE',
+        'Native preview did not provide viewport dimensions.', 'PARTIAL');
+    const r=value as {width?:unknown;height?:unknown};
+    if (typeof r.width !== 'number' || typeof r.height !== 'number' ||
+        !Number.isInteger(r.width) || !Number.isInteger(r.height) ||
+        r.width<1 || r.height<1 || r.width>131072 || r.height>131072)
+      throw new ExecutionError('UNSUPPORTED_INTERFACE',
+        'Native viewport measurement has an invalid shape.', 'PARTIAL');
+    return {width:r.width,height:r.height};
   }
-  restoreViewport(): void { if (this.original) { this.original.style === null ? this.original.frame.removeAttribute('style') : this.original.frame.setAttribute('style', this.original.style); } this.original = undefined; this.viewport = undefined; }
+
+  async setViewport(width: number, height: number, reset = false): Promise<unknown> {
+    const frame=this.options.frame(),max=this.options.maxViewport??16384;
+    if (!frame) throw new ExecutionError('UNSUPPORTED_INTERFACE','Native output frame is unavailable.');
+    if (reset) {
+      const before=this.nativeBaseline;
+      const owned=this.original;
+      this.restoreViewport();
+      // If native refresh replaced the frame, its inherited styles are not
+      // ours to erase. Report an unverified outcome instead of modifying them.
+      if (owned && owned.frame!==frame)
+        throw new ExecutionError('NATIVE_CONFLICT',
+          'Preview iframe changed during viewport emulation. Reset cannot attest the replacement frame.', 'PARTIAL');
+      const actual=await this.measuredViewport();
+      const observedFrameWidth=frame.clientWidth;
+      const parentWidth=frame.parentElement?.clientWidth??0;
+      const baselineComparable=before && before.width>0 &&
+        before.parentWidth>0 && Math.abs(parentWidth-before.parentWidth)<=2;
+      if (baselineComparable && Math.abs(actual.width-before.width)>2)
+        throw new ExecutionError('NATIVE_CONFLICT',
+          'Viewport reset did not restore the native width in the unchanged editor pane.', 'PARTIAL');
+      if (observedFrameWidth>0 && Math.abs(actual.width-observedFrameWidth)>2)
+        throw new ExecutionError('NATIVE_CONFLICT',
+          'Native iframe width and preview innerWidth disagree after reset.', 'PARTIAL');
+      return {reset:true,emulationActive:false,width:actual.width,height:actual.height,
+        expectedNativeWidth:baselineComparable?before.width:null,
+        verifiedBy:'native-preview-innerWidth',frameClientWidth:observedFrameWidth||null};
+    }
+    if (!Number.isInteger(width)||!Number.isInteger(height)||width<200||height<150||
+        width>Math.min(131072,max)||height>Math.min(131072,max))
+      throw new ExecutionError('LIMIT_EXCEEDED',
+        `Viewport must be 200–${max} by 150–${max}.`);
+    if (!this.original || this.original.frame!==frame) {
+      const previous=this.nativeBaseline;
+      this.restoreViewport();
+      this.nativeBaseline=previous??{
+        width:frame.clientWidth,height:frame.clientHeight,
+        parentWidth:frame.parentElement?.clientWidth??0,
+      };
+      this.original={frame,style:frame.getAttribute('style')};
+    }
+    frame.style.width=`${width}px`;
+    frame.style.height=`${height}px`;
+    frame.style.maxWidth='none';frame.style.maxHeight='none';
+    frame.style.transformOrigin='top left';
+    const available=frame.parentElement?.clientWidth??width;
+    const scale=Math.min(1,available>0?available/width:1);
+    frame.style.transform=`scale(${scale})`;
+    this.viewport={width,height};
+    const actual=await this.measuredViewport();
+    if (Math.abs(actual.width-width)>2 || Math.abs(actual.height-height)>2)
+      throw new ExecutionError('NATIVE_CONFLICT',
+        'Preview reported different logical dimensions after requested viewport change.', 'PARTIAL');
+    return {width:actual.width,height:actual.height,scale,
+      emulationActive:true,verifiedBy:'native-preview-innerWidth',measuredBrowserLimit:false};
+  }
+
+  restoreViewport(): void {
+    if(this.original){
+      if(this.original.style===null)this.original.frame.removeAttribute('style');
+      else this.original.frame.setAttribute('style',this.original.style);
+    }
+    this.original=undefined;this.viewport=undefined;this.nativeBaseline=undefined;
+  }
 }
 
 /** Current public Perchance preview wire protocol, independently reimplemented from factual behavior. */
