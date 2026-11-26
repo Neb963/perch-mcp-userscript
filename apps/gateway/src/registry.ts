@@ -23,7 +23,7 @@ import {
   type Env,
 } from "./common.js";
 import { SqlRecords } from "./sql.js";
-import { resourceAdmin, resourceTool, loadLibrary } from "./resources.js";
+import { resourceAdmin, resourceTool } from "./resources.js";
 export interface WorkspaceRecord {
   id: string;
   label: string;
@@ -848,7 +848,9 @@ export class Registry {
     return { workspace: w, grant: g, agent: a };
   }
   private async readAdmin(path: string, url: URL): Promise<Response> {
-    await loadLibrary(this.db);
+    // OAuth, Workspace and credential management must not materialize, clone,
+    // hash or validate the entire Resource library on every admin GET. The
+    // Resource endpoints initialize/validate their library independently.
     const c = this.core(),
       prefix = "/api/v1/admin/";
     if (path === prefix + "state")
