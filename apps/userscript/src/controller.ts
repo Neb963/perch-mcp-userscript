@@ -11,6 +11,7 @@ import {
 import { NativeAdapter } from "./adapter.js";
 import { VirtualFileSystem } from "./vfs.js";
 import { SourceTools } from "./source-tools.js";
+import { SavedSourceReader } from "./lifecycle.js";
 import { GatewayTransport, TransportError } from "./transport.js";
 import { ArtifactStore } from "./artifacts.js";
 import {
@@ -64,6 +65,8 @@ export interface RuntimeContext {
 }
 export interface AdditionalTools {
   dispose?(): void;
+  /** Read-only, no network or source effects; scoped to the bound Workspace. */
+  capabilityReport?(context: RuntimeContext): Record<string, unknown>;
   supports(name: string): boolean;
   call(
     name: string,
@@ -744,14 +747,34 @@ export class BrowserController {
           !knownNoEffect.includes(code ?? "") &&
           toolByName.get(envelope.tool)?.mutating);
       const partial = e.effectState === "PARTIAL";
+      // Only expose bounded, code-authored public API errors. Never forward
+      // arbitrary native/preview/provider messages, source, URLs or tokens.
+      const message = envelope.tool === 'fetch_generator' &&
+        typeof (error as {message?:unknown}).message === 'string' &&
+        /^(?:Public (?:metadata|asset|generator|source|manifest)|Use a canonical public)/.test((error as Error).message)
+          ? `fetch_generator/public-api: ${(error as Error).message.slice(0,260)}`
+          : code === 'UNSUPPORTED_INTERFACE' && envelope.tool === 'save_generator'
+            ? 'Save is disabled until gateway policy, native adapter acceptance and independent saved-source verification all pass.'
+            : code === 'STALE_REVISION'
+              ? 'Source revision changed; reread the affected state before a new operation.'
+              : code === 'BINDING_MISMATCH'
+                ? 'Bound Generator, Draft or native preview identity no longer matches.'
+                : code === 'INVALID_INPUT'
+                  ? `Tool input or provider response failed validation for ${envelope.tool}; no untrusted details are returned.`
+                  : code === 'UNSUPPORTED_INTERFACE'
+                    ? `A required verified native interface is unavailable for ${envelope.tool}.`
+                    : code === 'PROVIDER_REJECTED'
+                      ? `Public/provider operation ${envelope.tool} was rejected; inspect public API stage and network policy.`
+                      : code === 'NATIVE_CONFLICT'
+                        ? 'A native snapshot/manifest/preview readback differs from the intended revision.'
+                        : 'Operation could not be completed; inspect its code, effect state and Workspace before further changes.';
       result = {
         operationId: envelope.operationId,
         status: partial ? "PARTIAL" : unknown ? "UNKNOWN" : "REJECTED",
         effectState: partial ? "PARTIAL" : unknown ? "POSSIBLE" : "NONE",
         error: {
           code: code ?? "EFFECT_UNKNOWN",
-          message:
-            "Tool did not complete. Inspect the operation and local source before retrying.",
+          message,
           retryable: false,
           recovery:
             "Use operation_status; reconcile uncertain effects before further writes.",
@@ -990,6 +1013,85 @@ export class BrowserController {
         delivery:
           "Authenticated operator download in Activity. This artifact has no public URL.",
       };
+    }
+    if (name === 'workspace_status' && this.source) {
+      const base = await this.source.call(name, args) as Record<string, unknown>;
+      const caps = base.capabilities as {
+        nativeSave?:boolean;sourceRead?:boolean;sourceWrite?:boolean;
+        sourceWriteBlocked?:string[];
+      } | undefined;
+      const authorized = [...new Set(lease.permissions)].sort();
+      const gatewayObservation=this.transport.gatewayPolicySnapshot();
+      const gatewayPolicy=gatewayObservation.providerWritesEnabled;
+      // Cached policy is diagnostic, not authorization. The authoritative
+      // Registry rechecks the current policy for every tool admission.
+      const nativeDetected = caps?.nativeSave === true;
+      const adapterAccepted = this.adapter.options.externalWritesVerified === true;
+      const hasSaveGrant = authorized.includes('SAVE');
+      const leaseHeld = this.lease === lease && !this.stopped && Date.now() < lease.expiresAt;
+      const reasons = [
+        ...(!nativeDetected ? ['NATIVE_SAVE_INTERFACE_UNAVAILABLE'] : []),
+        ...(!adapterAccepted ? ['NATIVE_SAVE_ACCEPTANCE_NOT_VERIFIED'] : []),
+        ...(gatewayPolicy !== true ? [gatewayPolicy === false ? 'GATEWAY_PROVIDER_WRITES_DISABLED' : 'GATEWAY_POLICY_UNKNOWN'] : []),
+        ...(!hasSaveGrant ? ['SAVE_PERMISSION_NOT_GRANTED'] : []),
+        ...(!leaseHeld ? ['WRITER_LEASE_NOT_HELD'] : []),
+        ...((caps?.sourceWriteBlocked ?? []).length ? ['NATIVE_EDITOR_MUTATION_BLOCKED'] : []),
+      ];
+      return {
+        ...base,
+        lease: {
+          held: leaseHeld, epoch: lease.epoch,
+          bindingRevision: lease.bindingRevision,
+          remainingMs: Math.max(0, lease.expiresAt - Date.now()),
+        },
+        effectivePermissions: authorized,
+        effectiveCapabilities: {
+          sourceRead: { detected:caps?.sourceRead === true,
+            authorized:authorized.includes('READ_SOURCE'),
+            available:leaseHeld && caps?.sourceRead === true && authorized.includes('READ_SOURCE') },
+          sourceWrite: { detected:caps?.sourceWrite === true,
+            authorized:authorized.includes('WRITE_SOURCE'),
+            available:leaseHeld && caps?.sourceWrite === true && authorized.includes('WRITE_SOURCE'),
+            reasons:caps?.sourceWriteBlocked ?? [] },
+          saveGenerator: {
+            detected:nativeDetected,adapterAccepted,gatewayPolicy,
+            gatewayPolicyObservedAt:gatewayObservation.observedAt,
+            gatewayPolicyIsLastObservation:true,
+            authorized:hasSaveGrant,available:reasons.length===0,reasons,
+          },
+          preview: this.tools?.capabilityReport?.(context) ?? {
+            inspection:'NOT_INSTRUMENTED',
+          },
+          policyBoundary: {
+            privilegedSaveAndLifecycle:'gated',
+            generatorRuntime:'Preview JavaScript can make normal generator requests; this is not equivalent to authorized privileged editor Save.',
+          },
+        },
+      };
+    }
+    if (name === 'save_generator' && this.source) {
+      // The gateway refuses this tool until global provider acceptance is
+      // enabled. Local adapter acceptance is separate and cannot be bypassed
+      // by an MCP argument or an ordinary source-write Grant.
+      if (this.adapter.options.externalWritesVerified !== true)
+        throw Object.assign(new Error('Native Save has not passed real disposable-generator acceptance.'),
+          {code:'UNSUPPORTED_INTERFACE'});
+      const desired=await context.vfs.snapshot();
+      if (desired.revision !== args.intendedRevision)
+        throw Object.assign(new Error('Draft changed before native Save preflight.'),
+          {code:'STALE_REVISION'});
+      const identity=await this.adapter.assertIdentity();
+      const readback=new SavedSourceReader();
+      const previousSavedSnapshot=await readback.read(identity.slug,identity);
+      if (this.stopped || this.lease!==lease || Date.now()>=lease.expiresAt)
+        throw Object.assign(new Error('Save lease was lost during independent base read.'),
+          {code:'TAB_OFFLINE'});
+      return this.source.call(name,args,{save:{
+        operationId:context.envelope.operationId,
+        permission:lease.permissions.includes('SAVE')&&context.envelope.permissions.includes('SAVE'),
+        previousSavedSnapshot,
+        readSavedSnapshot:()=>readback.read(identity.slug,identity),
+      }});
     }
     if (this.source?.supports(name)) return this.source.call(name, args);
     if (this.tools?.supports(name)) return this.tools.call(name, args, context);

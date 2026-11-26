@@ -123,3 +123,26 @@ Current external proof limits: Firefox connector calls failed internally; local 
 - Evidence: paired gateway v0.1.4 and browser v0.1.5 transport/lease healthy; live MCP source reads pass. Native preview execution was deliberately blocked by hardcoded `verified: {}` despite an implemented fixed native protocol bridge. Preview observations were incomplete; list_files missed sizes/types, generator_info reused generic status.
 - Change: runtime proof by correlated exact-origin preview postMessage constant before page_eval, structural preview refresh + receipt attestation before reporting appliedRevision, explicit diagnostics evidence limitations, byte-accurate list_files entries with backward compatible paths, native metadata known/unknown distinctions, bounded sanitized preview error timeline in diagnostics export. No Worker changes or external Save enablement.
 - Verification required: typecheck, native-protocol synthetic forgery tests, source metadata tests, redaction tests, full unit/integration CI, artifact SHA and byte equality, Chromium runtime smoke where feasible. Live LibreWolf + genuine Perchance preview execution and console/refresh behavior remains an explicit external acceptance gate until observed.
+
+## Live integration defect remediation (v0.1.7) — 2026-11-26
+
+Baseline: Operator-provided Image Studio defect report MCP-01–MCP-14 and redacted userscript v0.1.6 diagnostics. Gateway v0.1.4 and live browser lease are healthy. Source revision 6 was unsaved when reported. This remediation changes the userscript and contracts only, not Cloudflare configuration, authorization, native Helper, OAuth, Workspace Binding or the operator's live draft.
+
+| Finding | Code outcome / remaining acceptance |
+|---|---|
+| MCP-01 Save gate | F04 preflight now supplies independently fetched exact saved-base and complete post-Save public readback behind unchanged two acceptance gates. Effective gated reason visible. Real authorized disposable Save and gateway-provider enablement **remain blocked**; user must manually Save native editor before reloading unsaved draft. |
+| MCP-02 fetch_generator | Respects public `getGeneratorPageData` envelope variants without relying on AI Helper; validates optional manifest forms, double-read drift, source assets and panel-only fallback. Live plugin slug retry pending. |
+| MCP-03 viewport reset | Real iframe `innerWidth/innerHeight` must match requested dimensions; after native reset, measured width/baseline conflict is reported as PARTIAL instead of false VERIFIED. Live fixed-pane 917→390→917 still pending. |
+| MCP-04 real pixels | Browser/userscript has no accepted native pixel capture interface; remains unavailable, no DOM-based fake images. |
+| MCP-05 syntax | Reads `getEditorSyntaxErrors` only if native method exists, fences source revision, preserves path/line-provenance uncertainty and independent preview console/warnings channels. Disposable deliberate syntax failure acceptance pending. |
+| MCP-06 generator metadata | Adds native public ID with conflict validation, explicit unknown saved/base revision (not fabricated). Ownership/edit/listing remain unknown unless positively detectable. |
+| MCP-07 effective status | Lease fencing, claim-permission ceiling, source/preview and Save acceptance matrix including exact reasons. Policy snapshot cached and diagnostic only; Registry remains admission authority. |
+| MCP-08 checkpoints | Immutable full-draft checkpoint creation reads back encoded bytes and SHA256 before success; exact digest/bytes/identity/pin/count receipt. Restore now validates stored digest/full-source revision/identity/paths/sizes before effects. |
+| MCP-09 writes | Verified `write`/`save_b64_file` receipts include path/UTF-8 byte size/SHA256 while retaining partial and unknown outcomes without fabricated proofs. |
+| MCP-10 errors | Bounded known-domain, tool-specific terminal messages; public metadata vs asset/HTTP/network classifications. No raw private HTTP responses in replies or diagnostics. |
+| MCP-11 effects boundary | Ordinary generator preview runtime may request public services; this is NOT an MCP privileged Save, lifecycle or upload grant. Existing privileged gates remain. |
+| MCP-12 readiness | Preview availability remains verification-dependent; `workspace_status` adds reasoned matrix. T3 live readiness transitions outstanding. |
+| MCP-13 envelopes | User-script failure messages improved; ChatGPT host's immediate rejection wrapping requires gateway/host assessment and is not represented as fixed. |
+| MCP-14 warning channels | Native warnings and preview console are explicitly separate. Empty warnings/syntax lists do not attest no errors. |
+
+Verification: full TypeScript + deterministic tests + build + userscript/TXT byte identity + Worker dry-run required on the final versioned head; no deployment needed. Real Firefox/Violentmonkey T3, disposable authorized Save and actual-pixel capture remain explicit release gates. Never claim T1/T2 mocks as T3 evidence. Preserve last native source and local Workspace cache, and test on a separate disposable generator before enabling provider effects.

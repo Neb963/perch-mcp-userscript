@@ -1,7 +1,7 @@
 import { ExecutionError } from './compute.js';
 
 export interface PreviewDiagnostics { consoleOutput: string[]; perchanceErrors: unknown[]; syntaxErrors: unknown[] }
-export interface PreviewReceipt extends PreviewDiagnostics { appliedRevision?: string; previewGeneration?: string; result?: unknown; warnings?:unknown[]; diagnosticsAvailability?:Record<string,string> }
+export interface PreviewReceipt extends PreviewDiagnostics { appliedRevision?: string; previewGeneration?: string; result?: unknown; warnings?:unknown[]; diagnosticsAvailability?:Record<string,string>; diagnosticChannels?:Record<string,string> }
 export interface PreviewBridge {
   /** Live, zero-source-mutation native protocol probe before first use. */
   attest?(capability: 'evaluate' | 'refresh' | 'preamble'): Promise<boolean>;
@@ -28,7 +28,10 @@ function checkedReceipt(value: unknown): PreviewReceipt {
   if (!Array.isArray(r.consoleOutput) || !r.consoleOutput.every(x => typeof x === 'string') || !Array.isArray(r.perchanceErrors) || !Array.isArray(r.syntaxErrors)) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'The native preview receipt contract changed.');
   const serialized = JSON.stringify(value);
   if (new TextEncoder().encode(serialized).byteLength > 262_144) throw new ExecutionError('LIMIT_EXCEEDED', 'Preview result exceeds 256 KiB.');
-  return { consoleOutput: (r.consoleOutput as string[]).slice(0, 500), perchanceErrors: r.perchanceErrors.slice(0, 500), syntaxErrors: r.syntaxErrors.slice(0, 500), ...(typeof r.appliedRevision === 'string' ? { appliedRevision: r.appliedRevision } : {}), ...(typeof r.previewGeneration === 'string' ? { previewGeneration: r.previewGeneration } : {}), ...(Array.isArray(r.warnings)?{warnings:r.warnings.slice(0,500)}:{}),...(r.diagnosticsAvailability&&typeof r.diagnosticsAvailability==='object'?{diagnosticsAvailability:r.diagnosticsAvailability as Record<string,string>}:{}),...(Object.hasOwn(r, 'result') ? { result: JSON.parse(JSON.stringify(r.result ?? null)) as unknown } : {}) };
+  return { consoleOutput: (r.consoleOutput as string[]).slice(0, 500), perchanceErrors: r.perchanceErrors.slice(0, 500), syntaxErrors: r.syntaxErrors.slice(0, 500), ...(typeof r.appliedRevision === 'string' ? { appliedRevision: r.appliedRevision } : {}), ...(typeof r.previewGeneration === 'string' ? { previewGeneration: r.previewGeneration } : {}), ...(Array.isArray(r.warnings)?{warnings:r.warnings.slice(0,500)}:{}),...(r.diagnosticsAvailability&&typeof r.diagnosticsAvailability==='object'?{diagnosticsAvailability:r.diagnosticsAvailability as Record<string,string>}:{}),...(r.diagnosticChannels&&typeof r.diagnosticChannels==='object'&&
+    !Array.isArray(r.diagnosticChannels)&&
+    Object.values(r.diagnosticChannels).every(x=>typeof x==='string'&&x.length<256)
+    ?{diagnosticChannels:r.diagnosticChannels as Record<string,string>}:{}),...(Object.hasOwn(r, 'result') ? { result: JSON.parse(JSON.stringify(r.result ?? null)) as unknown } : {}) };
 }
 function body(args: Record<string, unknown>, key: string): string | undefined { const v = args[key]; if (v === undefined) return undefined; if (typeof v !== 'string' || new TextEncoder().encode(v).byteLength > 262_144) throw new ExecutionError('INVALID_INPUT', `${key} must be text no larger than 256 KiB.`); return v; }
 async function deadline<T>(promise: Promise<T>, timeout: number): Promise<T> {
@@ -41,6 +44,7 @@ export class PreviewAdapter {
   private appliedRevision: string | undefined;
   private generation: string | undefined;
   private original: { frame: HTMLIFrameElement; style: string | null } | undefined;
+  private nativeBaseline: { width: number; height: number; parentWidth: number } | undefined;
   private viewport: { width: number; height: number } | undefined;
   private readonly attested = new Set<'refresh' | 'evaluate' | 'preamble'>();
   constructor(private readonly options: PreviewOptions) {}
@@ -114,7 +118,7 @@ export class PreviewAdapter {
     const receipt = checkedReceipt(await deadline(this.options.bridge.refresh(preambleJs), 30_000));
     if (receipt.appliedRevision !== expected || await this.options.revision() !== expected) throw new ExecutionError('NATIVE_CONFLICT', 'Source changed during refresh or the native frame did not attest the intended source revision. Refresh again after inspecting manual edits.', 'PARTIAL');
     this.appliedRevision = expected; this.generation = receipt.previewGeneration;
-    if (this.viewport) this.setViewport(this.viewport.width, this.viewport.height);
+    if (this.viewport) await this.setViewport(this.viewport.width, this.viewport.height);
     return { ...receipt, ...await this.freshness() };
   }
   async evaluate(js: string, options: { reload?: boolean; timeoutMs?: number; resultPath?: string } = {}): Promise<unknown> {
@@ -139,20 +143,95 @@ export class PreviewAdapter {
     }
     return { ...receipt, ...(savedTo ? { savedTo } : {}), ...await this.freshness() };
   }
-  setViewport(width: number, height: number, reset = false): unknown {
-    if (reset) { this.restoreViewport(); return { reset: true }; }
-    const frame = this.options.frame(), max = this.options.maxViewport ?? 16384;
-    if (!frame) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native output frame is unavailable.');
-    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 200 || height < 150 || width > Math.min(131072, max) || height > Math.min(131072, max)) throw new ExecutionError('LIMIT_EXCEEDED', `Viewport must be 200–${max} by 150–${max}; larger native viewports remain unverified.`);
-    if (!this.original || this.original.frame !== frame) { this.restoreViewport(); this.original = { frame, style: frame.getAttribute('style') }; }
-    frame.style.width = `${width}px`; frame.style.height = `${height}px`; frame.style.maxWidth = 'none'; frame.style.maxHeight = 'none'; frame.style.transformOrigin = 'top left';
-    const available = frame.parentElement?.clientWidth ?? width;
-    const scale = Math.min(1, available > 0 ? available / width : 1);
-    frame.style.transform = `scale(${scale})`;
-    this.viewport = { width, height };
-    return { width, height, scale, measuredBrowserLimit: false };
+  /**
+   * The outer iframe style alone is not proof of viewport size. A trusted,
+   * exact-frame native evaluateJs reply measures the actual child innerWidth
+   * and innerHeight after layout. We never claim success on a CSS-only change.
+   */
+  private async measuredViewport(): Promise<{width:number;height:number}> {
+    if (!this.options.bridge)
+      throw new ExecutionError('UNSUPPORTED_INTERFACE',
+        'Native preview viewport verification is unavailable.', 'PARTIAL');
+    await this.requireCapability('evaluate');
+    const receipt=checkedReceipt(await deadline(
+      this.options.bridge.evaluate(
+        'return ({width: window.innerWidth, height: window.innerHeight});', 5000), 6000));
+    const value=receipt.result;
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+      throw new ExecutionError('UNSUPPORTED_INTERFACE',
+        'Native preview did not provide viewport dimensions.', 'PARTIAL');
+    const r=value as {width?:unknown;height?:unknown};
+    if (typeof r.width !== 'number' || typeof r.height !== 'number' ||
+        !Number.isInteger(r.width) || !Number.isInteger(r.height) ||
+        r.width<1 || r.height<1 || r.width>131072 || r.height>131072)
+      throw new ExecutionError('UNSUPPORTED_INTERFACE',
+        'Native viewport measurement has an invalid shape.', 'PARTIAL');
+    return {width:r.width,height:r.height};
   }
-  restoreViewport(): void { if (this.original) { this.original.style === null ? this.original.frame.removeAttribute('style') : this.original.frame.setAttribute('style', this.original.style); } this.original = undefined; this.viewport = undefined; }
+
+  async setViewport(width: number, height: number, reset = false): Promise<unknown> {
+    const frame=this.options.frame(),max=this.options.maxViewport??16384;
+    if (!frame) throw new ExecutionError('UNSUPPORTED_INTERFACE','Native output frame is unavailable.');
+    if (reset) {
+      const before=this.nativeBaseline;
+      const owned=this.original;
+      this.restoreViewport();
+      // If native refresh replaced the frame, its inherited styles are not
+      // ours to erase. Report an unverified outcome instead of modifying them.
+      if (owned && owned.frame!==frame)
+        throw new ExecutionError('NATIVE_CONFLICT',
+          'Preview iframe changed during viewport emulation. Reset cannot attest the replacement frame.', 'PARTIAL');
+      const actual=await this.measuredViewport();
+      const observedFrameWidth=frame.clientWidth;
+      const parentWidth=frame.parentElement?.clientWidth??0;
+      const baselineComparable=before && before.width>0 &&
+        before.parentWidth>0 && Math.abs(parentWidth-before.parentWidth)<=2;
+      if (baselineComparable && Math.abs(actual.width-before.width)>2)
+        throw new ExecutionError('NATIVE_CONFLICT',
+          'Viewport reset did not restore the native width in the unchanged editor pane.', 'PARTIAL');
+      if (observedFrameWidth>0 && Math.abs(actual.width-observedFrameWidth)>2)
+        throw new ExecutionError('NATIVE_CONFLICT',
+          'Native iframe width and preview innerWidth disagree after reset.', 'PARTIAL');
+      return {reset:true,emulationActive:false,width:actual.width,height:actual.height,
+        expectedNativeWidth:baselineComparable?before.width:null,
+        verifiedBy:'native-preview-innerWidth',frameClientWidth:observedFrameWidth||null};
+    }
+    if (!Number.isInteger(width)||!Number.isInteger(height)||width<200||height<150||
+        width>Math.min(131072,max)||height>Math.min(131072,max))
+      throw new ExecutionError('LIMIT_EXCEEDED',
+        `Viewport must be 200–${max} by 150–${max}.`);
+    if (!this.original || this.original.frame!==frame) {
+      const previous=this.nativeBaseline;
+      this.restoreViewport();
+      this.nativeBaseline=previous??{
+        width:frame.clientWidth,height:frame.clientHeight,
+        parentWidth:frame.parentElement?.clientWidth??0,
+      };
+      this.original={frame,style:frame.getAttribute('style')};
+    }
+    frame.style.width=`${width}px`;
+    frame.style.height=`${height}px`;
+    frame.style.maxWidth='none';frame.style.maxHeight='none';
+    frame.style.transformOrigin='top left';
+    const available=frame.parentElement?.clientWidth??width;
+    const scale=Math.min(1,available>0?available/width:1);
+    frame.style.transform=`scale(${scale})`;
+    this.viewport={width,height};
+    const actual=await this.measuredViewport();
+    if (Math.abs(actual.width-width)>2 || Math.abs(actual.height-height)>2)
+      throw new ExecutionError('NATIVE_CONFLICT',
+        'Preview reported different logical dimensions after requested viewport change.', 'PARTIAL');
+    return {width:actual.width,height:actual.height,scale,
+      emulationActive:true,verifiedBy:'native-preview-innerWidth',measuredBrowserLimit:false};
+  }
+
+  restoreViewport(): void {
+    if(this.original){
+      if(this.original.style===null)this.original.frame.removeAttribute('style');
+      else this.original.frame.setAttribute('style',this.original.style);
+    }
+    this.original=undefined;this.viewport=undefined;this.nativeBaseline=undefined;
+  }
 }
 
 /** Current public Perchance preview wire protocol, independently reimplemented from factual behavior. */
@@ -279,6 +358,58 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
       try{view.postMessage({command:'evaluateJs',callerId,js},origin)}catch{finish(new ExecutionError('UNSUPPORTED_INTERFACE','Browser refused the fixed native preview command.'))}
     });
   }
+  /**
+   * The editor's own syntax collector is independent of the preview iframe
+   * preamble. Only report exact path/line/column for recognized native rows.
+   * Unrecognized rows are kept as partial evidence, never fabricated ranges.
+   */
+  private async withEditorSyntax(receipt:PreviewReceipt):Promise<PreviewReceipt> {
+    const getter=this.page.getEditorSyntaxErrors;
+    const availability={...receipt.diagnosticsAvailability,syntax:'unavailable'};
+    if(typeof getter!=='function')
+      return {...receipt,diagnosticsAvailability:availability,
+        diagnosticChannels:{editorSyntax:'unavailable',console:'preview-iframe',nativeWarnings:'native-editor'}};
+    const sourceBefore=await this.options.revision();
+    let raw:unknown;
+    try { raw=await Promise.resolve((getter as ()=>unknown).call(this.page)); }
+    catch { return {...receipt,diagnosticsAvailability:availability,
+      diagnosticChannels:{editorSyntax:'collector-failed',console:'preview-iframe',nativeWarnings:'native-editor'}}; }
+    if(await this.options.revision()!==sourceBefore)
+      throw new ExecutionError('STALE_REVISION',
+        'Native editor changed during syntax collection. Diagnostics were not attributed to a stale revision.');
+    if(!Array.isArray(raw)||raw.length>500)
+      return {...receipt,diagnosticsAvailability:availability,
+        diagnosticChannels:{editorSyntax:'unsupported-result',console:'preview-iframe',nativeWarnings:'native-editor'}};
+    let precise=true;
+    const errors:Record<string,unknown>[]=[];
+    for(const entry of raw){
+      if(!entry||typeof entry!=='object'||Array.isArray(entry)) {precise=false;continue;}
+      const e=entry as Record<string,unknown>;
+      const name=typeof e.message==='string'?e.message:typeof e.error==='string'?e.error:null;
+      if(name===null){precise=false;continue;}
+      const source=e.path??e.file??e.pane??e.type;
+      const path=source==='main.pjs'||source==='model'||source==='pjs'
+        ? 'main.pjs' : source==='index.html'||source==='output'||source==='html'
+          ? 'index.html' : null;
+      const line=e.line??e.lineNumber;
+      const column=e.column??e.col;
+      const validLine=Number.isSafeInteger(line) && (line as number)>0 && (line as number)<=1000000;
+      const validColumn=Number.isSafeInteger(column) && (column as number)>0 && (column as number)<=1000000;
+      if(!path||!validLine)precise=false;
+      errors.push({category:'editor-syntax',message:name.slice(0,2000),
+        path, line:validLine?line:null,column:validColumn?column:null,
+        locationVerified:false,locationProvenance:'native-unverified',
+        sourceRevision:sourceBefore});
+    }
+    // A non-empty well-formed native error is evidence of capture, not proof
+    // of exact source-map fidelity. An empty array remains partial coverage
+    // until a deliberately malformed live disposable source is verified.
+    availability.syntax=precise&&errors.length>0?'captured':'partial';
+    return {...receipt,syntaxErrors:errors,diagnosticsAvailability:availability,
+      diagnosticChannels:{editorSyntax:availability.syntax,console:'preview-iframe',
+        nativeWarnings:'native-editor',syntaxSourceRevision:sourceBefore}};
+  }
+
   private receipt(d:NativeDiagnosticSnapshot,result?:unknown):PreviewReceipt {
     const native=d.receipt,applied=this.knownSource&&native&&native.revision===this.knownSource.panelHash&&native.srcRevision===this.knownSource.srcHash&&!native.srcChangedDuringRender?this.knownSource.revision:undefined;
     const generation=d.generation&&native?`${d.generation}:${native.epoch}`:undefined;
@@ -306,7 +437,7 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
       const after=await this.source();
       if(!d?.receipt||d.generation!==generation||!d.preambleRan||d.receipt.revision!==before.panelHash||d.receipt.srcRevision!==before.srcHash||d.receipt.srcChangedDuringRender||d.receipt.srcHasPending!==before.pending||after.revision!==before.revision||after.panelHash!==before.panelHash||after.srcHash!==before.srcHash||after.pending!==before.pending)throw new ExecutionError('NATIVE_CONFLICT','Native preview did not attest the intended panels, src manifest and startup generation.','PARTIAL');
       this.knownSource=before;this.previousGeneration=`${generation}:${d.receipt.epoch}`;
-      return this.receipt(d);
+      return this.withEditorSyntax(this.receipt(d));
     }finally{
       if(previous)Object.defineProperty(this.page,'__aiAgentPreambleJs',previous);else delete this.page.__aiAgentPreambleJs;
       this.busy=false;
@@ -321,10 +452,10 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
       const result=await this.request(js,timeoutMs);
       const after=nativeDiagnostics(await this.request(nativeDiagnosticRead,Math.min(timeoutMs,5000)));
       if(before.generation!==after.generation||before.receipt?.epoch!==after.receipt?.epoch)throw new ExecutionError('STALE_EPOCH','Native preview changed during evaluation.','UNKNOWN');
-      return this.receipt(after,result);
+      return this.withEditorSyntax(this.receipt(after,result));
     }finally{this.busy=false}
   }
-  async diagnostics():Promise<PreviewReceipt>{return this.receipt(nativeDiagnostics(await this.request(nativeDiagnosticRead,5000)))}
+  async diagnostics():Promise<PreviewReceipt>{return this.withEditorSyntax(this.receipt(nativeDiagnostics(await this.request(nativeDiagnosticRead,5000))))}
 }
 
 /** Returns an exact protocol candidate; options are required to validate the native frame boundary. */

@@ -1,4 +1,5 @@
 import { NativeAdapter } from './adapter.js';
+import { readPublicGenerator } from './public-generator.js';
 import { BrowserError, digest, equalIdentity, snapshotRevision, type KeyValueStore, type NativeIdentity, type NativeSnapshot } from './native-types.js';
 export interface SavedGenerator { identity: NativeIdentity; files: Record<string, Uint8Array>; owned: boolean; listing: 'listed'|'unlisted'; revision: string }
 export interface LifecycleReadback { readGenerator(slug: string): Promise<SavedGenerator>; readDeletionEvidence(generatorId: string, oldSlug: string): Promise<{ inventoryAbsent: boolean; sourceNotFound: boolean; identityChecked: string }> }
@@ -66,19 +67,38 @@ export class NativeLifecycle {
   private unknown(operationId:string,message:string):LifecycleResult{return{status:'UNKNOWN',operationId,effectState:'POSSIBLE',error:{code:'EFFECT_UNKNOWN',message,recovery:'Read-only reconcile this Operation ID; never replay the native lifecycle mutation.'}};}
 }
 
-/** Independent public saved-source reader. It never reads native account credentials or mutation APIs. */
+/**
+ * The same fixed public Perchance source contract backs read-only imports and
+ * independent Save readback. The verification requires a complete manifest;
+ * a useful panels-only import is NEVER equivalent to a verified saved source.
+ */
 export class SavedSourceReader {
-  constructor(readonly fetchImpl: typeof fetch = fetch, readonly maxBytes = 64*1024*1024) {}
-  async read(slug:string, expected:NativeIdentity):Promise<NativeSnapshot> {
-    if(!/^[a-z0-9][a-z0-9-]{0,99}$/.test(slug)||slug!==expected.slug)throw new BrowserError('BINDING_MISMATCH','Saved readback Slug does not match intended identity.');
-    const data=await this.pageData(slug);const generator=this.generator(data,expected);const manifest=this.manifest(data,generator);const files:Record<string,Uint8Array>={'main.pjs':new TextEncoder().encode(generator.modelText as string),'index.html':new TextEncoder().encode(generator.outputTemplate as string)};let total=Object.values(files).reduce((n,b)=>n+b.length,0);const seen=new Set<string>();
-    for(const path of Object.keys(manifest).sort()) { const full=canonicalNativeSrc(path); if(seen.has(full.toLowerCase()))throw new BrowserError('PATH_DENIED','Saved src paths collide by case.');seen.add(full.toLowerCase());const row=manifest[path];const key=typeof row==='string'?row:row&&typeof row==='object'&&'key'in row?row.key:undefined;const declared=typeof row==='object'&&row&&'size'in row?row.size:undefined;if(typeof key!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._~-]{0,511}$/.test(key)||declared!==undefined&&(typeof declared!=='number'||!Number.isSafeInteger(declared)||declared<0))throw new BrowserError('UNSUPPORTED_INTERFACE','Saved src manifest entry is not a recognized immutable asset.');const bytes=await this.request(`https://user.uploads.dev/file/${encodeURIComponent(key)}`,undefined,16*1024*1024);if(declared!==undefined&&bytes.length!==declared)throw new BrowserError('PROVIDER_REJECTED','Saved src byte length does not match its manifest.');total+=bytes.length;if(total>this.maxBytes)throw new BrowserError('QUOTA_EXCEEDED','Independent saved source exceeds configured snapshot budget.');files[full]=bytes; }
-    const after=await this.pageData(slug);const afterGenerator=this.generator(after,expected);if(JSON.stringify([generator.modelText,generator.outputTemplate,manifest])!==JSON.stringify([afterGenerator.modelText,afterGenerator.outputTemplate,this.manifest(after,afterGenerator)]))throw new BrowserError('STALE_REVISION','Provider source changed during independent saved readback.');
-    return{identity:structuredClone(expected),files,revision:await snapshotRevision(expected,files),dirty:false,saveState:'saved'};
+  constructor(readonly fetchImpl: typeof fetch = fetch, readonly maxBytes = 64 * 1024 * 1024) {}
+  async read(slug: string, expected: NativeIdentity): Promise<NativeSnapshot> {
+    if (!/^[a-z0-9][a-z0-9-]{0,119}$/.test(slug) || slug !== expected.slug)
+      throw new BrowserError('BINDING_MISMATCH', 'Saved readback Slug does not match the bound Generator.');
+    let publicSnapshot: Awaited<ReturnType<typeof readPublicGenerator>>;
+    try { publicSnapshot = await readPublicGenerator(slug, this.fetchImpl); }
+    catch (error) {
+      const failure = error as {code?:unknown};
+      const code = typeof failure?.code === 'string' ? failure.code : 'PROVIDER_REJECTED';
+      if (code === 'NATIVE_CONFLICT') throw new BrowserError('PROVIDER_REJECTED',
+        'Saved asset bytes differ from the declared public source manifest.');
+      throw new BrowserError(code, 'Independent public saved-source readback failed before complete verification.');
+    }
+    if (publicSnapshot.completeness !== 'complete')
+      throw new BrowserError('UNSUPPORTED_INTERFACE',
+        'Public saved-source response lacks a complete src manifest; panel-only reads cannot verify native Save.');
+    if (publicSnapshot.generatorId !== expected.generatorId)
+      throw new BrowserError('BINDING_MISMATCH',
+        'Public saved Generator ID does not match the assigned native Generator.');
+    if (publicSnapshot.bytes > this.maxBytes)
+      throw new BrowserError('LIMIT_EXCEEDED', 'Independent saved-source snapshot exceeds the configured budget.');
+    return {
+      identity: structuredClone(expected),
+      files: publicSnapshot.files,
+      revision: await snapshotRevision(expected, publicSnapshot.files),
+      dirty: false, saveState: 'saved',
+    };
   }
-  private generator(data:Record<string,unknown>,expected:NativeIdentity):Record<string,unknown>{const g=data.generator;if(data.status!=='success'||!g||typeof g!=='object')throw new BrowserError('PROVIDER_REJECTED','Public saved-source response is not successful.');const generator=g as Record<string,unknown>;const id=typeof generator.id==='number'&&Number.isSafeInteger(generator.id)?String(generator.id):generator.id;if(id!==expected.generatorId||generator.name!==expected.slug)throw new BrowserError('BINDING_MISMATCH','Independent stored Generator ID/Slug differs.');if(typeof generator.modelText!=='string'||typeof generator.outputTemplate!=='string'||generator.modelText.length>4*1024*1024||generator.outputTemplate.length>4*1024*1024)throw new BrowserError('UNSUPPORTED_INTERFACE','Saved panels are not bounded exact strings.');return generator;}
-  private manifest(data:Record<string,unknown>,generator:Record<string,unknown>):Record<string,unknown>{const manifest=generator.srcManifest??data.srcManifest;if(!manifest||typeof manifest!=='object'||Array.isArray(manifest)||Object.keys(manifest).length>1000)throw new BrowserError('UNSUPPORTED_INTERFACE','Complete saved src manifest is absent, invalid or too large; absence is not assumed empty.');return manifest as Record<string,unknown>;}
-  private async pageData(slug:string):Promise<Record<string,unknown>>{const bytes=await this.request('https://perchance.org/api/getGeneratorPageData',JSON.stringify({generatorName:slug}),4*1024*1024);try{const value:unknown=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));if(!value||typeof value!=='object'||Array.isArray(value))throw new Error();return value as Record<string,unknown>;}catch{throw new BrowserError('PROVIDER_REJECTED','Saved page response is not valid bounded JSON.');}}
-  private async request(url:string,body:string|undefined,maxBytes:number):Promise<Uint8Array>{const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),30000);try{const response=await this.fetchImpl(url,{method:body===undefined?'GET':'POST',...(body===undefined?{}:{body,headers:{'Content-Type':'application/json'}}),credentials:'omit',redirect:'error',cache:'no-store',referrerPolicy:'no-referrer',signal:controller.signal});if(!response.ok||response.redirected||response.url&&new URL(response.url).origin!==new URL(url).origin)throw new BrowserError('PROVIDER_REJECTED','Independent public source read failed or redirected.');const declared=response.headers.get('Content-Length');if(declared&&(!/^\d+$/.test(declared)||Number(declared)>maxBytes))throw new BrowserError('LIMIT_EXCEEDED','Saved-source response exceeds readback budget.');if(!response.body)return new Uint8Array();const reader=response.body.getReader();const chunks:Uint8Array[]=[];let total=0;try{for(;;){const {done,value}=await reader.read();if(done)break;if(!value)continue;total+=value.length;if(total>maxBytes){await reader.cancel();throw new BrowserError('LIMIT_EXCEEDED','Saved-source response exceeds readback budget.');}chunks.push(value);}}finally{reader.releaseLock();}const bytes=new Uint8Array(total);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}return bytes;}catch(error){if(error instanceof BrowserError)throw error;throw new BrowserError('PROVIDER_REJECTED','Independent public source read unavailable; reconcile without replay.');}finally{clearTimeout(timer);}}
 }
-function canonicalNativeSrc(path:string):string { if(!/^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/.test(path)||path.split('/').some(segment=>segment==='.'||segment==='..'))throw new BrowserError('PATH_DENIED','Invalid saved native src path.');return `src/${path}`; }

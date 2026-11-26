@@ -23,6 +23,21 @@ test('patch valid Add/Update/Delete uses complete preflight and exact source',as
 test('grep uses bounded RE2 engine, UTF-8 lines, excludes binary and exposes no private paths',async()=>{const f=fixture();await f.tools.call('write',{path:'scratch/text.txt',content:'a'.repeat(100000)+'!\nraven\n'});const result=await f.tools.call('grep',{pattern:'(a+)+$',path:'scratch'}) as {matches:unknown[]};assert.equal(result.matches.length,0);await assert.rejects(f.tools.call('grep',{pattern:'(?=x)',path:'scratch'}),rejectsCode('INVALID_INPUT'));const matches=await f.tools.call('grep',{pattern:'raven',path:'scratch'}) as {matches:{line:number}[]};assert.equal(matches.matches[0]?.line,2);});
 test('glob stable pagination, numbered reads, exact binary offsets and inclusive copy lines',async()=>{const f=fixture();await f.tools.call('write',{path:'scratch/text.txt',content:'a\r\nb\r\nc\n'});const glob=await f.tools.call('glob',{pattern:'**/*.bin',limit:1}) as {paths:string[];cursor:string};assert.equal(glob.paths.length,1);assert.ok(glob.cursor);const read=await f.tools.call('read',{path:'scratch/text.txt',offset:2,limit:1}) as {content:string};assert.equal(read.content,'2: b\r');await f.tools.call('copy_lines',{sourcePath:'scratch/text.txt',sourceStartLine:1,sourceEndLine:2,targetPath:'scratch/copied.txt'});assert.equal(decodeText(await f.vfs.read('scratch/copied.txt')),'a\r\nb\r\n');const binary=await f.tools.call('read_b64_file',{path:'src/bytes.bin',offset:1,limit:2}) as {data:string};assert.equal(binary.data,'/wE=');await assert.rejects(f.tools.call('read',{path:'src/bytes.bin'}),rejectsCode('BINARY_FILE'));});
 test('definition parser reports actual JS/TS and embedded HTML ranges; parse errors explicit',async()=>{const f=fixture();await f.tools.call('write',{path:'scratch/functions.ts',content:'export interface Item { id: string }\nexport function render(item: Item) { return item.id; }'});const parsed=await f.tools.call('list_code_definition_names',{path:'scratch/functions.ts'}) as {definitions:{name:string;startLine:number}[]};assert.ok(parsed.definitions.some(d=>d.name==='render'&&d.startLine===2));await f.tools.call('write',{path:'index.html',content:'<h1>x</h1>\n<script>\nfunction sample() {}\n</script>'});const html=await f.tools.call('list_code_definition_names',{path:'index.html'}) as {definitions:{name:string;startLine:number}[]};assert.ok(html.definitions.some(d=>d.name==='sample'&&d.startLine===3));await f.tools.call('write',{path:'scratch/bad.js',content:'function ('});await assert.rejects(f.tools.call('list_code_definition_names',{path:'scratch/bad.js'}),rejectsCode('PARSE_ERROR'));});
+test('public Generator ID is projected from validated native editor metadata, mismatches remain unknown',async()=>{
+ const f=fixture();
+ const source=f.page as unknown as Record<string,unknown>;
+ source.generatorPublicId='a'.repeat(32);
+ const info=await f.tools.call('generator_info') as {
+   publicId:{known:boolean;value:string|null;provenance:string};
+   savedBaseRevision:{known:boolean;value:null;reason:string};
+ };
+ assert.deepEqual(info.publicId,{known:true,value:'a'.repeat(32),provenance:'native-editor-public-id'});
+ assert.equal(info.savedBaseRevision.known,false);
+ const g=f.page.app.data.generator as typeof f.page.app.data.generator & {publicId?:string};
+ g.publicId='b'.repeat(32);
+ const conflict=await f.tools.call('generator_info') as {publicId:{known:boolean;value:string|null}};
+ assert.deepEqual(conflict.publicId,{known:false,value:null,provenance:'unknown-or-conflicting-native-id'});
+});
 test('native external Save stays gated despite ordinary source permission',async()=>{const f=fixture();const snapshot=await f.adapter.snapshot();await assert.rejects(f.adapter.save(snapshot.revision,{operationId:'op',permission:true,previousSavedSnapshot:snapshot,readSavedSnapshot:async()=>snapshot}),rejectsCode('UNSUPPORTED_INTERFACE'));});
 test('native Save verified fixture handles saved, stale and missing receipt without bypass API',async()=>{const f=fixture();const adapter=new NativeAdapter(f.page,{externalWritesVerified:true});const previous=await adapter.snapshot();f.manualPjs('intended');const intended=await adapter.snapshot();let saved=previous;f.page.app.saveGenerator=async()=>{saved=intended;return{status:'saved'};};const context={operationId:'op',permission:true,previousSavedSnapshot:previous,readSavedSnapshot:async()=>saved};const result=await adapter.save(intended.revision,context);assert.equal(result.status,'SUCCEEDED');saved=previous;f.page.app.saveGenerator=async()=>({status:'stale'});await assert.rejects(adapter.save(intended.revision,context),rejectsCode('NATIVE_CONFLICT'));f.page.app.saveGenerator=async()=>({status:'created'});assert.equal((await adapter.save(intended.revision,context)).status,'UNKNOWN');});
 test('schema-default directory read and root snapshot expose usable panel source',async()=>{const f=fixture();const dir=await f.tools.call('read',{path:'src',limit:2000}) as {paths:string[]};assert.equal(dir.paths.length,2);const snapshot=await f.tools.call('workspace_snapshot',{}) as {panels:Record<string,{text?:string}>};assert.equal(snapshot.panels['main.pjs']?.text,'animal\n  otter\n');await f.tools.call('write',{path:'index.html',content:'<script>function rootFunction() {}</script>'});const definitions=await f.tools.call('list_code_definition_names',{path:''}) as {definitions:{name:string}[]};assert.ok(definitions.definitions.some(d=>d.name==='rootFunction'));});
@@ -84,4 +99,62 @@ test('generator_info distinguishes known ownership from unknown Save and listing
  assert.deepEqual(third.editAccess,{known:false,allowed:null});
  assert.deepEqual(third.listing,{known:false,value:null});
  assert.doesNotMatch(JSON.stringify(third),/LEAK-ME/);
+});
+
+test('checkpoint receipt is readback-verified and includes source identity, binary bytes and pin status',async()=>{
+ const f=fixture();
+ const before=await f.vfs.snapshot();
+ const receipt=await f.tools.call('checkpoint_create',{label:'binary fixture',pinned:true}) as {
+  id:string;revision:string;sha256:string;bytes:number;sourceBytes:number;
+  fileCount:number;identity:{generatorId:string};pinned:boolean;
+ };
+ assert.equal(receipt.revision,before.revision);
+ assert.equal(receipt.sha256.length,64);
+ assert.equal(receipt.pinned,true);
+ assert.equal(receipt.identity.generatorId,'123');
+ assert.equal(receipt.fileCount,Object.keys(before.files).length);
+ assert.equal(receipt.sourceBytes,Object.values(before.files).reduce((n,b)=>n+b.length,0));
+ assert.ok(receipt.bytes>receipt.sourceBytes,'checkpoint includes base64/manifest metadata');
+ const listed=await f.tools.call('checkpoint_list',{}) as {
+  checkpoints:{id:string;sha256?:string;pinned:boolean}[];
+ };
+ assert.ok(listed.checkpoints.some(row=>row.id===receipt.id &&
+  row.sha256===receipt.sha256&&row.pinned===true));
+});
+test('successful text/base64 write receipts include byte-accurate SHA-256; failed writes do not fabricate receipts',async()=>{
+ const f=fixture();
+ const contents='Żółw 🐢\r\n';
+ const written=await f.tools.call('write',{path:'scratch/utf8.txt',content:contents}) as {
+  status:string;path:string;bytes:number;sha256:string;revision:string;
+ };
+ assert.equal(written.status,'SUCCEEDED');
+ assert.equal(written.path,'scratch/utf8.txt');
+ assert.equal(written.bytes,utf8.encode(contents).length);
+ assert.equal(written.sha256,await import('../../apps/userscript/src/native-types.js').then(m=>m.digest(utf8.encode(contents))));
+ const empty=await f.tools.call('save_b64_file',{path:'scratch/empty.bin',data:''}) as {
+  status:string;bytes:number;sha256:string;
+ };
+ assert.equal(empty.bytes,0);
+ assert.equal(empty.sha256,await import('../../apps/userscript/src/native-types.js').then(m=>m.digest(new Uint8Array())));
+ const before=await f.vfs.snapshot();
+ await assert.rejects(f.tools.call('write',{
+  path:'scratch/fail.txt',content:'new',expectedRevision:'stale'
+ }),rejectsCode('STALE_REVISION'));
+ assert.equal((await f.vfs.snapshot()).revision,before.revision);
+});
+
+test('restore fails before effects on mismatched durable checkpoint digest, preserves current draft',async()=>{
+ const f=fixture();
+ const before=await f.vfs.snapshot();
+ const receipt=await f.vfs.checkpoint('checksum fixture',true);
+ const key=`${f.vfs.prefix}:checkpoint:${receipt.id}`;
+ const prior=await f.store.get<Record<string,unknown>>(key);
+ assert.ok(prior);
+ await f.store.set(key,{...prior,sha256:'0'.repeat(64)});
+ await assert.rejects(f.vfs.restore(receipt.id,before.revision),rejectsCode('STORAGE_CORRUPT'));
+ assert.equal((await f.vfs.snapshot()).revision,before.revision);
+ assert.equal(decodeText(await f.vfs.read('main.pjs')),'animal\n  otter\n');
+ await f.store.set(key,prior);
+ await assert.rejects(f.vfs.restore(receipt.id,'stale-revision'),rejectsCode('STALE_REVISION'));
+ assert.equal((await f.vfs.snapshot()).revision,before.revision);
 });
