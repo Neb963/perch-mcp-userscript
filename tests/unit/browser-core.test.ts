@@ -85,3 +85,45 @@ test('generator_info distinguishes known ownership from unknown Save and listing
  assert.deepEqual(third.listing,{known:false,value:null});
  assert.doesNotMatch(JSON.stringify(third),/LEAK-ME/);
 });
+
+test('checkpoint receipt is readback-verified and includes source identity, binary bytes and pin status',async()=>{
+ const f=fixture();
+ const before=await f.vfs.snapshot();
+ const receipt=await f.tools.call('checkpoint_create',{label:'binary fixture',pinned:true}) as {
+  id:string;revision:string;sha256:string;bytes:number;sourceBytes:number;
+  fileCount:number;identity:{generatorId:string};pinned:boolean;
+ };
+ assert.equal(receipt.revision,before.revision);
+ assert.equal(receipt.sha256.length,64);
+ assert.equal(receipt.pinned,true);
+ assert.equal(receipt.identity.generatorId,'123');
+ assert.equal(receipt.fileCount,Object.keys(before.files).length);
+ assert.equal(receipt.sourceBytes,Object.values(before.files).reduce((n,b)=>n+b.length,0));
+ assert.ok(receipt.bytes>receipt.sourceBytes,'checkpoint includes base64/manifest metadata');
+ const listed=await f.tools.call('checkpoint_list',{}) as {
+  checkpoints:{id:string;sha256?:string;pinned:boolean}[];
+ };
+ assert.ok(listed.checkpoints.some(row=>row.id===receipt.id &&
+  row.sha256===receipt.sha256&&row.pinned===true));
+});
+test('successful text/base64 write receipts include byte-accurate SHA-256; failed writes do not fabricate receipts',async()=>{
+ const f=fixture();
+ const contents='Żółw 🐢\r\n';
+ const written=await f.tools.call('write',{path:'scratch/utf8.txt',content:contents}) as {
+  status:string;path:string;bytes:number;sha256:string;revision:string;
+ };
+ assert.equal(written.status,'SUCCEEDED');
+ assert.equal(written.path,'scratch/utf8.txt');
+ assert.equal(written.bytes,utf8.encode(contents).length);
+ assert.equal(written.sha256,await import('../../apps/userscript/src/native-types.js').then(m=>m.digest(utf8.encode(contents))));
+ const empty=await f.tools.call('save_b64_file',{path:'scratch/empty.bin',data:''}) as {
+  status:string;bytes:number;sha256:string;
+ };
+ assert.equal(empty.bytes,0);
+ assert.equal(empty.sha256,await import('../../apps/userscript/src/native-types.js').then(m=>m.digest(new Uint8Array())));
+ const before=await f.vfs.snapshot();
+ await assert.rejects(f.tools.call('write',{
+  path:'scratch/fail.txt',content:'new',expectedRevision:'stale'
+ }),rejectsCode('STALE_REVISION'));
+ assert.equal((await f.vfs.snapshot()).revision,before.revision);
+});
