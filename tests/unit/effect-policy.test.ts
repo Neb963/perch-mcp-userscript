@@ -36,3 +36,15 @@ test('only viewport geometry avoids persistent generator writer reservation',()=
  }
  assert.equal(requiresGeneratorReservation('write',false),false);
 });
+
+test('viewport reset accepts no dimensions but rejects omitted size on actual resize',async()=>{
+ const {validateToolCall}=await import('../../packages/contracts/src/tools.js');
+ assert.deepEqual(validateToolCall('set_viewport_size',{reset:true}),{reset:true});
+ assert.deepEqual(validateToolCall('set_viewport_size',{reset:true,width:390,height:844}),
+  {reset:true,width:390,height:844});
+ assert.throws(()=>validateToolCall('set_viewport_size',{}));
+ assert.throws(()=>validateToolCall('set_viewport_size',{width:390}));
+ assert.throws(()=>validateToolCall('set_viewport_size',{height:844}));
+ assert.deepEqual(validateToolCall('set_viewport_size',{width:390,height:844}),
+  {width:390,height:844,reset:false});
+});
