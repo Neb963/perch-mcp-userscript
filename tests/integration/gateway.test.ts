@@ -335,7 +335,7 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
     const rows = oauthAudit.events as Record<string, unknown>[];
     if (rows?.some((row) =>
       row.route === "authorize_complete" && row.originClass === "null" &&
-      row.status === 302 && row.code === "COMPLETE")) break;
+      row.status === 302 && row.code === "CALLBACK_REDIRECT_ISSUED")) break;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   const auditRows = oauthAudit.events as Record<string, unknown>[];
@@ -343,6 +343,45 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
   assert.ok(auditRows?.some((row) => row.route === "authorize_complete" && row.code === "SCOPE_DENIED" && row.originClass === "other"));
   assert.ok(!JSON.stringify(oauthAudit).includes(handle), "authorization handles never enter diagnostic history");
   const callback = new URL(complete.headers.get("location")!);
+  assert.equal(complete.headers.get("Cache-Control"), "no-store");
+  const grantsBeforeReplay = await data("/api/v1/admin/grants");
+  // Reproduce LibreWolf: browser receives a 302 but navigation is suppressed
+  // by a routing/privacy extension. A second click MUST recover the *same*
+  // callback without consuming the request twice or minting a new Grant.
+  const replay = await mf.dispatchFetch(base + "/authorize/complete", {
+    method: "POST",
+    headers: {
+      Origin: base,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ id: approvalId, handle }),
+    redirect: "manual",
+  });
+  assert.equal(replay.status, 200);
+  assert.equal(replay.headers.get("X-Perch-OAuth-Outcome"), "CALLBACK_RECOVERY_AVAILABLE");
+  const recoveryPage = await replay.text();
+  assert.match(recoveryPage, /Continue to ChatGPT/);
+  assert.match(recoveryPage, /referrerpolicy="no-referrer"/);
+  assert.match(recoveryPage, /rel="noreferrer"/);
+  assert.ok(recoveryPage.includes(callback.href.replaceAll("&", "&amp;")), "replay must offer the exact original OAuth callback");
+  const replayAgain = await mf.dispatchFetch(base + "/authorize/complete", {
+    method: "POST",
+    headers: {
+      Origin: base, "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ id: approvalId, handle }),
+    redirect: "manual",
+  });
+  assert.equal(replayAgain.status, 200);
+  assert.equal(await replayAgain.text(), recoveryPage, "recovery link remains deterministic");
+  assert.deepEqual(await data("/api/v1/admin/grants"), grantsBeforeReplay, "no second grant or revision on replay");
+  const badHandle = await mf.dispatchFetch(base + "/authorize/complete", {
+    method: "POST",
+    headers: { Origin: base, "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ id: approvalId, handle: handle + "x" }),
+    redirect: "manual",
+  });
+  assert.equal(badHandle.status, 401, "unrelated authorization handles cannot recover the code");
   assert.equal(callback.searchParams.get("state"), "state-fixture");
   assert.equal(callback.searchParams.get("iss"), base);
   const exchange = await mf.dispatchFetch(base + "/token", {
@@ -361,6 +400,19 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
   assert.ok(exchangeRaw, `Token exchange empty ${exchange.status}`);
   const issued = JSON.parse(exchangeRaw) as { access_token: string };
   assert.equal(exchange.status, 200, JSON.stringify(issued));
+  // Redirect issuance is not proof of ChatGPT receiving a token.
+  // A completed exchange is explicitly identifiable in the bounded audit.
+  let tokenAudit: Record<string, unknown>[] = [];
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const audit = await data("/api/v1/admin/diagnostics");
+    tokenAudit = audit.events as Record<string, unknown>[];
+    if (tokenAudit.some((row) => row.route === "token" && row.code === "TOKEN_EXCHANGE_SUCCEEDED")) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.ok(tokenAudit.some((row) => row.route === "token" && row.code === "TOKEN_EXCHANGE_SUCCEEDED"));
+  assert.ok(tokenAudit.some((row) => row.route === "authorize_complete" && row.code === "CALLBACK_RECOVERY_AVAILABLE"));
+  assert.ok(!JSON.stringify(tokenAudit).includes(callback.searchParams.get("code")!),
+    "diagnostic audit must never expose authorization codes");
   token = issued.access_token;
   assert.ok(token);
   const initialized = await request(

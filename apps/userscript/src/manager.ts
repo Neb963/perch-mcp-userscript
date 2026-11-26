@@ -284,6 +284,18 @@ export async function buildDiagnosticReport(
       code: /^[A-Z_][A-Z0-9_]{0,47}$/.test(str(event.code)) ? event.code : "UNKNOWN",
       traceId: /^[0-9a-f-]{36}$/.test(str(event.traceId)) ? event.traceId : undefined,
     })) : [];
+  // The gateway's 302 audit means it issued a callback, not that the AI
+  // client received or exchanged it. Events are intentionally uncorrelated
+  // across requests to avoid recording OAuth handles or authorization codes.
+  const lastRedirect = [...events].reverse().find((event) =>
+    event.route === "authorize_complete" &&
+    ["CALLBACK_REDIRECT_ISSUED", "COMPLETE"].includes(String(event.code)));
+  const tokenAfterRedirect = !!lastRedirect && events.some((event) =>
+    event.route === "token" && event.at >= lastRedirect.at &&
+    (event.code === "TOKEN_EXCHANGE_SUCCEEDED" || (event.status >= 200 && event.status < 300)));
+  const fallbackOffered = !!lastRedirect && events.some((event) =>
+    event.route === "authorize_complete" && event.at >= lastRedirect.at &&
+    event.code === "CALLBACK_RECOVERY_AVAILABLE");
   const local = record(client.diagnostics?.());
   const localEvents = Array.isArray(local.events) ? local.events.slice(-100).filter(isRecord)
     .map((event) => ({
@@ -332,6 +344,12 @@ export async function buildDiagnosticReport(
       }),
     },
     oauthAudit: { ok: remote.ok, ...(!remote.ok ? { error: remote } : {}), events },
+    oauthHandoff: {
+      lastRedirectIssuedAt: lastRedirect?.at ?? null,
+      tokenExchangeObservedAfterLastRedirect: tokenAfterRedirect,
+      manualCallbackRecoveryOffered: fallbackOffered,
+      evidenceLimit: "Server events do not identify the client or confirm navigation. Absence of a token exchange is not proof of a blocked client.",
+    },
     transport: { events: localEvents },
     note: "OAuth events do not appear in MCP operation Activity; inspect oauthAudit and transport.",
   };
@@ -951,6 +969,14 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       body,
       "muted",
     );
+    if (status.connection !== "connected")
+      p(
+        "Editor connection: " + status.connection +
+          ". The gateway can approve OAuth while this tab is offline, but MCP tools will not run. " +
+          "Open Workspaces and explicitly reconnect the matching native editor after checking for pending operations.",
+        body,
+        "muted",
+      );
     const row = el("div", undefined, "row"),
       name = field("Agent name"),
       target = select(

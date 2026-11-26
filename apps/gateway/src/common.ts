@@ -4,7 +4,7 @@ import type {
   DurableObjectStub,
   KVNamespace,
 } from "@cloudflare/workers-types";
-export const VERSION = "0.1.3";
+export const VERSION = "0.1.4";
 export const DEFAULT_PERMISSIONS = [
   "READ_SOURCE",
   "WRITE_SOURCE",

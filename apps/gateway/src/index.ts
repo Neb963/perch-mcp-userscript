@@ -147,6 +147,44 @@ function html(body: string, formPost = false): Response {
     },
   );
 }
+/** Never cache authorization codes and never persist the callback URL in diagnostics. */
+function callbackRedirect(url: string): Response {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: url,
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer",
+      "X-Perch-OAuth-Outcome": "CALLBACK_REDIRECT_ISSUED",
+    },
+  });
+}
+function retryCompletionForm(id: string, handle: string, title: string): Response {
+  return html(
+    "<h1>" + title + "</h1><p>Authorization is still processing. This retry checks the same request; it does not create another Grant or authorization code.</p>" +
+      '<form method="POST" action="/authorize/complete"><input type="hidden" name="id" value="' +
+      escape(id) + '"><input type="hidden" name="handle" value="' + escape(handle) +
+      '"><button type="submit">Check completion again</button></form>',
+    true,
+  );
+}
+function manualCallback(url: string): Response {
+  // URL was sealed in Registry after the SDK validated the exact client.
+  // User-initiated navigation is a fallback when an extension suppresses an
+  // HTTP 302; no script, open redirect, cross-origin fetch or token in logs.
+  const result = html(
+    '<h1>Authorization ready</h1><p>The gateway issued the ChatGPT callback, but the browser did not finish navigating. ' +
+      'Use the link below to finish the same authorization. Do not create another approval.</p>' +
+      '<p><a rel="noreferrer" referrerpolicy="no-referrer" href="' +
+      escape(url) + '">Continue to ChatGPT</a></p>' +
+      '<p>If this link is blocked, inspect the browser extension or persona routing policy for ChatGPT. ' +
+      'Allow only the intended route; do not turn off privacy enforcement globally. ' +
+      'If the code has expired, restart the ChatGPT connector authorization.</p>',
+  );
+  const headers = new Headers(result.headers);
+  headers.set("X-Perch-OAuth-Outcome", "CALLBACK_RECOVERY_AVAILABLE");
+  return new Response(result.body, { status: result.status, headers });
+}
 function oauthServer(config: Configuration) {
   if (!config.issuer)
     throw new ApiError(
@@ -601,6 +639,7 @@ async function route(
       );
     let result: {
       state: string;
+      redirectTo?: string;
       request?: AuthRequest;
       grant?: { id: string; permissions: string[] };
       props?: AuthProps;
@@ -617,6 +656,21 @@ async function route(
         );
       throw error;
     }
+    if (result.state === "completed" && result.redirectTo)
+      return manualCallback(result.redirectTo);
+    if (result.state === "processing")
+      return retryCompletionForm(
+        form.get("id") ?? "", form.get("handle") ?? "",
+        "Authorization is completing",
+      );
+    if (result.state === "failed")
+      return html(
+        "<h1>Authorization could not complete</h1><p>The provisional Grant was revoked. Restart authorization from ChatGPT.</p>",
+      );
+    if (result.state === "revoked")
+      return html(
+        "<h1>Authorization revoked</h1><p>The Workspace Grant is no longer active. Restart authorization from ChatGPT after checking the Workspace binding.</p>",
+      );
     if (result.state === "pending")
       // Preserve the one-time authorization handle so an early click can be
       // retried in place; never require browser Back or a new OAuth flow.
@@ -637,27 +691,61 @@ async function route(
       );
     if (result.state !== "approved" || !result.request || !result.props)
       return html(
-        "<h1>Authorization denied or consumed</h1><p>Start connector authorization again if needed.</p>",
+        "<h1>Authorization no longer recoverable</h1><p>This code was issued by an older release, denied or expired. Start a fresh connector authorization in ChatGPT. No duplicate Grant will be issued.</p>",
       );
-    const completed = await authorizationServer
-      .getOAuthApi(env)
-      .completeAuthorization({
-        request: result.request,
-        userId: "operator",
-        metadata: {
-          grantId: result.props.grantId,
-          agentId: result.props.agentId,
-        },
-        scope: [
-          "mcp",
-          ...(result.request.scope.includes("offline_access")
-            ? ["offline_access"]
-            : []),
-        ],
-        props: result.props,
-        revokeExistingGrants: false,
+    const approval = {
+      id: form.get("id"),
+      handle: form.get("handle"),
+      grantId: result.props.grantId,
+    };
+    let completed: { redirectTo: string };
+    try {
+      completed = await authorizationServer
+        .getOAuthApi(env)
+        .completeAuthorization({
+          request: result.request,
+          userId: "operator",
+          metadata: {
+            grantId: result.props.grantId,
+            agentId: result.props.agentId,
+          },
+          scope: [
+            "mcp",
+            ...(result.request.scope.includes("offline_access")
+              ? ["offline_access"]
+              : []),
+          ],
+          props: result.props,
+          revokeExistingGrants: false,
+        });
+    } catch (error) {
+      // Do not leave a privileged orphan Grant if the OAuth SDK fails.
+      await rpc(registry(env), "/internal/oauth/abort-completion", approval)
+        .catch(() => undefined);
+      throw error;
+    }
+    try {
+      await rpc(registry(env), "/internal/oauth/redirect-commit", {
+        ...approval, redirectTo: completed.redirectTo,
       });
-    return Response.redirect(completed.redirectTo, 302);
+    } catch (error) {
+      // A lost commit response is ambiguous. Read back the sealed redirect
+      // before revoking anything; never issue a second OAuth code.
+      try {
+        const current = await rpc<{ state: string; redirectTo?: string }>(
+          registry(env), "/internal/oauth/consume", {
+            id: approval.id, handle: approval.handle,
+          },
+        );
+        if (current.state === "completed" &&
+            current.redirectTo === completed.redirectTo)
+          return callbackRedirect(current.redirectTo);
+      } catch { /* Underlying storage may be unavailable. */ }
+      await rpc(registry(env), "/internal/oauth/abort-completion", approval)
+        .catch(() => undefined);
+      throw error;
+    }
+    return callbackRedirect(completed.redirectTo);
   }
   const match =
     /^\/(?:\.well-known\/oauth-protected-resource\/)?mcp\/([a-zA-Z0-9_-]+)$/.exec(
@@ -745,8 +833,11 @@ export default {
       const response = await route(request, env, ctx);
       auditOAuth(
         request, env, ctx, response.status,
-        response.status === 302 ? "COMPLETE" :
-          response.status >= 400 ? "HTTP_ERROR" : "PENDING_OR_INFO",
+        response.headers.get("X-Perch-OAuth-Outcome") ??
+          (new URL(request.url).pathname === "/token" && response.ok
+            ? "TOKEN_EXCHANGE_SUCCEEDED"
+            : response.status === 302 ? "REDIRECT_ISSUED" :
+              response.status >= 400 ? "HTTP_ERROR" : "PENDING_OR_INFO"),
         crypto.randomUUID(),
       );
       return cors(response, request, env, issuer);
