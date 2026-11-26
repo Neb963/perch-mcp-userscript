@@ -111,7 +111,62 @@ export class VirtualFileSystem {
     return result.sort((a,b) => b.createdAt-a.createdAt);
   }
 
-  async restore(id: string, expectedRevision: string): Promise<MutationResult> { if (!/^[a-f0-9-]{36}$/.test(id)) throw new BrowserError('INVALID_INPUT', 'Invalid Checkpoint ID.'); const raw = await this.chunks.get(`checkpoint:${id}`); if (!raw) throw new BrowserError('FILE_NOT_FOUND', 'Checkpoint missing.'); const saved = JSON.parse(new TextDecoder().decode(raw)) as StoredSource; const before = await this.snapshot(); if (saved.version !== 1 || !equalIdentity(saved.identity, before.identity)) throw new BrowserError('BINDING_MISMATCH', 'Checkpoint belongs to another generator or draft.'); const paths = new Set([...Object.keys(before.files), ...Object.keys(saved.files)]); const writes = [...paths].filter(path => !path.startsWith('imports/')).map(path => ({ path, bytes: saved.files[path] === undefined ? null : base64ToBytes(saved.files[path]!) })); return this.writeBatch(writes, expectedRevision); }
+  async restore(id: string, expectedRevision: string): Promise<MutationResult> {
+    if (!/^[a-f0-9-]{36}$/.test(id)) throw new BrowserError('INVALID_INPUT','Invalid Checkpoint ID.');
+    const raw=await this.chunks.get(`checkpoint:${id}`);
+    if (!raw) throw new BrowserError('FILE_NOT_FOUND','Checkpoint missing.');
+    const metadata=await this.store.get<{sha256?:string;bytes?:number}>(`${this.prefix}:checkpoint:${id}`);
+    if (metadata?.sha256 && await digest(raw)!==metadata.sha256)
+      throw new BrowserError('STORAGE_CORRUPT',
+        'Checkpoint checksum differs from the persisted receipt; source unchanged.');
+    if (metadata?.bytes!==undefined && raw.length!==metadata.bytes)
+      throw new BrowserError('STORAGE_CORRUPT',
+        'Checkpoint byte count differs from the persisted receipt; source unchanged.');
+    let saved:StoredSource;
+    try {
+      saved=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw)) as StoredSource;
+      if (!saved || saved.version!==1 || !saved.identity ||
+          !saved.files || typeof saved.files!=='object' || Array.isArray(saved.files) ||
+          typeof saved.revision!=='string' || !/^\\d+:[a-f0-9]{64}$/.test(saved.revision))
+        throw new Error('invalid-checkpoint');
+    } catch {
+      throw new BrowserError('STORAGE_CORRUPT',
+        'Checkpoint metadata is malformed; source unchanged.');
+    }
+    const before=await this.snapshot();
+    if (!equalIdentity(saved.identity,before.identity))
+      throw new BrowserError('BINDING_MISMATCH','Checkpoint belongs to another generator or draft.');
+    if (before.revision!==expectedRevision)
+      throw new BrowserError('STALE_REVISION','Workspace changed before checkpoint restore preflight.');
+    const restored:Record<string,Uint8Array>={};
+    const entries=Object.entries(saved.files);
+    if (entries.length>1000)
+      throw new BrowserError('LIMIT_EXCEEDED','Checkpoint exceeds the 1000-file restoration budget.');
+    let bytes=0;
+    try {
+      for(const [path,base64] of entries){
+        canonicalPath(path);
+        if(typeof base64!=='string')throw new Error('invalid-byte-string');
+        const content=base64ToBytes(base64);
+        if(content.length>16*1024*1024)throw new Error('file-limit');
+        bytes+=content.length;
+        if(bytes>this.maxBytes)throw new Error('storage-limit');
+        restored[path]=content;
+      }
+    }catch{
+      throw new BrowserError('STORAGE_CORRUPT',
+        'Checkpoint contains invalid paths or oversized/corrupt bytes; source unchanged.');
+    }
+    if (await snapshotRevision(saved.identity,restored)!==saved.revision.split(':')[1])
+      throw new BrowserError('STORAGE_CORRUPT',
+        'Checkpoint full-source digest differs from its declared revision; source unchanged.');
+    const paths=new Set([...Object.keys(before.files),...Object.keys(restored)]);
+    const writes=[...paths].filter(path=>!path.startsWith('imports/'))
+      .map(path=>({path,bytes:restored[path]??null}));
+    // writeBatch atomically preflights the complete write set and preserves
+    // the current draft as a separate checkpoint before mutation.
+    return this.writeBatch(writes,expectedRevision);
+  }
   /** Trusted public-source adapter only. Agent write tools cannot mutate this revision-pinned cache. */
   async importSnapshot(id: string, files: Record<string, Uint8Array>, expectedRevision?: string): Promise<{ revision: string; paths: string[]; sha256: string }> {
     return this.serial(async () => {
