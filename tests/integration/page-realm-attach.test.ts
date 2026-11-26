@@ -18,6 +18,16 @@ test("bundled Violentmonkey content script reads real Firefox page identity with
     url: "https://perchance.org/aleph-alpha#edit",
   });
   let capturedShadow: ShadowRoot | undefined;
+  // jsdom cannot construct a real trusted MouseEvent. Capture the native
+  // manager listener and invoke it as the browser would after trusted input.
+  // Do not weaken the production event.isTrusted security gate.
+  const buttonListeners = new WeakMap<HTMLButtonElement, EventListenerOrEventListenerObject>();
+  const originalAddListener = dom.window.EventTarget.prototype.addEventListener;
+  dom.window.EventTarget.prototype.addEventListener = function (type, callback, options) {
+    if (type === "click" && this instanceof dom.window.HTMLButtonElement && callback)
+      buttonListeners.set(this, callback);
+    return originalAddListener.call(this, type, callback, options);
+  };
   const nativeAttach = dom.window.Element.prototype.attachShadow;
   dom.window.Element.prototype.attachShadow = function (options: ShadowRootInit) {
     const shadow = nativeAttach.call(this, options);
@@ -73,7 +83,9 @@ test("bundled Violentmonkey content script reads real Firefox page identity with
     const buttons = [...capturedShadow!.querySelectorAll("button")];
     const probe = buttons.find((element) => element.textContent?.includes("Read-only editor probe"));
     assert.ok(probe, "manager exposes a read-only capability probe");
-    probe.click();
+    const trustedListener = buttonListeners.get(probe);
+    assert.equal(typeof trustedListener, "function");
+    (trustedListener as EventListener).call(probe, { isTrusted: true } as MouseEvent);
     for (let i = 0; i < 40 && !capturedShadow!.textContent?.includes('"generatorId": "142"'); i++)
       await new Promise((resolve) => setTimeout(resolve, 5));
     const output = capturedShadow!.textContent || "";
