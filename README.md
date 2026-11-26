@@ -8,6 +8,9 @@ Perch MCP connects external AI web clients to independent Perchance editor tabs 
 - [Client specification](CLIENT_SPEC.md) — product contract.
 - [Architecture](docs/DESIGN.md) — implementation design.
 - [Tool contract](docs/TOOLS.md) — functional parity inventory and semantics.
+- [Protocol and persistence](docs/PROTOCOL.md) — management routes, transport, fencing and persistence contracts.
+- [Parity investigation addendum](docs/PARITY_NOTES.md) — additional evidence and blockers.
+- [Default development workflow](docs/DEFAULT_WORKFLOW.md) — editable, client-neutral workflow seed.
 - [Deployment and operator UX](docs/SETUP.md) — setup and maintenance contract.
 - [Evidence](docs/EVIDENCE.md) — provenance, assumptions and feasibility gates.
 - [Verification](docs/TEST_PLAN.md) — release evidence.

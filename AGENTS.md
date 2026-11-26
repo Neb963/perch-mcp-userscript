@@ -1,6 +1,6 @@
 # Engineering contract
 
-Read CLIENT_SPEC.md, docs/DESIGN.md, docs/TOOLS.md, docs/SETUP.md, docs/EVIDENCE.md, docs/TEST_PLAN.md and todo.md before changes. Product scope is authoritative; design is revisable only through recorded decisions. Never silently weaken a requirement to pass a test. Keep canonical identifiers consistent.
+Read CLIENT_SPEC.md, docs/DESIGN.md, docs/PROTOCOL.md, docs/PARITY_NOTES.md, docs/TOOLS.md, docs/SETUP.md, docs/EVIDENCE.md, docs/TEST_PLAN.md and todo.md before changes. Product scope is authoritative; design is revisable only through recorded decisions. Never silently weaken a requirement to pass a test. Keep canonical identifiers consistent.
 
 Inspect actual repository state; select the earliest dependency-eligible phase; record a bounded plan, changes, tests, evidence and remaining risks in todo.md. Commit coherent verified checkpoints; no force push or unrelated edits. Do not claim live Firefox, cloud deployment or provider behavior from mocks. Prefer local tests; run targeted CI sparingly; do not deploy to an owner's account without authorization. No production generator mutations during tests. Disposable fixtures require explicit operator authorization and a cleanup ledger. No secret-bearing captures, original third-party bundles/skills or private generator data in this public repo. Do not automate sign-in, CAPTCHA, account changes or native Helper sessions.
 
