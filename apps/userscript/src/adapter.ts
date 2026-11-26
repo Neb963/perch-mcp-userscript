@@ -1,7 +1,7 @@
 import { BrowserError, canonicalPath, equalBytes, equalIdentity, snapshotRevision, utf8, type CapabilityReport, type FileWrite, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
 interface TextEditor { state?: {readOnly?:unknown}; getValue(): unknown; setValue(value: string): unknown; isClean?(): unknown }
 interface SrcState { ready(): unknown; idle?(): unknown; list(): unknown; readFile(path: string): unknown; writeFile(path: string, bytes: unknown): unknown; deleteFile(path: string): unknown; getDraftId(): unknown; isDirty?(): unknown; hasPending?(): unknown }
-interface NativePage { app?: { data?: { generator?: { id?: unknown; name?: unknown; publicId?: unknown } }; saveGenerator?: () => unknown; userOwnsThisGenerator?: unknown; userCanSaveThisGenerator?: () => unknown }; modelTextEditor?: TextEditor; outputTemplateEditor?: TextEditor; srcState?: SrcState; currentInterfaceMode?: unknown; __editorReady?: unknown; __draftChoiceSettled?: unknown; perchanceSaveState?: unknown; __generatorIdentityTransition?: unknown; __draftHandoffClosed?:unknown; editorCollabInitialSyncIsPending?:unknown; __collabRoomFailed?:unknown; yjsProvider?:unknown; aiAgentActivityState?:()=>unknown; __aiGeneratorGuard?:{blocked?:()=>unknown}; editor?: { handleReloadButtonClick?: () => unknown }; editorUndoManagers?: Record<string, { undo?: () => unknown; redo?: () => unknown }> }
+interface NativePage { generatorPublicId?:unknown; app?: { data?: { generator?: { id?: unknown; name?: unknown; publicId?: unknown } }; saveGenerator?: () => unknown; userOwnsThisGenerator?: unknown; userCanSaveThisGenerator?: () => unknown }; modelTextEditor?: TextEditor; outputTemplateEditor?: TextEditor; srcState?: SrcState; currentInterfaceMode?: unknown; __editorReady?: unknown; __draftChoiceSettled?: unknown; perchanceSaveState?: unknown; __generatorIdentityTransition?: unknown; __draftHandoffClosed?:unknown; editorCollabInitialSyncIsPending?:unknown; __collabRoomFailed?:unknown; yjsProvider?:unknown; aiAgentActivityState?:()=>unknown; __aiGeneratorGuard?:{blocked?:()=>unknown}; editor?: { handleReloadButtonClick?: () => unknown }; editorUndoManagers?: Record<string, { undo?: () => unknown; redo?: () => unknown }> }
 export interface AdapterOptions { cloneInto?: (value: unknown) => unknown; externalWritesVerified?: boolean; maxSnapshotBytes?: number }
 export interface SaveContext { operationId: string; permission: boolean; previousSavedSnapshot: NativeSnapshot; readSavedSnapshot(): Promise<NativeSnapshot>; receipt?: { status: string } }
 function identityString(value: unknown, field: string): string { if (typeof value === 'string' && value.length <= 512) return value; if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value); throw new BrowserError('UNSUPPORTED_INTERFACE', `Native ${field} is not a losslessly serializable identifier.`); }
@@ -36,6 +36,8 @@ export class NativeAdapter {
     ownership: { known: boolean; owned: boolean | null };
     editAccess: { known: boolean; allowed: boolean | null };
     listing: { known: boolean; value: 'listed' | 'unlisted' | null };
+    publicId: { known: boolean; value: string | null; provenance: string };
+    savedBaseRevision: { known: false; value: null; reason: string };
   } {
     const app = this.page.app;
     const owned = typeof app?.userOwnsThisGenerator === 'boolean'
@@ -51,10 +53,25 @@ export class NativeAdapter {
       ? explicitListing
       : typeof generator?.isListed === 'boolean'
         ? (generator.isListed ? 'listed' : 'unlisted') : null;
+    // Prefer the saved Generator object's publicId; fall back to the native
+    // editor's generatorPublicId only when both representations do not conflict.
+    const fromGenerator=generator?.publicId;
+    const fromEditor=this.page.generatorPublicId;
+    const valid=(value:unknown):value is string=>
+      typeof value==='string' && /^[a-z0-9]{16,64}$/.test(value);
+    const nativePublicId=valid(fromGenerator)?fromGenerator:
+      valid(fromEditor)?fromEditor:null;
+    const conflicting=valid(fromGenerator)&&valid(fromEditor)&&fromGenerator!==fromEditor;
+    const publicId=conflicting?null:nativePublicId;
     return {
       ownership: { known: owned !== null, owned },
       editAccess: { known: allowed !== null, allowed },
       listing: { known: listed !== null, value: listed },
+      publicId: { known: publicId!==null, value:publicId,
+        provenance: publicId===null ? 'unknown-or-conflicting-native-id' :
+          valid(fromGenerator)?'native-generator-data':'native-editor-public-id' },
+      savedBaseRevision: { known:false, value:null,
+        reason:'No complete independent saved-source readback was performed for generator_info.' },
     };
   }
   bind(identity: NativeIdentity): void { this.boundIdentity = structuredClone(identity); }
