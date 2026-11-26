@@ -1,7 +1,7 @@
 import { ExecutionError } from './compute.js';
 
 export interface PreviewDiagnostics { consoleOutput: string[]; perchanceErrors: unknown[]; syntaxErrors: unknown[] }
-export interface PreviewReceipt extends PreviewDiagnostics { appliedRevision?: string; previewGeneration?: string; result?: unknown; warnings?:unknown[]; diagnosticsAvailability?:Record<string,string> }
+export interface PreviewReceipt extends PreviewDiagnostics { appliedRevision?: string; previewGeneration?: string; result?: unknown; warnings?:unknown[]; diagnosticsAvailability?:Record<string,string>; diagnosticChannels?:Record<string,string> }
 export interface PreviewBridge {
   /** Live, zero-source-mutation native protocol probe before first use. */
   attest?(capability: 'evaluate' | 'refresh' | 'preamble'): Promise<boolean>;
@@ -28,7 +28,10 @@ function checkedReceipt(value: unknown): PreviewReceipt {
   if (!Array.isArray(r.consoleOutput) || !r.consoleOutput.every(x => typeof x === 'string') || !Array.isArray(r.perchanceErrors) || !Array.isArray(r.syntaxErrors)) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'The native preview receipt contract changed.');
   const serialized = JSON.stringify(value);
   if (new TextEncoder().encode(serialized).byteLength > 262_144) throw new ExecutionError('LIMIT_EXCEEDED', 'Preview result exceeds 256 KiB.');
-  return { consoleOutput: (r.consoleOutput as string[]).slice(0, 500), perchanceErrors: r.perchanceErrors.slice(0, 500), syntaxErrors: r.syntaxErrors.slice(0, 500), ...(typeof r.appliedRevision === 'string' ? { appliedRevision: r.appliedRevision } : {}), ...(typeof r.previewGeneration === 'string' ? { previewGeneration: r.previewGeneration } : {}), ...(Array.isArray(r.warnings)?{warnings:r.warnings.slice(0,500)}:{}),...(r.diagnosticsAvailability&&typeof r.diagnosticsAvailability==='object'?{diagnosticsAvailability:r.diagnosticsAvailability as Record<string,string>}:{}),...(Object.hasOwn(r, 'result') ? { result: JSON.parse(JSON.stringify(r.result ?? null)) as unknown } : {}) };
+  return { consoleOutput: (r.consoleOutput as string[]).slice(0, 500), perchanceErrors: r.perchanceErrors.slice(0, 500), syntaxErrors: r.syntaxErrors.slice(0, 500), ...(typeof r.appliedRevision === 'string' ? { appliedRevision: r.appliedRevision } : {}), ...(typeof r.previewGeneration === 'string' ? { previewGeneration: r.previewGeneration } : {}), ...(Array.isArray(r.warnings)?{warnings:r.warnings.slice(0,500)}:{}),...(r.diagnosticsAvailability&&typeof r.diagnosticsAvailability==='object'?{diagnosticsAvailability:r.diagnosticsAvailability as Record<string,string>}:{}),...(r.diagnosticChannels&&typeof r.diagnosticChannels==='object'&&
+    !Array.isArray(r.diagnosticChannels)&&
+    Object.values(r.diagnosticChannels).every(x=>typeof x==='string'&&x.length<256)
+    ?{diagnosticChannels:r.diagnosticChannels as Record<string,string>}:{}),...(Object.hasOwn(r, 'result') ? { result: JSON.parse(JSON.stringify(r.result ?? null)) as unknown } : {}) };
 }
 function body(args: Record<string, unknown>, key: string): string | undefined { const v = args[key]; if (v === undefined) return undefined; if (typeof v !== 'string' || new TextEncoder().encode(v).byteLength > 262_144) throw new ExecutionError('INVALID_INPUT', `${key} must be text no larger than 256 KiB.`); return v; }
 async function deadline<T>(promise: Promise<T>, timeout: number): Promise<T> {
@@ -395,9 +398,13 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
       if(!path||!validLine)precise=false;
       errors.push({category:'editor-syntax',message:name.slice(0,2000),
         path, line:validLine?line:null,column:validColumn?column:null,
-        locationVerified:Boolean(path&&validLine),sourceRevision:sourceBefore});
+        locationVerified:false,locationProvenance:'native-unverified',
+        sourceRevision:sourceBefore});
     }
-    availability.syntax=precise?'captured':'partial';
+    // A non-empty well-formed native error is evidence of capture, not proof
+    // of exact source-map fidelity. An empty array remains partial coverage
+    // until a deliberately malformed live disposable source is verified.
+    availability.syntax=precise&&errors.length>0?'captured':'partial';
     return {...receipt,syntaxErrors:errors,diagnosticsAvailability:availability,
       diagnosticChannels:{editorSyntax:availability.syntax,console:'preview-iframe',
         nativeWarnings:'native-editor',syntaxSourceRevision:sourceBefore}};
