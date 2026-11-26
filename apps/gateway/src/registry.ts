@@ -495,10 +495,16 @@ export class Registry {
             this.db.put("approval/" + a.id, a);
             return { state: "denied", request: a.request };
           }
-          if (a.state === "consumed")
-            return a.completionRedirect
-              ? { state: "completed", redirectTo: a.completionRedirect }
-              : { state: a.completionFailed ? "failed" : a.completionGrantId ? "processing" : "consumed" };
+          if (a.state === "consumed") {
+            if (a.completionRedirect) {
+              const grant = a.completionGrantId
+                ? this.db.get<GrantRecord>("grant/" + a.completionGrantId) : null;
+              return grant?.state === "active" && grant.expiresAt > Date.now()
+                ? { state: "completed", redirectTo: a.completionRedirect }
+                : { state: "revoked" };
+            }
+            return { state: a.completionFailed ? "failed" : a.completionGrantId ? "processing" : "consumed" };
+          }
           if (a.state !== "approved") return { state: a.state };
           const w = this.getWorkspace(a.workspaceId),
             agent = this.getAgent(a.agentId);
@@ -566,6 +572,8 @@ export class Registry {
         const a = this.db.get<Approval>("approval/" + approvalId);
         if (!a || a.handleHash !== handleHash)
           throw new ApiError("AUTH_REQUIRED", "Invalid authorization handle.", 401);
+        if (a.expiresAt <= Date.now())
+          throw new ApiError("EXPIRED", "Authorization window expired before callback issuance.", 410);
         if (a.state !== "consumed" || a.completionGrantId !== grantId || a.completionFailed)
           throw new ApiError("CONFLICT", "Authorization is not awaiting this redirect.", 409);
         if (a.completionRedirect) {
