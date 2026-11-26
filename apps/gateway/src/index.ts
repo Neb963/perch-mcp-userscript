@@ -497,7 +497,7 @@ async function route(
       scope: string[];
     }>(registry(env), "/internal/oauth/pending", { request: auth });
     return html(
-      "<h1>Approve in Perch MCP</h1><p>Open the userscript manager and match code <code>" +
+      "<h1>Approve in Perch MCP</h1><p>Open Perch MCP → Agents in the Perchance editor and match code <code>" +
         escape(pending.code) +
         "</code>.</p><dl><dt>Agent</dt><dd>" +
         escape(pending.agentLabel) +
