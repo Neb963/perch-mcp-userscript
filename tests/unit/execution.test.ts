@@ -142,3 +142,32 @@ test('uncertain VFS commit is reported as unknown rather than no-effect',async()
   const f=fixture();f.broker.writeBatch=async()=>{throw new ExecutionError('EFFECT_UNKNOWN','Native write receipt lost.','UNKNOWN');};
   await assert.rejects(executeCompute({js:'await fs.writeTextFile("scratch/a","value");',files:f.broker}),(e:ExecutionError)=>e.effectState==='UNKNOWN' && e.effects[0]?.kind==='files');
 });
+
+test('viewport reset rejects false success when live child remains at emulated width',async()=>{
+ const dom=new JSDOM('<div><iframe style="border:0"></iframe></div>');
+ const frame=dom.window.document.querySelector('iframe') as unknown as HTMLIFrameElement;
+ const parent=frame.parentElement!;
+ Object.defineProperty(parent,'clientWidth',{get:()=>917});
+ Object.defineProperty(frame,'clientWidth',{get:()=>frame.style.width?parseInt(frame.style.width):917});
+ Object.defineProperty(frame,'clientHeight',{get:()=>frame.style.height?parseInt(frame.style.height):505});
+ let stillEmulated=false;
+ const bridge={
+  refresh:async()=>({consoleOutput:[],perchanceErrors:[],syntaxErrors:[]}),
+  evaluate:async(js:string)=>{
+   assert.match(js,/innerWidth/);
+   const emulated=frame.style.width?parseInt(frame.style.width):917;
+   const natural=stillEmulated?390:emulated;
+   return {consoleOutput:[],perchanceErrors:[],syntaxErrors:[],result:{
+    width:natural,height:frame.style.height?parseInt(frame.style.height):505,
+   }};
+  },
+ };
+ const adapter=new PreviewAdapter({frame:()=>frame,revision:async()=> 'r1',bridge,verified:{evaluate:true}});
+ const applied=await adapter.call('set_viewport_size',{width:390,height:844}) as {width:number};
+ assert.equal(applied.width,390);
+ stillEmulated=true;
+ await assert.rejects(adapter.call('set_viewport_size',{reset:true}),
+  (e:ExecutionError)=>e.code==='NATIVE_CONFLICT'&&e.effectState==='PARTIAL');
+ assert.equal(frame.getAttribute('style'),'border:0',
+  'reset removes only the adapter-owned CSS without damaging existing native style');
+});
