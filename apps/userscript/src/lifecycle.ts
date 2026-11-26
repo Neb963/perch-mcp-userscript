@@ -30,7 +30,7 @@ export class NativeLifecycle {
     const hash=await lifecycleApprovalDigest(tool,args,before.identity,before.revision,context.epoch);const key=this.prefix+context.operationId;const previous=await this.store.get<Intent>(key);
     if(previous){if(previous.digest!==hash)throw new BrowserError('INVALID_INPUT','Operation ID already records another lifecycle intent.');return previous.result??this.unknown(previous.operationId,'Retained dispatched lifecycle intent cannot be replayed.');}
     for(const candidate of(await this.store.list()).filter(k=>k.startsWith(this.prefix))){const unresolved=await this.store.get<Intent>(candidate);if(unresolved&&unresolved.identity.generatorId===before.identity.generatorId&&unresolved.phase!=='SUCCEEDED')throw new BrowserError('EFFECT_UNKNOWN','An earlier lifecycle effect remains unresolved.');}
-    if(this.page.app?.userOwnsThisGenerator!==true)throw new BrowserError('SCOPE_DENIED','Native ownership is not positively established.');
+    if(await this.adapter.ownership()!==true)throw new BrowserError('SCOPE_DENIED','Native page-global generator ownership is not positively established.');
     if(approved.has(tool)){const a=context.approval;if(!a||a.consumed||a.expiresAt<=Date.now()||a.tool!==tool||a.epoch!==context.epoch||a.sourceRevision!==before.revision||a.inputDigest!==hash||!equalIdentity(a.target,before.identity))throw new BrowserError('APPROVAL_REQUIRED','Fresh exact action-bound Operator approval is required.');if(tool==='duplicate_generator'&&a.sourceChoice!=='saved')throw new BrowserError('APPROVAL_REQUIRED','Duplicate requires the Operator to approve saved source as its explicit source choice.');}
     const saved=await this.readback.readGenerator(before.identity.slug);if(!saved.owned||saved.identity.generatorId!==before.identity.generatorId)throw new BrowserError('BINDING_MISMATCH','Independent saved identity/ownership differs.');
     if(tool==='duplicate_generator'&&await sourceDigest(before.files)!==await sourceDigest(saved.files))throw new BrowserError('UNSUPPORTED_INTERFACE','The current native duplicate control includes unsaved owner draft changes; a saved-source duplicate requires the complete native draft to match saved source before dispatch.');
@@ -42,14 +42,45 @@ export class NativeLifecycle {
     try{const raw=await dispatch();if(raw&&typeof raw==='object'){const r=raw as Record<string,unknown>;if(typeof r.status==='string'){intent.receipt={status:r.status};if(typeof r.name==='string')intent.receipt.name=r.name;if(typeof r.generatorId==='string'||typeof r.generatorId==='number')intent.receipt.generatorId=String(r.generatorId);await this.store.set(key,intent);}}}catch{intent.phase='UNKNOWN';intent.result=this.unknown(context.operationId,'Native lifecycle call failed after dispatch; its effect may have occurred.');await this.store.set(key,intent);return intent.result;}
     return this.verify(intent);
   }
+  /** The native listing menu loads appExtras and refreshes metadata
+   * asynchronously; an awaited app.openListingMenu() is not a readiness ack. */
+  private async listingButton(listing:'listed'|'unlisted'):Promise<HTMLButtonElement> {
+    const doc=this.page.document;
+    if(!doc)throw new BrowserError('UNSUPPORTED_INTERFACE','Native listing document is unavailable.');
+    const deadline=Date.now()+5000;
+    for(;;){
+      const node=doc.querySelector<HTMLButtonElement>(`#listingMenuEl button[data-value="${listing}"]`);
+      if(node && node.isConnected && !node.disabled && !node.hidden &&
+        node.getAttribute('aria-disabled')!=='true')return node;
+      if(Date.now()>=deadline)throw new BrowserError('UNSUPPORTED_INTERFACE','Native listing menu did not expose an enabled matching action.');
+      await new Promise<void>(resolve=>setTimeout(resolve,75));
+    }
+  }
   private async prepare(tool:string,args:Record<string,unknown>):Promise<()=>Promise<unknown>>{
     if(tool==='set_listing'){
       if(args.listing!=='listed'&&args.listing!=='unlisted')throw new BrowserError('INVALID_INPUT','Listing must be listed or unlisted.');
       if(typeof this.page.app?.openListingMenu!=='function'||!this.page.document)throw new BrowserError('UNSUPPORTED_INTERFACE','Native listing controls unavailable.');
-      await this.page.app.openListingMenu();const button=this.page.document.querySelector<HTMLButtonElement>(`#listingMenuEl button[data-value="${args.listing}"]`);if(!button||button.disabled||button.hidden||button.getAttribute('aria-disabled')==='true')throw new BrowserError('UNSUPPORTED_INTERFACE','Expected enabled native listing control unavailable.');return async()=>{button.click();return undefined;};
+      const existing=this.page.document.querySelector('#listingMenuEl');
+      if(!existing)await this.page.app.openListingMenu();
+      const button=await this.listingButton(args.listing);
+      return async()=>{if(!button.isConnected || button.disabled)throw new BrowserError('UNSUPPORTED_INTERFACE','Native listing menu closed before dispatch.');button.click();return undefined;};
     }
-    if(typeof this.page.app?.openSettingsModal!=='function')throw new BrowserError('UNSUPPORTED_INTERFACE','Native settings opener unavailable.');await this.page.app.openSettingsModal();const settings=this.page.settingsModal;if(!settings)throw new BrowserError('UNSUPPORTED_INTERFACE','Native settings object unavailable.');
-    if(tool==='rename_generator'){if(typeof args.newName!=='string'||!/^[a-z0-9][a-z0-9-]{0,99}$/.test(args.newName))throw new BrowserError('INVALID_INPUT','Invalid native generator Slug.');const input=settings.refs?.newGeneratorName;if(!input||input.disabled||typeof settings.changeGeneratorName!=='function')throw new BrowserError('UNSUPPORTED_INTERFACE','Native rename field/method unavailable.');const name=args.newName;return async()=>{input.value=name;return settings.changeGeneratorName!();};}
+    if(typeof this.page.app?.openSettingsModal!=='function')throw new BrowserError('UNSUPPORTED_INTERFACE','Native settings opener unavailable.');
+    await this.page.app.openSettingsModal();
+    // The native opener schedules appExtras loading asynchronously and
+    // returns before settingsModal exists. Wait for the exact native controls.
+    let settings:NativeSettings|undefined;
+    const readyBy=Date.now()+5000;
+    for(;;) {
+      settings=this.page.settingsModal;
+      if(settings && (tool!=='rename_generator' ||
+        (typeof settings.changeGeneratorName==='function' &&
+         !!settings.refs?.newGeneratorName)))break;
+      if(Date.now()>=readyBy)
+        throw new BrowserError('UNSUPPORTED_INTERFACE','Native settings controls did not become ready.');
+      await new Promise<void>(resolve=>setTimeout(resolve,75));
+    }
+    if(tool==='rename_generator'){if(typeof args.newName!=='string'||!/^[a-z0-9][a-z0-9-]{3,99}$/.test(args.newName) && args.newName!=='hub')throw new BrowserError('INVALID_INPUT','Native URL requires 4–100 lower-case letters, digits or hyphens (except hub).');const input=settings.refs?.newGeneratorName;if(!input||input.disabled||typeof settings.changeGeneratorName!=='function')throw new BrowserError('UNSUPPORTED_INTERFACE','Native rename field/method unavailable.');const name=args.newName;return async()=>{input.value=name;return settings.changeGeneratorName!();};}
     if(tool==='duplicate_generator'){if(args.name!==undefined&&(typeof args.name!=='string'||!/^[a-z0-9][a-z0-9-]{0,99}$/.test(args.name)))throw new BrowserError('INVALID_INPUT','Invalid duplicate Slug.');if(typeof settings.duplicateGenerator!=='function')throw new BrowserError('UNSUPPORTED_INTERFACE','Verified native duplicate control unavailable.');if(args.name!==undefined&&!settings.refs?.duplicateGeneratorName)throw new BrowserError('UNSUPPORTED_INTERFACE','Native duplicate name field unavailable.');return async()=>{if(typeof args.name==='string')settings.refs!.duplicateGeneratorName!.value=args.name;const result=await settings.duplicateGenerator!();if(result===undefined){const href=settings.refs?.duplicateGeneratorStatus?.querySelector('a[href]')?.getAttribute('href');const match=typeof href==='string'?/^\/([a-z0-9][a-z0-9-]{0,99})#edit$/.exec(href):null;if(match)return{status:'native-control-returned',name:match[1]};}return result;};}
     if(tool==='delete_generator'){if(typeof settings.deleteGenerator!=='function')throw new BrowserError('UNSUPPORTED_INTERFACE','Verified native delete control unavailable.');return async()=>settings.deleteGenerator!();}
     throw new BrowserError('UNSUPPORTED_INTERFACE','Native lifecycle control unavailable.');
@@ -57,7 +88,23 @@ export class NativeLifecycle {
   async reconcile(operationId:string):Promise<LifecycleResult>{if(!/^[A-Za-z0-9_-]{1,128}$/.test(operationId))throw new BrowserError('INVALID_INPUT','Invalid lifecycle Operation ID.');const intent=await this.store.get<Intent>(this.prefix+operationId);if(!intent)throw new BrowserError('FILE_NOT_FOUND','Lifecycle operation missing.');if(intent.phase==='SUCCEEDED'&&intent.result)return intent.result;return this.verify(intent);}
   private async verify(intent:Intent):Promise<LifecycleResult>{let result:LifecycleResult;try{
     if(intent.tool==='delete_generator'){const evidence=await this.readback.readDeletionEvidence(intent.identity.generatorId,intent.identity.slug);if(evidence.identityChecked===intent.identity.generatorId&&evidence.inventoryAbsent&&evidence.sourceNotFound)result={status:'SUCCEEDED',operationId:intent.operationId,effectState:'VERIFIED',data:{generatorId:intent.identity.generatorId,deleted:true,requiresDetach:true}};else result=this.unknown(intent.operationId,'Deletion lacks independent exact-ID owner inventory and source evidence.');}
-    else{const slug=intent.tool==='rename_generator'?String(intent.args.newName):intent.tool==='duplicate_generator'?(typeof intent.args.name==='string'?intent.args.name:intent.receipt?.name):intent.identity.slug;if(!slug)throw new Error('Unknown resulting Slug.');const observed=await this.readback.readGenerator(slug);const sameSource=await sourceDigest(observed.files)===intent.saved.sourceDigest;const sameIdentity=observed.identity.generatorId===intent.identity.generatorId;
+    else{const slug=intent.tool==='rename_generator'?String(intent.args.newName):intent.tool==='duplicate_generator'?(typeof intent.args.name==='string'?intent.args.name:intent.receipt?.name):intent.identity.slug;if(!slug)throw new Error('Unknown resulting Slug.');
+      // Provider version and source cache may settle after native UI submission.
+      // Poll only independent GET/read operations, never the mutation again.
+      let observed: SavedGenerator|undefined;
+      for(let attempt=0;attempt<6;attempt++){
+        if(attempt)await new Promise<void>(resolve=>setTimeout(resolve,160*attempt));
+        try {
+          const candidate=await this.readback.readGenerator(slug);
+          if((intent.tool==='duplicate_generator' ||
+              candidate.identity.generatorId===intent.identity.generatorId) &&
+             (intent.tool!=='set_listing'||candidate.listing===intent.args.listing)){
+            observed=candidate;break;
+          }
+        } catch { /* Retain UNKNOWN if verification cannot complete. */ }
+      }
+      if(!observed)throw new Error('Public lifecycle readback did not settle.');
+      const sameSource=await sourceDigest(observed.files)===intent.saved.sourceDigest;const sameIdentity=observed.identity.generatorId===intent.identity.generatorId;
       if(intent.tool==='rename_generator'&&sameIdentity&&observed.identity.slug===slug&&observed.owned&&sameSource)result={status:'SUCCEEDED',operationId:intent.operationId,effectState:'VERIFIED',data:{generatorId:observed.identity.generatorId,oldSlug:intent.identity.slug,newSlug:slug,requiresRebind:true}};
       else if(intent.tool==='set_listing'&&sameIdentity&&observed.owned&&observed.listing===intent.args.listing&&sameSource)result={status:'SUCCEEDED',operationId:intent.operationId,effectState:'VERIFIED',data:{generatorId:observed.identity.generatorId,listing:observed.listing}};
       else if(intent.tool==='duplicate_generator'&&!sameIdentity&&observed.owned&&observed.listing==='unlisted'&&sameSource&&observed.identity.slug===slug)result={status:'SUCCEEDED',operationId:intent.operationId,effectState:'VERIFIED',data:{generatorId:observed.identity.generatorId,slug,listing:'unlisted',sourceChoice:'saved',requiresNewBinding:true,originalBindingPreserved:true}};
@@ -100,5 +147,39 @@ export class SavedSourceReader {
       revision: await snapshotRevision(expected, publicSnapshot.files),
       dirty: false, saveState: 'saved',
     };
+  }
+}
+
+/** Public, credential-free verification of HAR-observed native lifecycle effects.
+ * No app.store, sessionToken, email, or privileged direct API writes are read.
+ * Same-Generator ownership remains a native page-global attestation, not a
+ * claim extracted from a public URL or editable generator content. */
+export class LiveLifecycleReadback implements LifecycleReadback {
+  constructor(readonly adapter:NativeAdapter,readonly fetcher:typeof fetch=fetch) {}
+  async readGenerator(slug:string):Promise<SavedGenerator> {
+    if(!/^[a-z0-9][a-z0-9-]{0,99}$/.test(slug))
+      throw new BrowserError('INVALID_INPUT','Invalid public Generator Slug.');
+    const bound=await this.adapter.assertIdentity();
+    if(await this.adapter.ownership()!==true)
+      throw new BrowserError('SCOPE_DENIED','Native owner status could not be verified.');
+    const request=new URL('/api/generatorPageDataVersion/'+encodeURIComponent(slug),'https://perchance.org');
+    const response=await this.fetcher(request.toString(),{method:'GET',credentials:'omit',cache:'no-store',redirect:'error'});
+    if(!response.ok)throw new BrowserError('PROVIDER_REJECTED','Public Generator version readback did not return success.');
+    const version:unknown=await response.json();
+    if(!version||typeof version!=='object'||Array.isArray(version))
+      throw new BrowserError('UNSUPPORTED_INTERFACE','Public Generator version returned an invalid object.');
+    const meta=version as Record<string,unknown>;
+    if(meta.status!=='success'||String(meta.id)!==bound.generatorId||typeof meta.isPrivate!=='boolean')
+      throw new BrowserError('NATIVE_CONFLICT','Public Generator ID/listing does not match the owned bound Generator.');
+    const identity={...bound,slug};
+    const stored=await new SavedSourceReader(this.fetcher).read(slug,identity);
+    if((await this.adapter.assertIdentity()).generatorId!==bound.generatorId ||
+      await this.adapter.ownership()!==true)
+      throw new BrowserError('BINDING_MISMATCH','Native ownership changed during independent verification.');
+    return {identity,files:stored.files,owned:true,
+      listing:meta.isPrivate?'unlisted':'listed',revision:stored.revision};
+  }
+  async readDeletionEvidence():Promise<{inventoryAbsent:boolean;sourceNotFound:boolean;identityChecked:string}> {
+    throw new BrowserError('UNSUPPORTED_INTERFACE','Deletion requires a separate authorized native owner inventory check.');
   }
 }

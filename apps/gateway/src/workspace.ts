@@ -796,6 +796,7 @@ export class Workspace {
         agentId: op.agentId,
         permissions: needed,
         mutating: definition.mutating,
+        tool,
       });
       if (
         fresh.workspace.epoch !== op.epoch ||

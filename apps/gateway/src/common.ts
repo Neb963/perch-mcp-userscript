@@ -4,7 +4,22 @@ import type {
   DurableObjectStub,
   KVNamespace,
 } from "@cloudflare/workers-types";
-export const VERSION = "0.1.5";
+export const VERSION = "0.1.6";
+export const HAR_NATIVE_ACTIONS: Readonly<Record<string,string>> = Object.freeze({
+  save_generator:"SAVE",rename_generator:"RENAME",set_listing:"LISTING",
+});
+/** Exact tool+permission admission; never treat a generic native-write toggle
+ * as permission for unrelated media, upload, deletion or production restore. */
+export function permitsHarNativeAction(env: Pick<Env,'NATIVE_ACTIONS_ENABLED'>,
+  tool:unknown, requiredPermissions:readonly unknown[]):boolean {
+  if(env.NATIVE_ACTIONS_ENABLED!=="true"||typeof tool!=="string")return false;
+  const permission=Object.prototype.hasOwnProperty.call(HAR_NATIVE_ACTIONS,tool)
+    ? HAR_NATIVE_ACTIONS[tool] : undefined;
+  if(!permission||!requiredPermissions.includes(permission))return false;
+  return !requiredPermissions.some(p=>typeof p!=="string" ||
+    (["SAVE","CREATE","RENAME","DUPLICATE","LISTING","DELETE",
+      "UPLOAD_PUBLIC","MEDIA","PRODUCTION_RESTORE"].includes(p) && p!==permission));
+}
 export const DEFAULT_PERMISSIONS = [
   "READ_SOURCE",
   "WRITE_SOURCE",
@@ -256,6 +271,8 @@ export interface Env {
   ISSUER_URL?: string;
   ALLOWED_ORIGINS?: string;
   PROVIDER_WRITES_ENABLED?: string;
+  /** Restricts external mutations to HAR-confirmed native Save/Rename/Listing. */
+  NATIVE_ACTIONS_ENABLED?: string;
   ELEVENLABS_API_KEY?: string;
   PAID_MEDIA_ENABLED?: string;
   REGISTRY_WORKSPACE_BUDGET?: string;

@@ -1,7 +1,7 @@
 import { BrowserError, canonicalPath, copyArrayBuffer, equalBytes, equalIdentity, snapshotRevision, utf8, type CapabilityReport, type FileWrite, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
 interface TextEditor { state?: {readOnly?:unknown}; getValue(): unknown; setValue(value: string): unknown; isClean?(): unknown }
 interface SrcState { ready(): unknown; idle?(): unknown; list(): unknown; readFile(path: string): unknown; writeFile(path: string, bytes: unknown): unknown; deleteFile(path: string): unknown; getDraftId(): unknown; isDirty?(): unknown; hasPending?(): unknown }
-interface NativePage { generatorPublicId?:unknown; app?: { data?: { generator?: { id?: unknown; name?: unknown; publicId?: unknown } }; saveGenerator?: () => unknown; userOwnsThisGenerator?: unknown; userCanSaveThisGenerator?: unknown }; modelTextEditor?: TextEditor; outputTemplateEditor?: TextEditor; srcState?: SrcState; currentInterfaceMode?: unknown; __editorReady?: unknown; __draftChoiceSettled?: unknown; perchanceSaveState?: unknown; __generatorIdentityTransition?: unknown; __draftHandoffClosed?:unknown; editorCollabInitialSyncIsPending?:unknown; __collabRoomFailed?:unknown; yjsProvider?:unknown; aiAgentActivityState?:()=>unknown; __aiGeneratorGuard?:{blocked?:()=>unknown}; editor?: { handleReloadButtonClick?: () => unknown }; editorUndoManagers?: Record<string, { undo?: () => unknown; redo?: () => unknown }> }
+interface NativePage { userOwnsThisGenerator?:unknown; userCanSaveThisGenerator?:unknown; generatorPublicId?:unknown; app?: { data?: { generator?: { id?: unknown; name?: unknown; publicId?: unknown } }; saveGenerator?: () => unknown; userOwnsThisGenerator?: unknown; userCanSaveThisGenerator?: unknown }; modelTextEditor?: TextEditor; outputTemplateEditor?: TextEditor; srcState?: SrcState; currentInterfaceMode?: unknown; __editorReady?: unknown; __draftChoiceSettled?: unknown; perchanceSaveState?: unknown; __generatorIdentityTransition?: unknown; __draftHandoffClosed?:unknown; editorCollabInitialSyncIsPending?:unknown; __collabRoomFailed?:unknown; yjsProvider?:unknown; aiAgentActivityState?:()=>unknown; __aiGeneratorGuard?:{blocked?:()=>unknown}; editor?: { handleReloadButtonClick?: () => unknown }; editorUndoManagers?: Record<string, { undo?: () => unknown; redo?: () => unknown }> }
 export interface AdapterOptions { cloneInto?: (value: unknown) => unknown; externalWritesVerified?: boolean; maxSnapshotBytes?: number }
 export interface SaveContext {
   operationId: string;
@@ -72,8 +72,8 @@ export class NativeAdapter {
   }> {
     const app = this.page.app;
     const [owned,allowed] = await Promise.all([
-      nativeBoolean(app,'userOwnsThisGenerator'),
-      nativeBoolean(app,'userCanSaveThisGenerator'),
+      this.ownership(),
+      this.canSave(),
     ]);
     const generator = app?.data?.generator as Record<string, unknown> | undefined;
     const listingCandidates: ('listed'|'unlisted')[] = [];
@@ -107,6 +107,9 @@ export class NativeAdapter {
         reason:'No complete independent saved-source readback was performed for generator_info.' },
     };
   }
+  /** HAR/native source: these are page globals, not properties of app. */
+  ownership(): Promise<boolean | null> { return nativeBoolean(this.page,'userOwnsThisGenerator'); }
+  canSave(): Promise<boolean | null> { return nativeBoolean(this.page,'userCanSaveThisGenerator'); }
   bind(identity: NativeIdentity): void { this.boundIdentity = structuredClone(identity); }
   async assertIdentity(): Promise<NativeIdentity> { const identity = await this.identity(); if (this.boundIdentity && !equalIdentity(identity, this.boundIdentity)) throw new BrowserError('BINDING_MISMATCH', 'Generator or Draft changed; explicit rebind is required.'); return identity; }
   async probe(): Promise<CapabilityReport> {
@@ -198,11 +201,11 @@ export class NativeAdapter {
     this.assertMutationReady();
     const intended = await this.snapshot(); if (intended.revision !== intendedRevision) throw new BrowserError('STALE_REVISION', 'Intended revision no longer matches current draft.');
     if (!equalIdentity(context.previousSavedSnapshot.identity, intended.identity)) throw new BrowserError('BINDING_MISMATCH', 'Saved base identity differs.');
-    const [owned, allowed] = await Promise.all([
-      nativeBoolean(this.page.app,'userOwnsThisGenerator'),
-      nativeBoolean(this.page.app,'userCanSaveThisGenerator'),
-    ]);
-    if (owned !== true && allowed !== true) throw new BrowserError('SCOPE_DENIED', 'Native Save authorization is unavailable.');
+    const [owned, allowed] = await Promise.all([this.ownership(),this.canSave()]);
+    // Native Save can fork a copy when the editor is not the owner. A scoped
+    // save_generator must never silently create or change Generator identity.
+    if (owned !== true || allowed !== true)
+      throw new BrowserError('SCOPE_DENIED','Native owner and Save access must both be positively verified for the bound Generator.');
     if (this.page.srcState?.hasPending?.() === true) throw new BrowserError('TAB_BUSY', 'Pending native viewer buffers require operator settlement.');
     const currentSaved = await context.readSavedSnapshot(); if (currentSaved.revision !== context.previousSavedSnapshot.revision) throw new BrowserError('NATIVE_CONFLICT', 'Provider source changed since saved base.');
     if ((await this.snapshot()).revision !== intendedRevision) throw new BrowserError('STALE_REVISION', 'Draft changed during Save preflight.');

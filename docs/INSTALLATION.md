@@ -2,6 +2,19 @@
 
 This package is a verification candidate. It is not a full-parity release. Read RELEASE_VERIFICATION.md and the per-capability implementation records before using a real generator. No production deployment or provider mutation was performed to prepare it.
 
+## Existing gateway upgrade for HAR-confirmed actions (0.1.11)
+
+This upgrade is **not** just a userscript replacement. Existing gateway v0.1.5 cannot admit native provider writes even when the browser adapter is updated.
+
+1. Back up and verify the **existing** Cloudflare Worker configuration. Preserve its Worker name/URL, existing SQL Durable Object bindings and migration lineage, OAuth KV namespace and all Worker secrets. Do **not** create a new Worker, reset pairing, or provision fresh Registry/Workspace instances.
+2. Deploy the v0.1.6 gateway source/package from this same commit, using the **current deployment identity**, with `NATIVE_ACTIONS_ENABLED=true` and `PROVIDER_WRITES_ENABLED=false`. This only enables `save_generator`, `rename_generator` and `set_listing`; no other provider effects are enabled.
+3. Verify the existing `/health` endpoint reports `version:0.1.6`, `nativeActionsEnabled:true`, `providerWritesEnabled:false` and `paired:true`.
+4. Replace the existing Violentmonkey script with the complete v0.1.11 `perch-mcp.user.txt`. Confirm the manager shows Userscript 0.1.11 / Gateway 0.1.6, reusing the original Workspace Binding.
+5. Before running any provider mutation, check `workspace_status` for an exact lease, expected source revision, granted SAVE/RENAME/LISTING permissions, positive native owner and absence of unresolved effects. `set_listing` requires a browser-local confirmation. URL rename deliberately requires the new-URL Workspace rebind and may return UNKNOWN after native document navigation.
+6. Validate the new actions on an explicitly authorized disposable generator. Do not use a dirty production draft as a destructive test fixture. For ambiguous Save/rename results, inspect the native page and exact public version/source before manually resolving an operation.
+
+The original v0.1.5 Worker does not support this selective flag; installing only the userscript leaves these tools blocked. Deployment is an operator-controlled action requiring access to the Cloudflare account.
+
 ## Cloudflare dashboard path
 
 1. Use a reviewed immutable commit of this repository. In Workers & Pages, import the Git repository as a Worker project. Set build command `npm ci && npm run build`, deploy command `npx wrangler deploy --config apps/gateway/wrangler.jsonc`, and project root `/`. Disable automatic deployment of unrelated development branches.

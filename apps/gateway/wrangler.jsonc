@@ -17,6 +17,7 @@
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
   "vars": {
     "PROVIDER_WRITES_ENABLED": "false",
+    "NATIVE_ACTIONS_ENABLED": "true",
     "ALLOWED_ORIGINS": "https://perchance.org",
   },
   "secrets": { "required": ["BOOTSTRAP_SECRET"] },

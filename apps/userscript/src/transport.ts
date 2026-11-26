@@ -69,10 +69,11 @@ export class GatewayTransport {
   }
   private pairing?: Pairing;
   private suggestedOrigin = "";
-  private lastGatewayPolicy?: { providerWritesEnabled: boolean; observedAt: number };
+  private lastGatewayPolicy?: { providerWritesEnabled: boolean; nativeActionsEnabled: boolean | null; observedAt: number };
   /** A last-observed policy is diagnostic only; Registry remains authoritative on every admission. */
-  gatewayPolicySnapshot(): {providerWritesEnabled: boolean|null; observedAt: number|null} {
+  gatewayPolicySnapshot(): {providerWritesEnabled: boolean|null; nativeActionsEnabled: boolean|null; observedAt: number|null} {
     return {providerWritesEnabled:this.lastGatewayPolicy?.providerWritesEnabled??null,
+      nativeActionsEnabled:this.lastGatewayPolicy?.nativeActionsEnabled??null,
       observedAt:this.lastGatewayPolicy?.observedAt??null};
   }
   constructor(
@@ -118,8 +119,11 @@ export class GatewayTransport {
     const response=await this.send(target, "GET", "/health");
     if(target===this.pairing?.origin && response && typeof response==='object') {
       const value=(response as Record<string,unknown>).providerWritesEnabled;
+      const nativeActions=(response as Record<string,unknown>).nativeActionsEnabled;
       if(typeof value==='boolean')
-        this.lastGatewayPolicy={providerWritesEnabled:value,observedAt:Date.now()};
+        this.lastGatewayPolicy={providerWritesEnabled:value,
+          nativeActionsEnabled:typeof nativeActions==='boolean'?nativeActions:null,
+          observedAt:Date.now()};
       else this.lastGatewayPolicy=undefined;
     }
     return response;

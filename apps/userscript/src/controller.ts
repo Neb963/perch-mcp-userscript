@@ -11,7 +11,7 @@ import {
 import { NativeAdapter } from "./adapter.js";
 import { VirtualFileSystem } from "./vfs.js";
 import { SourceTools } from "./source-tools.js";
-import { SavedSourceReader } from "./lifecycle.js";
+import { NativeLifecycle, SavedSourceReader, lifecycleApprovalDigest, type LifecycleApproval } from "./lifecycle.js";
 import { GatewayTransport, TransportError } from "./transport.js";
 import { ArtifactStore } from "./artifacts.js";
 import {
@@ -100,6 +100,8 @@ export class BrowserController {
     readonly transport: GatewayTransport,
     readonly tools?: AdditionalTools,
     readonly status: (state: ControllerStatus) => void = () => {},
+    readonly lifecycle?: NativeLifecycle,
+    readonly confirmNativeAction?: (message: string) => boolean,
   ) {
     this.artifacts = new ArtifactStore(store);
   }
@@ -1045,7 +1047,13 @@ export class BrowserController {
       } | undefined;
       const authorized = [...new Set(lease.permissions)].sort();
       const gatewayObservation=this.transport.gatewayPolicySnapshot();
-      const gatewayPolicy=gatewayObservation.providerWritesEnabled;
+      const gatewayPolicy=gatewayObservation.providerWritesEnabled === true ||
+        gatewayObservation.nativeActionsEnabled === true;
+      const providerWritesEnabled=gatewayObservation.providerWritesEnabled;
+      const nativeActionsEnabled=gatewayObservation.nativeActionsEnabled;
+      const [nativeOwner,nativeSaveAccess]=await Promise.all([
+        this.adapter.ownership(),this.adapter.canSave(),
+      ]);
       // Cached policy is diagnostic, not authorization. The authoritative
       // Registry rechecks the current policy for every tool admission.
       const nativeDetected = caps?.nativeSave === true;
@@ -1054,6 +1062,8 @@ export class BrowserController {
       const leaseHeld = this.lease === lease && !this.stopped && Date.now() < lease.expiresAt;
       const reasons = [
         ...(!nativeDetected ? ['NATIVE_SAVE_INTERFACE_UNAVAILABLE'] : []),
+        ...(nativeOwner!==true ? ['NATIVE_OWNER_NOT_VERIFIED'] : []),
+        ...(nativeSaveAccess!==true ? ['NATIVE_SAVE_ACCESS_NOT_VERIFIED'] : []),
         ...(!adapterAccepted ? ['NATIVE_SAVE_ACCEPTANCE_NOT_VERIFIED'] : []),
         ...(gatewayPolicy !== true ? [gatewayPolicy === false ? 'GATEWAY_PROVIDER_WRITES_DISABLED' : 'GATEWAY_POLICY_UNKNOWN'] : []),
         ...(!hasSaveGrant ? ['SAVE_PERMISSION_NOT_GRANTED'] : []),
@@ -1078,15 +1088,27 @@ export class BrowserController {
             reasons:caps?.sourceWriteBlocked ?? [] },
           saveGenerator: {
             detected:nativeDetected,adapterAccepted,gatewayPolicy,
+            providerWritesEnabled,nativeActionsEnabled,
+            nativeOwner,nativeSaveAccess,
             gatewayPolicyObservedAt:gatewayObservation.observedAt,
             gatewayPolicyIsLastObservation:true,
             authorized:hasSaveGrant,available:reasons.length===0,reasons,
+          },
+          lifecycle: {
+            renameGenerator: {detected:!!this.lifecycle,
+              authorized:authorized.includes('RENAME'),
+              gatewayPolicy,
+              available:!!this.lifecycle&&nativeOwner===true&&gatewayPolicy&&leaseHeld&&authorized.includes('RENAME')},
+            setListing: {detected:!!this.lifecycle,
+              authorized:authorized.includes('LISTING'),requiresOperatorConfirmation:true,
+              gatewayPolicy,
+              available:!!this.lifecycle&&nativeOwner===true&&gatewayPolicy&&leaseHeld&&authorized.includes('LISTING')},
           },
           preview: this.tools?.capabilityReport?.(context) ?? {
             inspection:'NOT_INSTRUMENTED',
           },
           policyBoundary: {
-            privilegedSaveAndLifecycle:'gated',
+            privilegedSaveAndLifecycle:'Exact HAR-observed Save, Rename and Listing are available only with native ownership, current Grants and enabled gateway policy.',
             generatorRuntime:'Preview JavaScript can make normal generator requests; this is not equivalent to authorized privileged editor Save.',
           },
         },
@@ -1114,6 +1136,42 @@ export class BrowserController {
       if (base.revision !== revision || (await context.vfs.snapshot()).revision !== revision)
         throw Object.assign(new Error('Source changed during metadata verification.'), {code:'STALE_REVISION'});
       return {...base,savedBaseRevision};
+    }
+    if ((name === 'rename_generator' || name === 'set_listing') && this.lifecycle) {
+      const permission=name==='rename_generator'?'RENAME':'LISTING';
+      if(!lease.permissions.includes(permission) ||
+        !context.envelope.permissions.includes(permission))
+        throw Object.assign(new Error('Lifecycle permission is not granted.'),{code:'SCOPE_DENIED'});
+      const snapshot=await context.vfs.snapshot();
+      const native=await this.adapter.snapshot();
+      if(snapshot.nativeRevision!==native.revision ||
+        !equalIdentity(snapshot.identity,native.identity))
+        throw Object.assign(new Error('Native Generator changed during lifecycle preflight.'),{code:'STALE_REVISION'});
+      let approval:LifecycleApproval|undefined;
+      if(name==='set_listing'){
+        if(!this.confirmNativeAction)
+          throw Object.assign(new Error('A native Operator confirmation interface is unavailable.'),{code:'APPROVAL_REQUIRED'});
+        const choice=args.listing;
+        const allowed=this.confirmNativeAction(
+          'Perch MCP: change the listing of '+native.identity.slug+' to '+String(choice)+
+          '? This changes public discoverability. Anyone with the URL can still open an Unlisted generator.');
+        if(!allowed)
+          throw Object.assign(new Error('The Operator did not approve the listing change.'),{code:'APPROVAL_REQUIRED'});
+        approval={
+          tool:name,target:native.identity,
+          inputDigest:await lifecycleApprovalDigest(name,args,native.identity,native.revision,lease.epoch),
+          sourceRevision:native.revision,epoch:lease.epoch,
+          expiresAt:Date.now()+30000,consumed:false,
+        };
+      }
+      if(this.stopped || this.lease!==lease || Date.now()>=lease.expiresAt)
+        throw Object.assign(new Error('Lease expired before native lifecycle dispatch.'),{code:'TAB_OFFLINE'});
+      return this.lifecycle.call(name,args,{
+        operationId:context.envelope.operationId,epoch:lease.epoch,
+        expectedRevision:native.revision,
+        permissions:context.envelope.permissions,
+        approval,
+      });
     }
     if (name === 'save_generator' && this.source) {
       // The gateway refuses this tool until global provider acceptance is

@@ -22,6 +22,8 @@ import {
   permissionsForTool,
 } from "../../../packages/contracts/src/index.js";
 import {
+  HAR_NATIVE_ACTIONS,
+  permitsHarNativeAction,
   ApiError,
   MAX_BODY,
   VERSION,
@@ -229,6 +231,9 @@ function oauthServer(config: Configuration) {
   });
 }
 function capabilityAvailable(name: string, env: Env): boolean {
+  if (Object.prototype.hasOwnProperty.call(HAR_NATIVE_ACTIONS,name))
+    return env.PROVIDER_WRITES_ENABLED === "true" ||
+      permitsHarNativeAction(env,name,[HAR_NATIVE_ACTIONS[name]]);
   if (name === "generate_music")
     return (
       env.PAID_MEDIA_ENABLED === "true" &&
@@ -241,9 +246,7 @@ function capabilityAvailable(name: string, env: Env): boolean {
     "upload_server_plugin_state",
     "capture_page_image",
     "create_generator",
-    "rename_generator",
     "duplicate_generator",
-    "set_listing",
     "delete_generator",
     "upload_file",
     "generate_image",
@@ -314,6 +317,7 @@ async function mcp(
           agentId,
           permissions: needed,
           mutating: definition.mutating,
+          tool: req.params.name,
         });
         if (
           req.params.name === "operation_status" ||
