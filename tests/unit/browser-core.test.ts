@@ -208,3 +208,16 @@ test('large existing scratch and multi-megabyte public import coexist with exact
   assert.ok(equalBytes(await f.vfs.read('imports/large/main.pjs'),source));
   assert.equal((await f.vfs.unresolved()).length,0);
 });
+
+test('native metadata recognizes exact boolean fields and receiver-bound methods without coercion',()=>{
+ const f=fixture();
+ const app=f.page.app as unknown as Record<string,unknown>;
+ app.userOwnsThisGenerator=function(this:Record<string,unknown>){return this===app};
+ app.userCanSaveThisGenerator=true;
+ assert.deepEqual(f.adapter.generatorMetadata().ownership,{known:true,owned:true});
+ assert.deepEqual(f.adapter.generatorMetadata().editAccess,{known:true,allowed:true});
+ app.userOwnsThisGenerator=()=>Promise.resolve(true);
+ app.userCanSaveThisGenerator='true';
+ assert.deepEqual(f.adapter.generatorMetadata().ownership,{known:false,owned:null});
+ assert.deepEqual(f.adapter.generatorMetadata().editAccess,{known:false,allowed:null});
+});
