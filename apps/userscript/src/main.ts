@@ -269,7 +269,7 @@ async function start(): Promise<void> {
         });
         return;
       }
-      matchedWorkspaceId = candidate.id;
+      matchedWorkspaceId = typeof candidate.id === 'string' ? candidate.id : undefined;
       if (await store.get<boolean>("perch:autoconnect-stop:" + candidate.id)) {
         manager?.setStatus({
           connection: "paused",
