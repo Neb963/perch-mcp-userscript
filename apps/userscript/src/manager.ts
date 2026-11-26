@@ -269,8 +269,9 @@ export async function buildDiagnosticReport(
     get(() => client.request("GET", `${ADMIN}/state`)),
     get(() => client.request("GET", `${ADMIN}/diagnostics`)),
   ]);
-  const safeHealth = record(health.value), safeState = record(stateResult.value);
-  const rawEvents = record(remote.value).events;
+  const safeHealth = record("value" in health ? health.value : undefined),
+    safeState = record("value" in stateResult ? stateResult.value : undefined);
+  const rawEvents = record("value" in remote ? remote.value : undefined).events;
   const approvedRoutes = new Set(["authorize", "authorize_complete", "token", "register"]);
   const approvedOrigins = new Set(["missing", "null", "same", "perchance", "chatgpt", "other"]);
   const events = Array.isArray(rawEvents) ? rawEvents.slice(-100).filter(isRecord)
