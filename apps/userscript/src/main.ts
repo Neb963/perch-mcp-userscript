@@ -1,6 +1,7 @@
 import { APP_VERSION } from "../../../packages/contracts/src/index.js";
 import { NativeAdapter } from "./adapter.js";
 import { resolveNativePageRealm } from "./page-context.js";
+import { reconnectCandidate } from "./autoconnect.js";
 import { GMStore } from "./storage.js";
 import { GatewayTransport, gatewayOrigin } from "./transport.js";
 import { BrowserController } from "./controller.js";
@@ -61,6 +62,9 @@ async function start(): Promise<void> {
     externalWritesVerified: false,
   });
   let manager: ManagerHandle | undefined;
+  let closing = false;
+  let manualConnectionEpoch = 0;
+  let connectionQueue: Promise<void> = Promise.resolve();
   const runtime = new RuntimeTools(page, store, document);
   const controller = new BrowserController(
     adapter,
@@ -81,6 +85,25 @@ async function start(): Promise<void> {
     anchor.rel = "noopener";
     anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 30000);
+  };
+  // Serialization prevents bootstrap reconnect and an operator click from
+  // creating competing leases for the same tab/Workspace.
+  const connect = (workspace: Record<string, unknown>, automatic: boolean, epoch: number) => {
+    const action = connectionQueue.catch(() => undefined).then(async () => {
+      if (closing || (automatic && (manualConnectionEpoch !== epoch))) return;
+      const held = controller.diagnostics();
+      if ((held.connection === "connected" || held.connection === "degraded") &&
+          held.workspaceId === workspace.id && held.leasePresent) return;
+      if (typeof GM_info === "undefined" || GM_info.injectInto !== "content")
+        throw new Error("Verified isolated Violentmonkey content injection is required.");
+      const health = await transport.health() as { schemaVersion?: number };
+      if (health.schemaVersion !== 1)
+        throw new Error("Gateway protocol/schema incompatible.");
+      if (closing || (automatic && manualConnectionEpoch !== epoch)) return;
+      await controller.attach(workspace);
+    });
+    connectionQueue = action.catch(() => undefined);
+    return action;
   };
   const client: ManagerClient = {
     request: (method, path, body) => transport.request(method, path, body),
@@ -112,16 +135,16 @@ async function start(): Promise<void> {
       browserInstallationId: await transport.installationId(),
     }),
     attach: async (workspace) => {
-      if (typeof GM_info === "undefined" || GM_info.injectInto !== "content")
-        throw new Error(
-          "Verified Violentmonkey content injection is required; the native editor remains available.",
-        );
-      const health = (await transport.health()) as { schemaVersion?: number };
-      if (health.schemaVersion !== 1)
-        throw new Error("Gateway protocol/schema incompatible.");
-      await controller.attach(workspace);
+      manualConnectionEpoch++;
+      await connect(workspace, false, manualConnectionEpoch);
+      if (typeof workspace.id === "string")
+        await store.delete("perch:autoconnect-stop:" + workspace.id);
     },
-    pauseLocal: () => controller.pause(),
+    pauseLocal: async () => {
+      const id = controller.diagnostics().workspaceId;
+      if (id) await store.set("perch:autoconnect-stop:" + id, true);
+      await controller.pause();
+    },
     copy: async (text) => GM_setClipboard(text),
     download,
     drafts: new DocumentDraftStore(store, controller.tabInstanceId),
@@ -176,9 +199,81 @@ async function start(): Promise<void> {
   GM_registerMenuCommand("Open Perch MCP", () => {
     void manager?.open();
   });
-  // Browser bfcache/discard/closing stops admissions. No claim of cancelling already-dispatched effects.
+  async function resumeBoundEditor(): Promise<void> {
+    if (initializationError || !transport.configuration().paired || closing) return;
+    const epoch = manualConnectionEpoch;
+    manager?.setStatus({
+      connection: "connecting",
+      reason: "Checking native editor and existing Workspace binding.",
+    });
+    try {
+      let identity: Awaited<ReturnType<NativeAdapter["identity"]>> | undefined;
+      // Perchance's editor initializes asynchronously after DOMContentLoaded.
+      // Read-only probing is bounded and never changes a Binding or source.
+      for (let attempt = 0; attempt < 40; attempt++) {
+        if (closing || manualConnectionEpoch !== epoch) return;
+        try {
+          const probe = await adapter.probe();
+          if (probe.ready && probe.identity) { identity = probe.identity; break; }
+        } catch { /* unsupported/unready native editor: retry until bounded deadline */ }
+        await new Promise<void>((resolve) => setTimeout(resolve, 500));
+      }
+      if (!identity || closing || manualConnectionEpoch !== epoch) {
+        if (!closing && manualConnectionEpoch === epoch)
+          manager?.setStatus({
+            connection: "offline",
+            reason: "Native editor did not become ready within 20 seconds. Use the read-only editor probe.",
+          });
+        return;
+      }
+      const remote = await transport.request("GET", "/api/v1/admin/workspaces") as {
+        items?: unknown[]; cursor?: string | null;
+      };
+      // A partial paginated list cannot prove uniqueness; do not guess.
+      if (!Array.isArray(remote.items) || remote.cursor)
+        throw new Error("Workspace inventory incomplete; select and reconnect explicitly.");
+      const candidate = reconnectCandidate(
+        remote.items, identity, await transport.installationId(),
+      );
+      if (closing || manualConnectionEpoch !== epoch) return;
+      if (!candidate) {
+        manager?.setStatus({
+          connection: "offline",
+          reason: "No unique, active Workspace Binding matches this generator, draft and paired browser. Select Reconnect explicitly.",
+        });
+        return;
+      }
+      if (await store.get<boolean>("perch:autoconnect-stop:" + candidate.id)) {
+        manager?.setStatus({
+          connection: "paused",
+          reason: "The operator stopped this Workspace. Reconnect explicitly to resume.",
+        });
+        return;
+      }
+      await connect(candidate, true, epoch);
+    } catch (error) {
+      if (closing || manualConnectionEpoch !== epoch) return;
+      const code = error && typeof error === "object" && "code" in error &&
+        typeof error.code === "string" ? error.code : "RECONNECT_FAILED";
+      manager?.setStatus({
+        connection: "offline",
+        reason: `Automatic reconnect did not complete (${code}). Inspect diagnostics and use Reconnect if no effects are pending.`,
+      });
+    }
+  }
+  // Native edit mode is checked inside the adapter; a new page/tab never
+  // takes over a current lease or silently changes an existing Binding.
+  void resumeBoundEditor();
   window.addEventListener("pagehide", () => {
-    void controller.pause();
+    closing = true;
+    manualConnectionEpoch++;
+    connectionQueue = connectionQueue.catch(() => undefined).then(() => controller.pause());
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) {
+      closing = false;
+      void resumeBoundEditor();
+    }
   });
 }
 if (document.readyState === "loading")
