@@ -1,6 +1,7 @@
 import { ResourceError } from "../../../packages/resource-library/src/index.js";
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import {
+  permitsHarNativeAction,
   ApiError,
   DEFAULT_PERMISSIONS,
   VERSION,
@@ -995,14 +996,7 @@ export class Registry {
         "PRODUCTION_RESTORE",
       ].some((p) => needed.includes(p)) &&
       this.env.PROVIDER_WRITES_ENABLED !== "true" &&
-      !(this.env.NATIVE_ACTIONS_ENABLED === "true" &&
-        (b.tool === "save_generator" && needed.includes("SAVE") ||
-         b.tool === "rename_generator" && needed.includes("RENAME") ||
-         b.tool === "set_listing" && needed.includes("LISTING")) &&
-        !needed.some(p=>[
-          "CREATE","DUPLICATE","DELETE","UPLOAD_PUBLIC",
-          "MEDIA","PRODUCTION_RESTORE",
-        ].includes(p)))
+      !permitsHarNativeAction(this.env,b.tool,needed)
     )
       throw new ApiError(
         "UNSUPPORTED_INTERFACE",
