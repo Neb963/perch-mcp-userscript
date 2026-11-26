@@ -578,7 +578,8 @@ export class Registry {
         // never include it in logs, audit events or admin projections.
         const expected = new URL(a.redirectUri), received = new URL(redirectTo);
         if (
-          expected.protocol !== "https:" ||
+          expected.protocol !== received.protocol ||
+          expected.host !== received.host ||
           expected.origin !== received.origin ||
           expected.pathname !== received.pathname ||
           received.username || received.password || received.hash ||
