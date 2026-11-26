@@ -355,6 +355,54 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
       try{view.postMessage({command:'evaluateJs',callerId,js},origin)}catch{finish(new ExecutionError('UNSUPPORTED_INTERFACE','Browser refused the fixed native preview command.'))}
     });
   }
+  /**
+   * The editor's own syntax collector is independent of the preview iframe
+   * preamble. Only report exact path/line/column for recognized native rows.
+   * Unrecognized rows are kept as partial evidence, never fabricated ranges.
+   */
+  private async withEditorSyntax(receipt:PreviewReceipt):Promise<PreviewReceipt> {
+    const getter=this.page.getEditorSyntaxErrors;
+    const availability={...receipt.diagnosticsAvailability,syntax:'unavailable'};
+    if(typeof getter!=='function')
+      return {...receipt,diagnosticsAvailability:availability,
+        diagnosticChannels:{editorSyntax:'unavailable',console:'preview-iframe',nativeWarnings:'native-editor'}};
+    const sourceBefore=await this.options.revision();
+    let raw:unknown;
+    try { raw=await Promise.resolve((getter as ()=>unknown).call(this.page)); }
+    catch { return {...receipt,diagnosticsAvailability:availability,
+      diagnosticChannels:{editorSyntax:'collector-failed',console:'preview-iframe',nativeWarnings:'native-editor'}}; }
+    if(await this.options.revision()!==sourceBefore)
+      throw new ExecutionError('STALE_REVISION',
+        'Native editor changed during syntax collection. Diagnostics were not attributed to a stale revision.');
+    if(!Array.isArray(raw)||raw.length>500)
+      return {...receipt,diagnosticsAvailability:availability,
+        diagnosticChannels:{editorSyntax:'unsupported-result',console:'preview-iframe',nativeWarnings:'native-editor'}};
+    let precise=true;
+    const errors:Record<string,unknown>[]=[];
+    for(const entry of raw){
+      if(!entry||typeof entry!=='object'||Array.isArray(entry)) {precise=false;continue;}
+      const e=entry as Record<string,unknown>;
+      const name=typeof e.message==='string'?e.message:typeof e.error==='string'?e.error:null;
+      if(name===null){precise=false;continue;}
+      const source=e.path??e.file??e.pane??e.type;
+      const path=source==='main.pjs'||source==='model'||source==='pjs'
+        ? 'main.pjs' : source==='index.html'||source==='output'||source==='html'
+          ? 'index.html' : null;
+      const line=e.line??e.lineNumber;
+      const column=e.column??e.col;
+      const validLine=Number.isSafeInteger(line) && (line as number)>0 && (line as number)<=1000000;
+      const validColumn=Number.isSafeInteger(column) && (column as number)>0 && (column as number)<=1000000;
+      if(!path||!validLine)precise=false;
+      errors.push({category:'editor-syntax',message:name.slice(0,2000),
+        path, line:validLine?line:null,column:validColumn?column:null,
+        locationVerified:Boolean(path&&validLine),sourceRevision:sourceBefore});
+    }
+    availability.syntax=precise?'captured':'partial';
+    return {...receipt,syntaxErrors:errors,diagnosticsAvailability:availability,
+      diagnosticChannels:{editorSyntax:availability.syntax,console:'preview-iframe',
+        nativeWarnings:'native-editor',syntaxSourceRevision:sourceBefore}};
+  }
+
   private receipt(d:NativeDiagnosticSnapshot,result?:unknown):PreviewReceipt {
     const native=d.receipt,applied=this.knownSource&&native&&native.revision===this.knownSource.panelHash&&native.srcRevision===this.knownSource.srcHash&&!native.srcChangedDuringRender?this.knownSource.revision:undefined;
     const generation=d.generation&&native?`${d.generation}:${native.epoch}`:undefined;
@@ -382,7 +430,7 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
       const after=await this.source();
       if(!d?.receipt||d.generation!==generation||!d.preambleRan||d.receipt.revision!==before.panelHash||d.receipt.srcRevision!==before.srcHash||d.receipt.srcChangedDuringRender||d.receipt.srcHasPending!==before.pending||after.revision!==before.revision||after.panelHash!==before.panelHash||after.srcHash!==before.srcHash||after.pending!==before.pending)throw new ExecutionError('NATIVE_CONFLICT','Native preview did not attest the intended panels, src manifest and startup generation.','PARTIAL');
       this.knownSource=before;this.previousGeneration=`${generation}:${d.receipt.epoch}`;
-      return this.receipt(d);
+      return this.withEditorSyntax(this.receipt(d));
     }finally{
       if(previous)Object.defineProperty(this.page,'__aiAgentPreambleJs',previous);else delete this.page.__aiAgentPreambleJs;
       this.busy=false;
@@ -397,10 +445,10 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
       const result=await this.request(js,timeoutMs);
       const after=nativeDiagnostics(await this.request(nativeDiagnosticRead,Math.min(timeoutMs,5000)));
       if(before.generation!==after.generation||before.receipt?.epoch!==after.receipt?.epoch)throw new ExecutionError('STALE_EPOCH','Native preview changed during evaluation.','UNKNOWN');
-      return this.receipt(after,result);
+      return this.withEditorSyntax(this.receipt(after,result));
     }finally{this.busy=false}
   }
-  async diagnostics():Promise<PreviewReceipt>{return this.receipt(nativeDiagnostics(await this.request(nativeDiagnosticRead,5000)))}
+  async diagnostics():Promise<PreviewReceipt>{return this.withEditorSyntax(this.receipt(nativeDiagnostics(await this.request(nativeDiagnosticRead,5000))))}
 }
 
 /** Returns an exact protocol candidate; options are required to validate the native frame boundary. */
