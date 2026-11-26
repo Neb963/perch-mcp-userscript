@@ -65,7 +65,7 @@ test("transient long-poll loss reuses the same lease without dispatching or clai
   assert.equal(d.consecutivePollFailures, 0);
   assert.ok(d.lastPollSuccessAt);
   assert.equal(d.leasePresent, true);
-  assert.equal(d.reasonCode, undefined);
+  assert.equal(d.reasonCode, null);
 });
 test("temporary heartbeat failures preserve the unexpired lease but revoked epochs fail closed", async () => {
   let code = "GATEWAY_UNAVAILABLE";
