@@ -181,6 +181,19 @@ Plan: harden byte validation against cross-realm typed arrays and large Base64; 
 - Regression fixtures added for cross-realm bytes, multi-megabyte files, case collision, delayed geometry, replaced iframe, syntax result variants, and boolean predicates.
 - No production provider mutations dispatched; active epoch-7 draft remains dirty. Save policy and adapter acceptance remain separate, deliberately closed pending live authorized verification. Capture, media, lifecycle and production state are not certified by these patches. CI required before installation; no deployment performed.
 
+### Epoch 9 / v0.1.11 — HAR verified native Save, Listing and URL-change flows
+
+Evidence: operator-provided ~22 MB HAR from the real Perchance browser. Inspected locally and extracted only noncredential facts: two `changeGeneratorPrivacy` successes, `changeGeneratorName` success with stable ID, `save` success with saveCount/source revision, `checkGeneratorOwnership` is-owner and public `generatorPageDataVersion` with isPrivate, ID, count. No original HAR, email or sessionToken committed.
+
+Actions:
+- Correct `window.userOwnsThisGenerator` and `window.userCanSaveThisGenerator()` global predicates (not `app` members); protect Save from silently forking on nonowner.
+- Wire `save_generator`, `rename_generator`, `set_listing` through controller and existing native methods; enforce lease, exact bound identity, Grant, saved-source digest and native owner.
+- Wait for asynchronous listing/settings modules. Change visibility by confirmed native menu; use native rename handoff, not direct credential replay.
+- Add strict public readback: id/isPrivate from `/api/generatorPageDataVersion/<slug>` plus independently complete bytes. Retain UNKNOWN for navigation or unverified outcomes, never retry effects.
+- Add selective Worker v0.1.6 policy `NATIVE_ACTIONS_ENABLED=true` while broad provider mutation remains disabled. Required in-place gateway deployment; preserve DO/KV/secret/URL.
+- Add HAR-shaped, permission/identity/expiry, nonowner, delayed UI and no-replay tests; verify full build, TXT/JS and Worker dry-run.
+- Report: `docs/verification/epoch9-har-native-actions-v0111.md`. No production mutation or live provider Save attempted by this implementation.
+
 ### Epoch 8 / v0.1.10 — failure safety and metadata refinement
 
 Evidence: operator-supplied Epoch-8 live regression appendix and redacted v0.1.9 diagnostics. Live positives: public imports (plugin/minimal), native viewport reset, source writes, checkpoints, preview execution and transport. Do not regress them. The assigned aleph-alpha generator is dirty at source revision 12; do not mutate or Save it. Gateway v0.1.5 is connected with providerWritesEnabled=false.
