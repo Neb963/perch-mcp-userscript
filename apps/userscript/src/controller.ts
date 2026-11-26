@@ -758,7 +758,7 @@ export class BrowserController {
           ? (error as Error).message.slice(0,420)
           : envelope.tool === 'fetch_generator' &&
         typeof (error as {message?:unknown}).message === 'string' &&
-        /^(?:fetch_generator\\/(?:argument|public-api|scratch-commit):|Public (?:metadata|asset|generator|source|manifest)|Use a canonical public)/.test((error as Error).message)
+        /^(?:fetch_generator\/(?:argument|public-api|scratch-commit):|Public (?:metadata|asset|generator|source|manifest)|Use a canonical public)/.test((error as Error).message)
           ? (error as Error).message.slice(0,400)
           : code === 'UNSUPPORTED_INTERFACE' && envelope.tool === 'save_generator'
             ? 'Save is disabled until gateway policy, native adapter acceptance and independent saved-source verification all pass.'
