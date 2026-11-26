@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { NativeAdapter } from '../../apps/userscript/src/adapter.js';
-import { NativeLifecycle, lifecycleApprovalDigest, type LifecycleContext, type LifecycleReadback, type SavedGenerator } from '../../apps/userscript/src/lifecycle.js';
+import { LiveLifecycleReadback, NativeLifecycle, lifecycleApprovalDigest, type LifecycleContext, type LifecycleReadback, type SavedGenerator } from '../../apps/userscript/src/lifecycle.js';
 import { BrowserError, utf8, type NativeSnapshot } from '../../apps/userscript/src/native-types.js';
 import { MemoryStore } from '../../apps/userscript/src/storage.js';
 import { VirtualFileSystem } from '../../apps/userscript/src/vfs.js';
@@ -24,3 +24,78 @@ test('independent public saved-source reader verifies complete binary and empty 
 test('saved-source reader rejects empty-byte provider anomaly, absent manifest and source revision drift',async()=>{const {SavedSourceReader}=await import('../../apps/userscript/src/lifecycle.js');const identity={generatorId:'123',slug:'old-name',draftId:''};const base={id:123,name:'old-name',modelText:'pjs',outputTemplate:'html'};const malformed:typeof fetch=async(input)=>String(input).includes('/api/')?Response.json({status:'success',generator:{...base,srcManifest:{'empty.bin':{key:'empty',size:0}}}}):new Response(new Uint8Array([1]));await assert.rejects(new SavedSourceReader(malformed).read('old-name',identity),code('PROVIDER_REJECTED'));await assert.rejects(new SavedSourceReader(async()=>Response.json({status:'success',generator:base})).read('old-name',identity),code('UNSUPPORTED_INTERFACE'));let reads=0;await assert.rejects(new SavedSourceReader(async()=>Response.json({status:'success',generator:{...base,modelText:++reads===1?'old':'new',srcManifest:{}}})).read('old-name',identity),code('STALE_REVISION'));});
 test('actual native duplicate draft override cannot duplicate unintended unsaved source',async()=>{const f=fixture();f.page.modelTextEditor.getValue=()=> 'unsaved owner draft';const ctx=await f.context('duplicate_generator',{});await assert.rejects(f.lifecycle.call('duplicate_generator',{},ctx),code('UNSUPPORTED_INTERFACE'));assert.equal(f.getCalls(),0);});
 test('current native duplicate auto-name status link is only a hint before complete readback',async()=>{const f=fixture();const dom=new JSDOM('<div id="status"></div>');const status=dom.window.document.querySelector('#status')!;Object.assign(f.settings.refs,{duplicateGeneratorStatus:status});const original=f.settings.duplicateGenerator;(f.settings as unknown as {duplicateGenerator:()=>Promise<unknown>}).duplicateGenerator=async()=>{await original();status.innerHTML='<a href="/new-copy#edit">new-copy</a>';};const result=await f.lifecycle.call('duplicate_generator',{},await f.context('duplicate_generator',{}));assert.equal(result.status,'SUCCEEDED');assert.equal(result.data?.slug,'new-copy');assert.equal(result.data?.generatorId,'456');});
+
+
+test('HAR-shaped public version attests actual Listing state without private credentials',async()=>{
+ const f=fixture();const calls:{url:string;method:string;credentials:string|undefined;body?:string}[]=[];
+ const fetcher=(async(url:string|URL|Request,init?:RequestInit)=>{
+   const value=String(url);
+   calls.push({url:value,method:init?.method??'GET',credentials:init?.credentials,body:typeof init?.body==='string'?init.body:undefined});
+   if(value.includes('generatorPageDataVersion/old-name'))
+     return Response.json({status:'success',id:'123',saveCount:5,isPrivate:true,schema:2});
+   if(value.endsWith('/api/getGeneratorPageData'))
+     return Response.json({status:'success',generator:{id:'123',name:'old-name',
+       modelText:'output = inert',outputTemplate:'<h1>inert</h1>',srcManifest:{}}});
+   throw new Error('Unexpected endpoint: '+value);
+ }) as typeof fetch;
+ const reader=new LiveLifecycleReadback(f.adapter,fetcher);
+ const result=await reader.readGenerator('old-name');
+ assert.equal(result.owned,true);
+ assert.equal(result.listing,'unlisted');
+ assert.equal(result.identity.generatorId,'123');
+ assert.deepEqual(Object.keys(result.files).sort(),['index.html','main.pjs']);
+ assert.ok(calls.every(c=>c.credentials==='omit' && !/sessionToken|email|password/.test(c.body??'')));
+ assert.equal(calls.filter(c=>c.method==='POST').length,2);
+ assert.equal(calls.filter(c=>c.method==='GET').length,1);
+ const readback=(async(url:string|URL|Request,init?:RequestInit)=>{
+   if(String(url).includes('generatorPageDataVersion'))
+     return Response.json({status:'success',id:'different-id',isPrivate:false});
+   return fetcher(url,init);
+ }) as typeof fetch;
+ await assert.rejects(new LiveLifecycleReadback(f.adapter,readback).readGenerator('old-name'),code('NATIVE_CONFLICT'));
+ f.page.userOwnsThisGenerator=false;
+ await assert.rejects(reader.readGenerator('old-name'),code('SCOPE_DENIED'));
+});
+
+test('listing menu created asynchronously is awaited before native click and verified once',async()=>{
+ const f=fixture();
+ f.page.document.querySelector('#listingMenuEl')!.remove();
+ let nativeClicks=0;
+ f.page.app.openListingMenu=async()=>{
+   setTimeout(()=>{
+     const menu=f.page.document.createElement('div');menu.id='listingMenuEl';
+     const button=f.page.document.createElement('button');button.dataset.value='unlisted';
+     button.addEventListener('click',()=>{nativeClicks++;f.saved.get('old-name')!.listing='unlisted';});
+     menu.appendChild(button);f.page.document.body.appendChild(menu);
+   },70);
+ };
+ const args={listing:'unlisted'};
+ const result=await f.lifecycle.call('set_listing',args,await f.context('set_listing',args));
+ assert.equal(result.status,'SUCCEEDED');
+ assert.equal(result.data?.listing,'unlisted');
+ assert.equal(nativeClicks,1);
+});
+
+test('rename waits for lazily loaded settings; no second rename when result is pending',async()=>{
+ const f=fixture();
+ const settings=f.settings;
+ (f.page as unknown as Record<string,unknown>).settingsModal=undefined;
+ f.page.app.openSettingsModal=async()=>{
+   setTimeout(()=>{(f.page as unknown as Record<string,unknown>).settingsModal=settings;},60);
+ };
+ const args={newName:'new-slug'};
+ const result=await f.lifecycle.call('rename_generator',args,await f.context('rename_generator',args));
+ assert.equal(result.status,'SUCCEEDED');
+ assert.equal(f.getCalls(),1);
+});
+test('listing readback convergence retries only reads, never another native click',async()=>{
+ const f=fixture();let reads=0;const original=f.readback.readGenerator;
+ f.readback.readGenerator=async slug=>{
+  const result=await original(slug);if(++reads>=2 && reads<=3)return {...result,listing:'listed'};
+  return result;
+ };
+ const args={listing:'unlisted'};
+ const value=await f.lifecycle.call('set_listing',args,await f.context('set_listing',args));
+ assert.equal(value.status,'SUCCEEDED');assert.equal(f.getCalls(),1);
+ assert.ok(reads>=4);
+});
