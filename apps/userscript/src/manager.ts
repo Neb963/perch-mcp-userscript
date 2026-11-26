@@ -1239,20 +1239,46 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
               key: "id",
               label: "Actions",
               render(g, td) {
-                td.append(
-                  button(
-                    "Revoke Grant",
-                    async () => {
-                      await client.request(
-                        "POST",
-                        `${ADMIN}/grants/${encodeURIComponent(str(g.id))}/revoke`,
-                        { expectedRevision: num(g.revision) },
+                if (g.state === "revoked") {
+                  p("Revoked — no further authorization", td, "muted");
+                  return;
+                }
+                const revoke = button("Revoke Grant", () => {
+                  const panel = el("div", undefined, "confirm");
+                  p(
+                    `Revoke this Client Grant for ${str(g.clientId)}? The connected MCP client loses access. This does not delete the Workspace or generator.`,
+                    panel,
+                  );
+                  const confirm = button("Confirm revoke", async () => {
+                    confirm.disabled = true;
+                    const endpoint = `${ADMIN}/grants/${encodeURIComponent(str(g.id))}/revoke`;
+                    let uncertain: unknown;
+                    try {
+                      const outcome = record(await client.request("POST", endpoint, {
+                        expectedRevision: num(g.revision),
+                      }));
+                      if (outcome.state !== "revoked")
+                        throw new Error("Gateway did not confirm Grant revocation.");
+                    } catch (error) {
+                      // Reconcile a potentially committed POST by reading the
+                      // authoritative state. Never replay an uncertain write.
+                      uncertain = error;
+                    }
+                    const grants = await loadList(`${ADMIN}/grants`);
+                    const current = grants.items.find((item) => item.id === g.id);
+                    if (current?.state !== "revoked")
+                      throw uncertain ?? new Error(
+                        "Grant revocation is not reflected in the Registry. Do not retry automatically.",
                       );
-                      await refresh();
-                    },
-                    "danger",
-                  ),
-                );
+                    await refresh();
+                    announce("Grant revoked and verified in the Registry. Reauthorize the connector to regain access.");
+                  }, "danger");
+                  panel.append(confirm, button("Cancel", () => panel.remove()));
+                  td.append(panel);
+                  revoke.disabled = true;
+                  confirm.focus();
+                }, "danger");
+                td.append(revoke);
               },
             },
           ],
