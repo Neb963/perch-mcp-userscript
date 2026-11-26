@@ -227,7 +227,7 @@ export class Registry {
         !["authorize", "authorize_complete", "token", "register"].includes(route) ||
         !["GET", "POST"].includes(method) ||
         !["missing", "null", "same", "perchance", "chatgpt", "other"].includes(originClass) ||
-        !Number.isInteger(b.status) || Number(b.status) < 200 || Number(b.status) > 599 ||
+        typeof b.status !== "number" || !Number.isInteger(b.status) || b.status < 200 || b.status > 599 ||
         !/^[a-f0-9-]{36}$/.test(String(b.traceId))
       ) throw new ApiError("INVALID_INPUT", "Invalid bounded diagnostic event.");
       this.db.transaction(() => {
