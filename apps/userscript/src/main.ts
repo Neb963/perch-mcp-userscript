@@ -142,15 +142,17 @@ async function start(): Promise<void> {
     },
     pauseLocal: async () => {
       const id = controller.diagnostics().workspaceId;
+      // Pause synchronously aborts the local controller before the first
+      // asynchronous store write or gateway lease release can stall.
+      const release = controller.pause();
       let markerFailed = false;
       if (id) {
         try { await store.set("perch:autoconnect-stop:" + id, true); }
         catch { markerFailed = true; }
       }
-      // The operator's immediate Stop must not depend on the availability
-      // of an auxiliary GM persistence write. Continue global pause even if
-      // a restart-suppression marker could not be persisted.
-      await controller.pause();
+      // An auxiliary storage failure cannot defer local admission stop.
+      // release() may still await server acknowledgement; it never replays.
+      await release;
       if (markerFailed)
         manager?.setStatus({
           connection: "blocked",
