@@ -271,8 +271,10 @@ async function start(): Promise<void> {
       const code = error && typeof error === "object" && "code" in error &&
         typeof error.code === "string" ? error.code : "RECONNECT_FAILED";
       manager?.setStatus({
-        connection: "offline",
-        reason: `Automatic reconnect did not complete (${code}). Inspect diagnostics and use Reconnect if no effects are pending.`,
+        connection: code === "EFFECT_UNKNOWN" ? "blocked" : "offline",
+        reason: code === "EFFECT_UNKNOWN"
+          ? "Gateway retained an uncertain prior operation. Open Activity, inspect and resolve its exact record before Reconnect. Do not re-pair, rebind or repeat the operation. A gateway earlier than the viewport-recovery patch cannot automatically reclaim a CSS-only partial effect."
+          : `Automatic reconnect did not complete (${code}). Inspect diagnostics and use Reconnect if no effects are pending.`,
       });
     }
   }
