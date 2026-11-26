@@ -117,3 +117,30 @@ test('preview does not enable runtime evaluation without an attested native fram
   (e:ExecutionError)=>e.code==='UNSUPPORTED_INTERFACE');
  assert.equal(adapter.availability().page_eval?.available,false);
 });
+
+test('native editor syntax collector retains channel provenance and refuses false source-line attestation',async()=>{
+ const f=await fixture();
+ f.page.getEditorSyntaxErrors=()=>[
+  {type:'model',line:12,column:3,message:'Known fixture indentation error'},
+  {type:'output',line:4,column:7,message:'Known HTML fixture parse error'}
+ ];
+ const receipt=await f.bridge.diagnostics() as PreviewReceipt;
+ assert.equal(receipt.syntaxErrors.length,2);
+ assert.equal((receipt.syntaxErrors[0] as Record<string,unknown>).path,'main.pjs');
+ assert.equal((receipt.syntaxErrors[1] as Record<string,unknown>).path,'index.html');
+ assert.equal((receipt.syntaxErrors[0] as Record<string,unknown>).locationVerified,false);
+ assert.equal(receipt.diagnosticsAvailability?.syntax,'captured');
+ assert.equal(receipt.diagnosticChannels?.editorSyntax,'captured');
+ assert.equal(receipt.diagnosticChannels?.console,'preview-iframe');
+});
+test('empty native syntax result reports partial rather than verified error-free',async()=>{
+ const f=await fixture();
+ f.page.getEditorSyntaxErrors=()=>[];
+ const receipt=await f.bridge.diagnostics() as PreviewReceipt;
+ assert.deepEqual(receipt.syntaxErrors,[]);
+ assert.equal(receipt.diagnosticsAvailability?.syntax,'partial');
+ f.page.getEditorSyntaxErrors=()=>[{message:'native error without a location'}];
+ const partial=await f.bridge.diagnostics() as PreviewReceipt;
+ assert.equal(partial.diagnosticsAvailability?.syntax,'partial');
+ assert.equal((partial.syntaxErrors[0] as Record<string,unknown>).line,null);
+});
