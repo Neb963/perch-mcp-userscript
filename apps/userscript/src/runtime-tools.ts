@@ -472,17 +472,41 @@ export class RuntimeTools implements AdditionalTools {
       }
     }
     if (name === "fetch_generator") {
+      const slug = args.generatorName;
+      if (typeof slug !== 'string' ||
+          !/^[a-z0-9][a-z0-9-]{0,119}$/.test(slug))
+        throw new ExecutionError('INVALID_INPUT',
+          'fetch_generator/argument: generatorName must be a canonical public Slug.');
       const expected = (await context.vfs.snapshot()).revision;
-      const snapshot = await readPublicGenerator(
-        String(args.generatorName),
-        fetch,
-        context.signal,
-      );
-      const imported = await context.vfs.importSnapshot(
-        snapshot.slug,
-        snapshot.files,
-        expected,
-      );
+      let snapshot: Awaited<ReturnType<typeof readPublicGenerator>>;
+      try {
+        snapshot = await readPublicGenerator(slug, fetch, context.signal);
+      } catch (error) {
+        if (error instanceof ExecutionError) {
+          throw new ExecutionError(error.code,
+            `fetch_generator/public-api: ${error.message.slice(0,300)}`,
+            error.effectState, error.effects);
+        }
+        // Any exception here is upstream metadata/manifest handling, not a
+        // malformed slug. Classify without exposing provider response bodies.
+        const stage = error && typeof error==='object' &&
+          'code' in error && error.code === 'PATH_DENIED'
+          ? 'source-manifest path rejected' : 'unrecognized provider response';
+        throw new ExecutionError('UNSUPPORTED_INTERFACE',
+          `fetch_generator/public-api: ${stage}; no source installed.`);
+      }
+      let imported: Awaited<ReturnType<typeof context.vfs.importSnapshot>>;
+      try {
+        imported = await context.vfs.importSnapshot(
+          snapshot.slug,snapshot.files,expected);
+      } catch (error) {
+        const e = error as {code?:unknown; effectState?:unknown};
+        const code = typeof e?.code === 'string' && /^[A-Z][A-Z0-9_]{0,47}$/.test(e.code)
+          ? e.code : 'EFFECT_UNKNOWN';
+        throw new ExecutionError(code,
+          `fetch_generator/scratch-commit: local reference publication ${code}; provider source was read but cache commit is not verified.`,
+          code==='EFFECT_UNKNOWN'||e?.effectState==='UNKNOWN'?'UNKNOWN':'NONE');
+      }
       return {
         ...imported,
         generatorId: snapshot.generatorId,

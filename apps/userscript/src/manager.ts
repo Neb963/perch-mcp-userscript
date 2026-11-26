@@ -2076,7 +2076,9 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             p(str(a.errorCode), td);
             if (a.phase === "UNKNOWN" || a.phase === "PARTIAL") {
               p(
-                "Inspect the native draft and independent provider readback. Do not repeat the mutation.",
+                a.tool === "set_viewport_size"
+                  ? "Viewport-only: verify native iframe dimensions. The original PARTIAL outcome remains recorded; gateway v0.1.5+ permits recovery without treating this as a generator writer effect."
+                  : "Inspect the native draft and independent provider readback. Do not repeat the mutation.",
                 td,
               );
               if (record(a.resolution).resolvedByOperator === true)

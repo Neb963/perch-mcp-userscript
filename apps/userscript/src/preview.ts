@@ -169,6 +169,20 @@ export class PreviewAdapter {
     return {width:r.width,height:r.height};
   }
 
+  /** Let CSS layout and the frame viewport settle without depending on a
+   * foreground requestAnimationFrame (which may be suspended in hidden tabs). */
+  private async settleViewportLayout(frame:HTMLIFrameElement):Promise<void> {
+    await new Promise<void>(resolve=>{
+      let ended=false;
+      const finish=()=>{if(ended)return;ended=true;clearTimeout(limit);resolve();};
+      const limit=setTimeout(finish,120);
+      const view=frame.ownerDocument.defaultView;
+      if(view && typeof view.requestAnimationFrame==='function')
+        view.requestAnimationFrame(()=>view.requestAnimationFrame(finish));
+      else setTimeout(finish,24);
+    });
+  }
+
   async setViewport(width: number, height: number, reset = false): Promise<unknown> {
     const frame=this.options.frame(),max=this.options.maxViewport??16384;
     if (!frame) throw new ExecutionError('UNSUPPORTED_INTERFACE','Native output frame is unavailable.');
@@ -181,17 +195,21 @@ export class PreviewAdapter {
       if (owned && owned.frame!==frame)
         throw new ExecutionError('NATIVE_CONFLICT',
           'Preview iframe changed during viewport emulation. Reset cannot attest the replacement frame.', 'PARTIAL');
+      await this.settleViewportLayout(frame);
       const actual=await this.measuredViewport();
+      if(this.options.frame()!==frame)
+        throw new ExecutionError('NATIVE_CONFLICT',
+          'Viewport reset: preview iframe replaced during readback; no claim of native dimensions.', 'PARTIAL');
       const observedFrameWidth=frame.clientWidth;
       const parentWidth=frame.parentElement?.clientWidth??0;
       const baselineComparable=before && before.width>0 &&
         before.parentWidth>0 && Math.abs(parentWidth-before.parentWidth)<=2;
       if (baselineComparable && Math.abs(actual.width-before.width)>2)
         throw new ExecutionError('NATIVE_CONFLICT',
-          'Viewport reset did not restore the native width in the unchanged editor pane.', 'PARTIAL');
+          `Viewport reset: expected native width ${before.width}px, observed preview innerWidth ${actual.width}px; pane width ${parentWidth}px; CSS restoration attempted. Persistent source and provider effects: none.`, 'PARTIAL');
       if (observedFrameWidth>0 && Math.abs(actual.width-observedFrameWidth)>2)
         throw new ExecutionError('NATIVE_CONFLICT',
-          'Native iframe width and preview innerWidth disagree after reset.', 'PARTIAL');
+          `Viewport reset: observed frame clientWidth ${observedFrameWidth}px differs from child innerWidth ${actual.width}px; native width cannot be verified. Persistent effects: none.`, 'PARTIAL');
       return {reset:true,emulationActive:false,width:actual.width,height:actual.height,
         expectedNativeWidth:baselineComparable?before.width:null,
         verifiedBy:'native-preview-innerWidth',frameClientWidth:observedFrameWidth||null};
@@ -217,10 +235,14 @@ export class PreviewAdapter {
     const scale=Math.min(1,available>0?available/width:1);
     frame.style.transform=`scale(${scale})`;
     this.viewport={width,height};
+    await this.settleViewportLayout(frame);
     const actual=await this.measuredViewport();
+    if(this.options.frame()!==frame)
+      throw new ExecutionError('NATIVE_CONFLICT',
+        'Viewport set: native iframe changed during measurement; no stable dimensions verified.', 'PARTIAL');
     if (Math.abs(actual.width-width)>2 || Math.abs(actual.height-height)>2)
       throw new ExecutionError('NATIVE_CONFLICT',
-        'Preview reported different logical dimensions after requested viewport change.', 'PARTIAL');
+        `Viewport set: expected ${width}x${height}px, observed ${actual.width}x${actual.height}px; preview iframe CSS applied but result not verified. Persistent effects: none.`, 'PARTIAL');
     return {width:actual.width,height:actual.height,scale,
       emulationActive:true,verifiedBy:'native-preview-innerWidth',measuredBrowserLimit:false};
   }

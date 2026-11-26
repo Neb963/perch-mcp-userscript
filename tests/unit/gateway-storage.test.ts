@@ -332,3 +332,57 @@ test("Activity preserves an old unresolved hold beyond the rolling terminal wind
     authority.db.close();
   }
 });
+
+test("Registry safely repairs exactly a legacy terminal viewport writer reservation, never a provider/source reservation",async()=>{
+  const f=fixture();
+  try {
+    const rows=new SqlRecords(f.storage);
+    const {digest}=await import('../../apps/gateway/src/common.js');
+    const credential='legacy-fixture-execution-credential';
+    const base={
+      schemaVersion:1,revision:12,policyRevision:1,paused:false,issuer:'https://gateway.test',
+      paired:true,credentialEpoch:1,executionHash:await digest(credential),
+      browserInstallationId:'fixture-browser'
+    };
+    rows.put('core',base);
+    const binding={generatorId:'generator-42',slug:'fixture',draftId:'',
+      browserInstallationId:'fixture-browser'};
+    rows.put('workspace/fixture-w',{
+      id:'fixture-w',label:'Fixture',revision:4,bindingRevision:1,epoch:5,
+      permissions:['READ_SOURCE','WRITE_SOURCE'],paused:false,binding
+    });
+    const claim=()=>new Request('https://internal/internal/claim',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+        credential,workspaceId:'fixture-w',binding
+      })
+    });
+    const api=new Registry(f.state,{ISSUER_URL:'https://gateway.test'} as Env);
+    const hold={workspaceId:'fixture-w',operationId:'old-viewport'};
+    rows.put('reservation/generator-42',hold);
+    rows.put('terminal-notice/fixture-w/old-viewport',{
+      phase:'PARTIAL',expires:Date.now()+86400000,
+      event:{operationId:'old-viewport',workspaceId:'fixture-w',tool:'set_viewport_size',
+        phase:'PARTIAL',epoch:5,bindingRevision:1}
+    });
+    assert.equal((await api.fetch(claim())).status,200);
+    assert.equal(rows.get('reservation/generator-42'),undefined);
+    assert.equal((rows.get('terminal-notice/fixture-w/old-viewport') as {phase:string}).phase,
+      'PARTIAL','historical uncertainty survives safe lock release');
+    for(const mismatch of [
+      {tool:'save_generator',phase:'PARTIAL'},
+      {tool:'set_viewport_size',phase:'UNKNOWN'},
+      {tool:'set_viewport_size',phase:'PARTIAL',bindingRevision:2},
+    ]){
+      rows.put('reservation/generator-42',hold);
+      rows.put('terminal-notice/fixture-w/old-viewport',{
+        phase:'PARTIAL',expires:Date.now()+86400000,
+        event:{operationId:'old-viewport',workspaceId:'fixture-w',
+          tool:mismatch.tool,phase:mismatch.phase,epoch:5,
+          bindingRevision:mismatch.bindingRevision??1}
+      });
+      assert.equal((await api.fetch(claim())).status,200);
+      assert.deepEqual(rows.get('reservation/generator-42'),hold,
+        'ambiguous or provider reservation cannot be cleared');
+    }
+  } finally{f.db.close();}
+});

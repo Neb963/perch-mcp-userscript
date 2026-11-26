@@ -25,6 +25,7 @@ import {
   permissionsForTool,
 } from "../../../packages/contracts/src/index.js";
 import type { AuthProps, WorkspaceRecord } from "./registry.js";
+import { blocksNewLease, blocksNewMutation, isTerminalViewportEffect } from "../../../packages/contracts/src/effect-policy.js";
 interface Lease {
   workspaceId: string;
   epoch: number;
@@ -291,7 +292,8 @@ export class Workspace {
           (o) =>
             o.terminalAt &&
             o.terminalNotified &&
-            ((o.phase !== "UNKNOWN" && o.phase !== "PARTIAL") || o.resolution),
+            ((o.phase !== "UNKNOWN" && o.phase !== "PARTIAL") ||
+              o.resolution || isTerminalViewportEffect(o)),
         )
         .sort((a, b) => a.createdAt - b.createdAt);
       const excess = Math.max(0, terminal.length - 1000);
@@ -398,21 +400,14 @@ export class Workspace {
             429,
           );
         if (
-          all.filter(
-            (o) => ["UNKNOWN", "PARTIAL"].includes(o.phase) && !o.resolution,
-          ).length >= 128
+          all.filter(blocksNewMutation).length >= 128
         )
           throw new ApiError(
             "QUOTA_EXCEEDED",
             "Unresolved-operation metadata budget reached; reconcile held operations.",
             429,
           );
-        if (
-          all.some(
-            (o) => ["UNKNOWN", "PARTIAL"].includes(o.phase) && !o.resolution,
-          ) &&
-          op.mutating
-        )
+        if (all.some(blocksNewMutation) && op.mutating)
           throw new ApiError(
             "EFFECT_UNKNOWN",
             "Workspace holds an unresolved effect.",
@@ -514,11 +509,7 @@ export class Workspace {
           409,
         );
       if (
-        this.operations().some(
-          (o) =>
-            ["DISPATCHED", "RUNNING", "UNKNOWN", "PARTIAL"].includes(o.phase) &&
-            !o.resolution,
-        )
+        this.operations().some(blocksNewLease)
       )
         throw new ApiError(
           "EFFECT_UNKNOWN",
@@ -694,6 +685,7 @@ export class Workspace {
           bindingRevision: l.bindingRevision,
           epoch: l.epoch,
           operationId: op.operationId,
+          tool: op.tool,
         });
       } catch (error) {
         op.phase = "REJECTED";

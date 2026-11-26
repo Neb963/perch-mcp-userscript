@@ -618,8 +618,8 @@ test("durable browser queue, strict reply identity, terminal result recovery and
   const operationId = String(call.body.result?.structuredContent.operationId);
   assert.ok(operationId);
   assert.equal(call.body.result?.structuredContent.status, "ADMITTED");
-  const auth = String(lease.leaseCredential),
-    context = {
+  let auth = String(lease.leaseCredential);
+  const context = {
       workspaceId: w.id,
       epoch: lease.epoch,
       tabInstanceId: lease.tabInstanceId,
@@ -666,6 +666,60 @@ test("durable browser queue, strict reply identity, terminal result recovery and
       .data.text,
     "fixture",
   );
+  // The historical v0.1.7 incident: viewport reset PARTIAL, release old
+  // browser lease, new document must reconnect without acknowledging a source
+  // or provider effect. The original partial operation must remain visible.
+  const view = await mcp("set_viewport_size",{width:390,height:844,reset:true});
+  assert.equal(view.body.result?.structuredContent.status,"ADMITTED");
+  const viewportId=String(view.body.result?.structuredContent.operationId);
+  const pollView=await data("/api/v1/tab/poll",{...context,waitMs:0},auth);
+  assert.equal((pollView.operations as Record<string,unknown>[])[0]?.operationId,viewportId);
+  await data("/api/v1/tab/reply",{...context,operationId:viewportId,phase:"RUNNING"},auth);
+  await data("/api/v1/tab/reply",{...context,operationId:viewportId,phase:"PARTIAL",
+    result:{operationId:viewportId,status:"PARTIAL",effectState:"PARTIAL",
+      error:{code:"NATIVE_CONFLICT",message:"Preview width mismatch after native restore.",
+        retryable:false,recovery:"Inspect actual native viewport dimensions."}}
+  },auth);
+  const retained=await mcp("operation_status",{operationId:viewportId});
+  assert.equal(retained.body.result?.structuredContent.status,"PARTIAL");
+  const activity=await data("/api/v1/admin/activity");
+  assert.ok((activity.items as Record<string,unknown>[]).some(x=>
+    x.operationId===viewportId && x.phase==="PARTIAL" && !x.resolution),
+    "the terminal CSS effect remains auditable, not marked successful");
+  await data("/api/v1/tab/release",context,auth);
+  const rebound=await data("/api/v1/tab/claim",{
+    workspaceId:w.id,binding:{
+      generatorId:"123",slug:"fixture-one",draftId:"",
+      browserInstallationId:"browser-fixture",
+    },tabInstanceId:"tab-recovered",adapterVersion:"1",
+  },execution);
+  assert.ok(Number(rebound.epoch)>Number(context.epoch),
+    "new document has a strictly greater epoch");
+  lease=rebound;
+  auth=String(lease.leaseCredential);
+  Object.assign(context,{epoch:lease.epoch,tabInstanceId:lease.tabInstanceId});
+  const safeStatus=await mcp("workspace_status");
+  assert.equal(safeStatus.body.result?.structuredContent.status,"ADMITTED");
+  const pollStatus=await data("/api/v1/tab/poll",{...context,waitMs:0},auth);
+  const statusId=String((pollStatus.operations as Record<string,unknown>[])[0]?.operationId);
+  assert.equal(statusId,String(safeStatus.body.result?.structuredContent.operationId));
+  await data("/api/v1/tab/reply",{...context,operationId:statusId,phase:"RUNNING"},auth);
+  await data("/api/v1/tab/reply",{...context,operationId:statusId,phase:"SUCCEEDED",
+    result:{operationId:statusId,status:"SUCCEEDED",effectState:"VERIFIED",data:{sourceStatus:"readable"}}
+  },auth);
+  // If v0.1.4's consumed generator writer remains, this dispatch fails.
+  const writeAfterViewport=await mcp("write",{path:"scratch/recovered.txt",content:"valid"});
+  assert.equal(writeAfterViewport.body.result?.structuredContent.status,"ADMITTED");
+  const pollWrite=await data("/api/v1/tab/poll",{...context,waitMs:0},auth);
+  const writeId=String((pollWrite.operations as Record<string,unknown>[])[0]?.operationId);
+  assert.equal(writeId,String(writeAfterViewport.body.result?.structuredContent.operationId));
+  await data("/api/v1/tab/reply",{...context,operationId:writeId,phase:"RUNNING"},auth);
+  await data("/api/v1/tab/reply",{...context,operationId:writeId,phase:"SUCCEEDED",
+    result:{operationId:writeId,status:"SUCCEEDED",effectState:"VERIFIED",
+      data:{path:"scratch/recovered.txt",bytes:5}}
+  },auth);
+  assert.equal((await mcp("operation_status",{operationId:viewportId})).body.result?.structuredContent.status,"PARTIAL",
+    "recovery never silently rewrites historical viewport result");
   const queued = await mcp("read", { path: "index.html" });
   assert.equal(queued.body.result?.structuredContent.status, "ADMITTED");
   const grants = await data("/api/v1/admin/grants");
