@@ -151,12 +151,13 @@ export class Registry {
       const notice = this.db.get<{
         expires: number;
         phase: string;
-        event?: { resolution?: unknown };
+        event?: { resolution?: unknown; tool?: unknown };
       }>(key);
       if (
         notice.expires < now &&
         (!["UNKNOWN", "PARTIAL"].includes(notice.phase) ||
-          notice.event?.resolution)
+          notice.event?.resolution ||
+          notice.event?.tool === "set_viewport_size")
       ) {
         this.db.delete(key);
         if (notice.event?.resolution)
@@ -1305,10 +1306,11 @@ export class Registry {
           this.db.keys("terminal-notice/" + w.id + "/").some((key) => {
             const n = this.db.get<{
               phase: string;
-              event?: { resolution?: unknown };
+              event?: { resolution?: unknown; tool?: string };
             }>(key);
             return (
-              ["UNKNOWN", "PARTIAL"].includes(n.phase) && !n.event?.resolution
+              ["UNKNOWN", "PARTIAL"].includes(n.phase) &&
+              !n.event?.resolution && n.event?.tool !== "set_viewport_size"
             );
           }))
       )
