@@ -386,3 +386,30 @@ test("Registry safely repairs exactly a legacy terminal viewport writer reservat
     }
   } finally{f.db.close();}
 });
+
+
+test('HAR-native policy admits exactly Save, Rename and Listing; cannot widen provider privileges',async()=>{
+ const {permitsHarNativeAction,HAR_NATIVE_ACTIONS}=await import('../../apps/gateway/src/common.js');
+ const enabled={NATIVE_ACTIONS_ENABLED:'true'};
+ const disabled={NATIVE_ACTIONS_ENABLED:'false'};
+ const examples:[string,string[]][]=[
+   ['save_generator',['READ_SOURCE','SAVE']],
+   ['rename_generator',['RENAME']],
+   ['set_listing',['LISTING']],
+ ];
+ assert.deepEqual(Object.keys(HAR_NATIVE_ACTIONS).sort(),
+   examples.map(([tool])=>tool).sort());
+ for(const [tool,permissions]of examples){
+  assert.equal(permitsHarNativeAction(enabled,tool,permissions),true,tool);
+  assert.equal(permitsHarNativeAction(disabled,tool,permissions),false,tool);
+  assert.equal(permitsHarNativeAction(enabled,tool,['READ_SOURCE']),false,tool);
+  assert.equal(permitsHarNativeAction(enabled,tool,[...permissions,'DELETE']),false,tool);
+ }
+ for(const tool of ['delete_generator','create_generator','duplicate_generator',
+   'generate_music','generate_image','upload_file','upload_server_plugin_state',
+   'download_server_plugin_state','__proto__','constructor']){
+  assert.equal(permitsHarNativeAction(enabled,tool,['SAVE','RENAME','LISTING']),false,tool);
+ }
+ assert.equal(permitsHarNativeAction(enabled,'save_generator',['SAVE','MEDIA']),false);
+ assert.equal(permitsHarNativeAction(enabled,'set_listing',['LISTING','PRODUCTION_RESTORE']),false);
+});
