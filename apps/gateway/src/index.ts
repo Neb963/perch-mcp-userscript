@@ -578,15 +578,24 @@ async function route(
         "INVALID_INPUT",
         "Exact authorization handle required.",
       );
-    const result = await rpc<{
+    let result: {
       state: string;
       request?: AuthRequest;
       grant?: { id: string; permissions: string[] };
       props?: AuthProps;
-    }>(registry(env), "/internal/oauth/consume", {
-      id: form.get("id"),
-      handle: form.get("handle"),
-    });
+    };
+    try {
+      result = await rpc<typeof result>(registry(env), "/internal/oauth/consume", {
+        id: form.get("id"),
+        handle: form.get("handle"),
+      });
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "EXPIRED")
+        return html(
+          "<h1>Authorization expired</h1><p>The five-minute approval window has closed. Restart connector authorization from ChatGPT; do not retry an expired code.</p>",
+        );
+      throw error;
+    }
     if (result.state === "pending")
       // Preserve the one-time authorization handle so an early click can be
       // retried in place; never require browser Back or a new OAuth flow.
