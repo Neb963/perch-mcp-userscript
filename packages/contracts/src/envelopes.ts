@@ -3,7 +3,7 @@ import { errorCodes, ToolError } from './errors.js';
 import { permissions, validateToolCall } from './tools.js';
 
 export const PROTOCOL_VERSION = 1;
-export const APP_VERSION = '0.1.6';
+export const APP_VERSION = '0.1.7';
 export const LIMITS = Object.freeze({
   transportBytes: 512 * 1024,
   inlineTextBytes: 256 * 1024,
