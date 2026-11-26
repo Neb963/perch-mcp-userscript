@@ -11,6 +11,7 @@ import {
 import { NativeAdapter } from "./adapter.js";
 import { VirtualFileSystem } from "./vfs.js";
 import { SourceTools } from "./source-tools.js";
+import { SavedSourceReader } from "./lifecycle.js";
 import { GatewayTransport, TransportError } from "./transport.js";
 import { ArtifactStore } from "./artifacts.js";
 import {
@@ -1067,6 +1068,30 @@ export class BrowserController {
           },
         },
       };
+    }
+    if (name === 'save_generator' && this.source) {
+      // The gateway refuses this tool until global provider acceptance is
+      // enabled. Local adapter acceptance is separate and cannot be bypassed
+      // by an MCP argument or an ordinary source-write Grant.
+      if (this.adapter.options.externalWritesVerified !== true)
+        throw Object.assign(new Error('Native Save has not passed real disposable-generator acceptance.'),
+          {code:'UNSUPPORTED_INTERFACE'});
+      const desired=await context.vfs.snapshot();
+      if (desired.revision !== args.intendedRevision)
+        throw Object.assign(new Error('Draft changed before native Save preflight.'),
+          {code:'STALE_REVISION'});
+      const identity=await this.adapter.assertIdentity();
+      const readback=new SavedSourceReader();
+      const previousSavedSnapshot=await readback.read(identity.slug,identity);
+      if (this.stopped || this.lease!==lease || Date.now()>=lease.expiresAt)
+        throw Object.assign(new Error('Save lease was lost during independent base read.'),
+          {code:'TAB_OFFLINE'});
+      return this.source.call(name,args,{save:{
+        operationId:context.envelope.operationId,
+        permission:lease.permissions.includes('SAVE')&&context.envelope.permissions.includes('SAVE'),
+        previousSavedSnapshot,
+        readSavedSnapshot:()=>readback.read(identity.slug,identity),
+      }});
     }
     if (this.source?.supports(name)) return this.source.call(name, args);
     if (this.tools?.supports(name)) return this.tools.call(name, args, context);
