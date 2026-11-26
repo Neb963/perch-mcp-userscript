@@ -75,7 +75,7 @@ export interface ManagerOptions {
   synthetic?: true;
 }
 export interface ManagerStatus {
-  connection: "unpaired" | "connected" | "paused" | "offline" | "blocked";
+  connection: "unpaired" | "connecting" | "connected" | "degraded" | "paused" | "offline" | "blocked";
   workspace?: string;
   agent?: string;
   dirty?: boolean;
@@ -351,6 +351,19 @@ export async function buildDiagnosticReport(
       evidenceLimit: "Server events do not identify the client or confirm navigation. Absence of a token exchange is not proof of a blocked client.",
     },
     transport: { events: localEvents },
+    browser: (() => {
+      const b = record(local.browser);
+      const connection = str(b.connection);
+      return {
+        connection: ["unpaired", "connecting", "connected", "degraded", "paused", "offline", "blocked"].includes(connection) ? connection : "unknown",
+        leasePresent: b.leasePresent === true,
+        leaseRemainingMs: num(b.leaseRemainingMs),
+        stopped: b.stopped === true,
+        consecutivePollFailures: num(b.consecutivePollFailures),
+        lastPollSuccessAt: typeof b.lastPollSuccessAt === "number" ? b.lastPollSuccessAt : null,
+        reasonCode: /^[A-Z][A-Z0-9_]{0,47}$/.test(str(b.reasonCode)) ? b.reasonCode : null,
+      };
+    })(),
     note: "OAuth events do not appear in MCP operation Activity; inspect oauthAudit and transport.",
   };
 }
@@ -759,6 +772,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   }
   function renderWorkspaces() {
     heading("Workspaces");
+    p(`Local browser connection: ${status.connection}${status.reason ? ` · ${status.reason}` : ""}. Remote Workspace Active is not proof of a live browser lease.`, body, "muted");
     p(
       "Attach the current editor to one Workspace. Rebinding revokes previous Grants and fences the previous document.",
       body,
@@ -1225,20 +1239,56 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
               key: "id",
               label: "Actions",
               render(g, td) {
-                td.append(
-                  button(
-                    "Revoke Grant",
-                    async () => {
-                      await client.request(
-                        "POST",
-                        `${ADMIN}/grants/${encodeURIComponent(str(g.id))}/revoke`,
-                        { expectedRevision: num(g.revision) },
+                if (g.state === "revoked") {
+                  p("Revoked — no further authorization", td, "muted");
+                  return;
+                }
+                const revoke = button("Revoke Grant", () => {
+                  const panel = el("div", undefined, "confirm");
+                  p(
+                    `Revoke this Client Grant for ${str(g.clientId)}? The connected MCP client loses access. This does not delete the Workspace or generator.`,
+                    panel,
+                  );
+                  const confirm = button("Confirm revoke", async () => {
+                    confirm.disabled = true;
+                    const endpoint = `${ADMIN}/grants/${encodeURIComponent(str(g.id))}/revoke`;
+                    let uncertain: unknown;
+                    try {
+                      const outcome = record(await client.request("POST", endpoint, {
+                        expectedRevision: num(g.revision),
+                      }));
+                      if (outcome.state !== "revoked")
+                        throw new Error("Gateway did not confirm Grant revocation.");
+                    } catch (error) {
+                      // Reconcile a potentially committed POST by reading the
+                      // authoritative state. Never replay an uncertain write.
+                      uncertain = error;
+                    }
+                    let current: Row | undefined;
+                    try {
+                      const grants = await loadList(`${ADMIN}/grants`);
+                      current = grants.items.find((item) => item.id === g.id);
+                    } catch {
+                      panel.replaceChildren();
+                      p("Revocation outcome unknown: server readback failed. Refresh Grants to reconcile; do not submit the POST again.", panel);
+                      throw new Error("Grant revocation unverified. Refresh Grants; do not retry the uncertain write.");
+                    }
+                    if (current?.state !== "revoked") {
+                      panel.replaceChildren();
+                      p("Grant still appears active or has changed. Refresh Grants and inspect its revision before attempting another action.", panel);
+                      throw uncertain ?? new Error(
+                        "Grant revocation not verified. Do not repeat an uncertain write.",
                       );
-                      await refresh();
-                    },
-                    "danger",
-                  ),
-                );
+                    }
+                    await refresh();
+                    announce("Grant revoked and verified in the Registry. Reauthorize the connector to regain access.");
+                  }, "danger");
+                  panel.append(confirm, button("Cancel", () => panel.remove()));
+                  td.append(panel);
+                  revoke.disabled = true;
+                  confirm.focus();
+                }, "danger");
+                td.append(revoke);
               },
             },
           ],

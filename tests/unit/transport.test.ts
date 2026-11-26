@@ -134,3 +134,34 @@ test("transport audit records safe route templates and gateway trace ID, never c
   assert.equal(data.events[0]?.traceId, "a4eef3e9-ce3f-40be-961f-5c2d47d50250");
   assert.doesNotMatch(JSON.stringify(data), /DO-NOT-EXPORT|client-private-id|sensitive/);
 });
+
+test("gateway request deadlines exceed the 25-second Worker idle poll, including non-signaled POST", async () => {
+  const store = new MemoryStore();
+  await store.set("perch:pairing", {
+    schemaVersion: 1, origin: "https://fixture.workers.dev",
+    browserInstallationId: "fixture", adminCredential: "admin", executionCredential: "exec",
+  });
+  const durations: number[] = [];
+  const original = AbortSignal.timeout;
+  // Capture the actual timeout configured by fetch(), not a duplicated
+  // constant in an isolated helper test.
+  AbortSignal.timeout = ((duration: number) => {
+    durations.push(duration);
+    return new AbortController().signal;
+  }) as typeof AbortSignal.timeout;
+  try {
+    const transport = new GatewayTransport(store, (async () =>
+      Response.json({ operations: [], expiresAt: Date.now() + 180000 })) as typeof fetch);
+    await transport.initialize();
+    await transport.request("GET", "/api/v1/admin/state");
+    await transport.request("POST", "/api/v1/admin/pause", { paused: true });
+    await transport.tab("/api/v1/tab/poll", { workspaceId: "fixture" }, "lease");
+    const signal = new AbortController();
+    await transport.tab("/api/v1/tab/poll", { workspaceId: "fixture" }, "lease",
+      { signal: signal.signal, timeoutMs: 45000 });
+    assert.deepEqual(durations, [15000, 30000, 30000, 45000]);
+    assert.ok(durations[2]! > 25000, "un-signaled poll must not abort before the Cloudflare hold finishes");
+  } finally {
+    AbortSignal.timeout = original;
+  }
+});

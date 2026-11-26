@@ -345,6 +345,7 @@ export class GatewayTransport {
     // management write, tab operation or an uncertain OAuth-related effect.
     const attempts = method === "GET" && !binary ? 2 : 1;
     const defaultTimeoutMs = method === "GET" && !binary ? 15000 : 30000;
+    const timeoutMs = options?.timeoutMs ?? defaultTimeoutMs;
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         response = await this.fetcher(url, {
@@ -356,11 +357,8 @@ export class GatewayTransport {
           cache: "no-store",
           referrerPolicy: "no-referrer",
           signal: options?.signal
-            ? AbortSignal.any([
-                options.signal,
-                AbortSignal.timeout(options.timeoutMs ?? defaultTimeoutMs),
-              ])
-            : AbortSignal.timeout(options?.timeoutMs ?? 15000),
+            ? AbortSignal.any([options.signal, AbortSignal.timeout(timeoutMs)])
+            : AbortSignal.timeout(timeoutMs),
         });
         break;
       } catch (error) {
