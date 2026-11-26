@@ -43,7 +43,7 @@ interface LocalOperation {
   resolvedByOperator?: boolean;
 }
 export interface ControllerStatus {
-  connection: "unpaired" | "connected" | "degraded" | "paused" | "offline" | "blocked";
+  connection: "unpaired" | "connecting" | "connected" | "degraded" | "paused" | "offline" | "blocked";
   workspace?: string;
   dirty?: boolean;
   revision?: string;
@@ -105,6 +105,7 @@ export class BrowserController {
   diagnostics() {
     return {
       connection: this.currentStatus.connection,
+      workspaceId: this.currentStatus.workspace ?? null,
       reasonCode: this.lastFailureCode ?? null,
       consecutivePollFailures: this.consecutivePollFailures,
       lastPollSuccessAt: this.lastPollSuccessAt ?? null,
