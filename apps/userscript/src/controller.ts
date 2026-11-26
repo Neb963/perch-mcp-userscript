@@ -90,6 +90,8 @@ export class BrowserController {
   private currentStatus: ControllerStatus = { connection: "offline" };
   private stopped = true;
   private executing = false;
+  /** Browser-local iframe geometry uncertainty; never confused with provider effects. */
+  private viewportUncertain = false;
   private running?: Promise<void>;
   private abort?: AbortController;
   constructor(
@@ -165,6 +167,7 @@ export class BrowserController {
     this.lease = claim;
     this.vfs = candidateVfs;
     this.source = new SourceTools(this.vfs, this.adapter);
+    this.viewportUncertain = false; // New document/lease: old CSS is not canonical provider state.
     this.stopped = false;
     this.lastFailureCode = undefined;
     this.consecutivePollFailures = 0;
@@ -460,7 +463,7 @@ export class BrowserController {
       this.consecutivePollFailures = 0;
       this.lastPollSuccessAt = Date.now();
       this.lastFailureCode = undefined;
-      if (this.currentStatus.connection === "degraded")
+      if (this.currentStatus.connection === "degraded" && !this.viewportUncertain)
         this.updateStatus({ connection: "connected", workspace: lease.workspaceId });
       if (this.stopped || this.lease !== lease) return;
       if (
@@ -808,12 +811,28 @@ export class BrowserController {
       lease.leaseCredential,
     );
     if (result.status === "UNKNOWN" || result.status === "PARTIAL") {
-      this.stopped = true;
-      this.updateStatus({
-        connection: "blocked",
-        workspace: lease.workspaceId,
-        reason: "Uncertain or partial effect. Inspect and reconcile.",
-      });
+      if (envelope.tool === "set_viewport_size") {
+        // This tool can only apply iframe-local CSS and a fixed read-only
+        // measurement probe. Preserve the PARTIAL/UNKNOWN durable receipt,
+        // but do not kill the lease or block unrelated source operations.
+        this.viewportUncertain = true;
+        this.updateStatus({
+          connection: "degraded",
+          workspace: lease.workspaceId,
+          reason: "Preview viewport could not be verified. Inspect its actual dimensions; source and provider writes were not dispatched by this tool.",
+        });
+      } else {
+        this.stopped = true;
+        this.updateStatus({
+          connection: "blocked",
+          workspace: lease.workspaceId,
+          reason: "Uncertain or partial effect. Inspect and reconcile.",
+        });
+      }
+    } else if (envelope.tool === "set_viewport_size" && result.status === "SUCCEEDED" &&
+               envelope.args.reset === true) {
+      this.viewportUncertain = false;
+      this.updateStatus({connection:"connected",workspace:lease.workspaceId});
     }
   }
   private async syncResolvedLocal(
