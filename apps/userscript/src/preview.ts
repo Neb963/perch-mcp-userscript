@@ -5,6 +5,8 @@ export interface PreviewReceipt extends PreviewDiagnostics { appliedRevision?: s
 export interface PreviewBridge {
   /** Live, zero-source-mutation native protocol probe before first use. */
   attest?(capability: 'evaluate' | 'refresh' | 'preamble'): Promise<boolean>;
+  /** Boolean-only readiness evidence; no frame URL, source or private IDs. */
+  status?(): Record<string, boolean>;
   refresh(preambleJs?: string): Promise<PreviewReceipt>;
   evaluate(js: string, timeoutMs: number): Promise<PreviewReceipt>;
   diagnostics?(): Promise<PreviewReceipt>;
@@ -78,6 +80,7 @@ export class PreviewAdapter {
         return {
           ...receipt, ...await this.freshness(),
           capabilities: this.availability(),
+          nativeReadiness: this.options.bridge.status?.() ?? { available: false },
           diagnosticScope: {
             nativeWarnings: true,
             consoleCaptureRequiresInstrumentedRefresh:
@@ -185,6 +188,26 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
   private previousGeneration: string | undefined;
   private knownSource: NativeSourceStamp | undefined;
   private busy=false;
+  status(): Record<string, boolean> {
+    const frame=this.options.frame();
+    const id=this.page.generatorPublicId;
+    const validId=typeof id==='string' && /^[a-z0-9]{16,64}$/.test(id);
+    let originMatched=false;
+    if(validId && frame?.contentWindow) {
+      try { originMatched=new URL(frame.src).origin===`https://${id}.perchance.org`; }
+      catch { /* No valid native frame URL. */ }
+    }
+    const src=this.page.srcState as Record<string, unknown>|undefined;
+    return {
+      framePresent:Boolean(frame?.contentWindow),
+      exactFrameOrigin:originMatched,
+      nativeEvaluateProtocolAttested:false, // Per-call proof is represented by PreviewAdapter.availability()
+      nativeManifestAvailable:typeof src?.manifestForIframe==='function',
+      nativePendingStateAvailable:typeof src?.hasPending==='function',
+      nativeHardReloadAvailable:typeof this.page.hardReloadOutputIframe==='function',
+      nativePreambleUnoccupied:!this.page.__aiAgentPreambleJs,
+    };
+  }
   async attest(capability: 'evaluate' | 'refresh' | 'preamble'): Promise<boolean> {
     // For evaluation, prove the native evaluateJs request/reply contract against
     // the exact preview origin and WindowProxy using an inert constant. A forged
