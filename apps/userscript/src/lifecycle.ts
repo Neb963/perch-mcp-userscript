@@ -20,8 +20,7 @@ export class NativeLifecycle {
   constructor(readonly adapter:NativeAdapter,page:unknown,readonly readback:LifecycleReadback,readonly store:KeyValueStore,readonly options:{externalWritesVerified?:boolean}={}){this.page=page as NativeLifecyclePage;}
   supports(tool:string):boolean{return tool in permissions;}
   async call(tool:string,args:Record<string,unknown>,context:LifecycleContext):Promise<LifecycleResult>{
-    if(!this.supports(tool) || (tool!=='set_listing' && tool!=='rename_generator'))
-      throw new BrowserError('UNSUPPORTED_INTERFACE','Only the HAR-verified native listing and URL-change actions are enabled.');
+    if(!this.supports(tool))throw new BrowserError('UNSUPPORTED_INTERFACE','No fixed native lifecycle adapter for this tool.');
     if(!context.permissions.includes(permissions[tool]!))throw new BrowserError('SCOPE_DENIED','Lifecycle permission is disabled.');
     if(!this.options.externalWritesVerified)throw new BrowserError('UNSUPPORTED_INTERFACE','Native lifecycle requires recorded Firefox/disposable live verification.');
     this.adapter.assertMutationReady();
