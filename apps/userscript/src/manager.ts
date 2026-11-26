@@ -732,6 +732,13 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           label: "Actions",
           render(w, td) {
             const bind = async (replace: boolean) => {
+              // Do not change the authoritative remote Binding until the
+              // current editor has passed a read-only native capability check.
+              const probed = client.probe ? record(await client.probe()) : null;
+              if (probed && (probed.ready !== true || !probed.identity))
+                throw new Error(
+                  "The native editor is not ready for attachment. Open Settings → Read-only editor probe to inspect the missing capability.",
+                );
               const identity = await client.currentIdentity();
               const configured = client.configuration();
               const binding = {
