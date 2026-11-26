@@ -127,7 +127,7 @@ export class VirtualFileSystem {
       saved=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw)) as StoredSource;
       if (!saved || saved.version!==1 || !saved.identity ||
           !saved.files || typeof saved.files!=='object' || Array.isArray(saved.files) ||
-          typeof saved.revision!=='string' || !/^\\d+:[a-f0-9]{64}$/.test(saved.revision))
+          typeof saved.revision!=='string' || !/^\d+:[a-f0-9]{64}$/.test(saved.revision))
         throw new Error('invalid-checkpoint');
     } catch {
       throw new BrowserError('STORAGE_CORRUPT',
