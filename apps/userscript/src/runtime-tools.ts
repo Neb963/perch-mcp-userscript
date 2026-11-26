@@ -34,6 +34,9 @@ export class RuntimeTools implements AdditionalTools {
   ) {
     this.compute = createComputeWorkerClient(workerSource);
   }
+  capabilityReport(context: RuntimeContext): Record<string, unknown> {
+    return this.preview(context).availability();
+  }
   supports(name: string): boolean {
     return [
       "generate_image",
