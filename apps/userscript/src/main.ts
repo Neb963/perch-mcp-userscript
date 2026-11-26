@@ -1,5 +1,6 @@
 import { APP_VERSION } from "../../../packages/contracts/src/index.js";
 import { NativeAdapter } from "./adapter.js";
+import { LiveLifecycleReadback, NativeLifecycle } from "./lifecycle.js";
 import { resolveNativePageRealm } from "./page-context.js";
 import { reconnectCandidate } from "./autoconnect.js";
 import { GMStore } from "./storage.js";
@@ -59,19 +60,25 @@ async function start(): Promise<void> {
   const adapter = new NativeAdapter(page, {
     cloneInto:
       typeof cloneInto === "function" ? (v) => cloneInto(v, page) : undefined,
-    externalWritesVerified: false,
+    // The owner supplied native HAR evidence for Save, Rename and Listing.
+    // Gateway policy, Grant, owner/lease and exact readback remain independent.
+    externalWritesVerified: true,
   });
   let manager: ManagerHandle | undefined;
   let closing = false;
   let manualConnectionEpoch = 0;
   let connectionQueue: Promise<void> = Promise.resolve();
   const runtime = new RuntimeTools(page, store, document);
+  const lifecycle = new NativeLifecycle(adapter,page,
+    new LiveLifecycleReadback(adapter),store,{externalWritesVerified:true});
   const controller = new BrowserController(
     adapter,
     store,
     transport,
     runtime,
     (status) => manager?.setStatus(status),
+    lifecycle,
+    (message) => window.confirm(message),
   );
   const download = (name: string, data: string | Uint8Array, mime: string) => {
     const blob = new Blob(
@@ -174,7 +181,7 @@ async function start(): Promise<void> {
         injectInto:
           typeof GM_info === "undefined" ? "unknown" : GM_info.injectInto,
       },
-      externalVerification: "Pending T3; no production-write gate enabled.",
+      externalVerification: "HAR-confirmed native Save/Rename/Listing enabled by operator; gateway native-actions policy, owner, Grant and exact post-effect readback remain required.",
     }),
     disconnect: async () => {
       await controller.pause();
