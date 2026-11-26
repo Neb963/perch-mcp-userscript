@@ -19,10 +19,11 @@ const worker = await build({
   legalComments: "inline",
 });
 const workerSource = worker.outputFiles[0]!.text;
+const userScriptVersion = JSON.parse(await readFile("package.json", "utf8")).version;
 const metadata = `// ==UserScript==
 // @name         Perch MCP (verification candidate)
 // @namespace    https://github.com/Neb963/perch-mcp-userscript
-// @version      0.1.0
+// @version      ${userScriptVersion}
 // @description  Isolated Perchance workspace MCP controller. External acceptance gates remain open.
 // @match        https://perchance.org/*
 // @exclude      https://perchance.org/ai-agent*
