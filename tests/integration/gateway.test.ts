@@ -275,6 +275,19 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
     ).status,
     409,
   );
+  const early = await mf.dispatchFetch(base + "/authorize/complete", {
+    method: "POST",
+    headers: {
+      Origin: base,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ id: approvalId, handle }),
+  });
+  assert.equal(early.status, 200);
+  const earlyHtml = await early.text();
+  assert.match(earlyHtml, /Check approval again/);
+  assert.match(earlyHtml, /name="handle"/);
+  assert.ok(!earlyHtml.includes(approval.digest), "pending form does not expose the approval digest");
   await data("/api/v1/admin/approvals/" + approvalId + "/decision", {
     expectedRevision: approval.revision,
     digest: approval.digest,
