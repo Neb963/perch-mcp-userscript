@@ -2104,23 +2104,39 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     actions(
       body,
       button("Read-only editor probe", async () => {
-        const identity = await client.currentIdentity();
+        // The probe must remain available when native identity is missing.
         const probe = client.probe ? await client.probe() : undefined;
+        let identity:
+          | Awaited<ReturnType<ManagerClient["currentIdentity"]>>
+          | undefined;
+        let identityError: string | undefined;
+        try {
+          identity = await client.currentIdentity();
+        } catch (error) {
+          identityError = error instanceof Error ? error.message : String(error);
+        }
         body.append(
           el(
             "pre",
             json({
-              identity: {
-                generatorId: identity.generatorId,
-                slug: identity.slug,
-                publicId: identity.publicId,
-                draftId: identity.draftId,
-              },
+              identity: identity
+                ? {
+                    generatorId: identity.generatorId,
+                    slug: identity.slug,
+                    publicId: identity.publicId,
+                    draftId: identity.draftId,
+                  }
+                : null,
+              identityError,
               probe,
             }),
           ),
         );
-        announce("Native identity read without source mutation.");
+        announce(
+          identityError
+            ? "Native identity unavailable; read-only capability report follows."
+            : "Native identity read without source mutation.",
+        );
       }),
       button("Export settings", async () => {
         client.download(
