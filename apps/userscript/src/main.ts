@@ -142,8 +142,20 @@ async function start(): Promise<void> {
     },
     pauseLocal: async () => {
       const id = controller.diagnostics().workspaceId;
-      if (id) await store.set("perch:autoconnect-stop:" + id, true);
+      let markerFailed = false;
+      if (id) {
+        try { await store.set("perch:autoconnect-stop:" + id, true); }
+        catch { markerFailed = true; }
+      }
+      // The operator's immediate Stop must not depend on the availability
+      // of an auxiliary GM persistence write. Continue global pause even if
+      // a restart-suppression marker could not be persisted.
       await controller.pause();
+      if (markerFailed)
+        manager?.setStatus({
+          connection: "blocked",
+          reason: "Stopped locally, but automatic-restart suppression could not be saved. Repair userscript storage before reloading.",
+        });
     },
     copy: async (text) => GM_setClipboard(text),
     download,
