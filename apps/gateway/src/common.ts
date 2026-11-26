@@ -4,7 +4,7 @@ import type {
   DurableObjectStub,
   KVNamespace,
 } from "@cloudflare/workers-types";
-export const VERSION = "0.1.2";
+export const VERSION = "0.1.3";
 export const DEFAULT_PERMISSIONS = [
   "READ_SOURCE",
   "WRITE_SOURCE",
@@ -49,7 +49,7 @@ export function json(value: unknown, status = 200): Response {
     },
   });
 }
-export function errorResponse(error: unknown): Response {
+export function errorResponse(error: unknown, traceId = crypto.randomUUID()): Response {
   const e =
     error instanceof ApiError
       ? error
@@ -67,7 +67,7 @@ export function errorResponse(error: unknown): Response {
       message: e.message,
       retryable: false,
       recovery: e.recovery,
-      traceId: crypto.randomUUID(),
+      traceId,
     },
     e.status,
   );

@@ -71,6 +71,15 @@ export function allowedOrigin(
       .includes(o)
   ) return true;
   const pathname = new URL(request.url).pathname;
+  // Firefox and Chromium may send Origin:null for ordinary HTML form POSTs
+  // under a no-referrer policy. An OAuth completion is authorized by its
+  // one-use 256-bit handle and exact server-side approval, not by Origin.
+  // Still reject an explicitly cross-site Fetch Metadata request.
+  if (
+    pathname === "/authorize/complete" &&
+    request.method === "POST" &&
+    o === "null"
+  ) return request.headers.get("sec-fetch-site") !== "cross-site";
   const publicProtocolPath =
     pathname === "/authorize" ||
     pathname === "/register" ||
@@ -89,7 +98,7 @@ function cors(
 ): Response {
   const o = request.headers.get("origin");
   const headers = new Headers(response.headers);
-  if (o && allowedOrigin(request, env, issuer)) {
+  if (o && o !== "null" && allowedOrigin(request, env, issuer)) {
     headers.set("Access-Control-Allow-Origin", o);
     headers.set("Vary", "Origin");
     headers.set(
@@ -119,7 +128,7 @@ function escape(text: string): string {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 }
-function html(body: string): Response {
+function html(body: string, formPost = false): Response {
   return new Response(
     '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Perch MCP authorization</title><style>body{font:16px system-ui;max-width:48rem;margin:3rem auto;padding:1rem}code{font-weight:bold}dt{font-weight:bold}dd{overflow-wrap:anywhere}button,a{padding:.5rem}</style><main>' +
       body +
@@ -130,7 +139,9 @@ function html(body: string): Response {
         "Cache-Control": "no-store",
         "Content-Security-Policy":
           "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-        "Referrer-Policy": "no-referrer",
+        // origin transmits neither the authorization query nor its handle,
+        // and prevents null Origin on same-origin form navigation.
+        "Referrer-Policy": formPost ? "origin" : "no-referrer",
         "X-Content-Type-Options": "nosniff",
       },
     },
@@ -514,16 +525,26 @@ async function route(
         '"><input type="hidden" name="handle" value="' +
         escape(pending.handle) +
         '"><button type="submit">Continue after approval</button></form><p>Expires in five minutes. Do not approve a request you did not initiate.</p>',
+      true,
     );
   }
   if (path === "/authorize/complete") {
     if (request.method !== "POST")
       throw new ApiError("INVALID_INPUT", "POST required.", 405);
     const o = request.headers.get("origin");
-    if (o !== config.issuer)
+    // The one-time handle, exact Registry approval and PKCE S256 are the
+    // authorization proof. Do not rely on Origin in form navigation, because
+    // privacy policies can legitimately make it "null".
+    // Explicit foreign origins and explicit cross-site Fetch Metadata remain
+    // rejected; a null origin never receives CORS read permission.
+    if (
+      (o && o !== "null" && o !== config.issuer && o !== u.origin) ||
+      (request.headers.get("sec-fetch-site") === "cross-site" &&
+        o !== config.issuer && o !== u.origin)
+    )
       throw new ApiError(
         "SCOPE_DENIED",
-        "Same-origin authorization completion required.",
+        "Authorization completion must originate from the gateway form.",
         403,
       );
     if (Number(request.headers.get("content-length") ?? 0) > 4096)
@@ -607,6 +628,7 @@ async function route(
           escape(form.get("handle") ?? "") +
           '"><button type="submit">Check approval again</button></form>' +
           "<p>Requests expire five minutes after they are created.</p>",
+        true,
       );
     if (result.state === "denied" && result.request)
       return Response.redirect(
@@ -668,22 +690,75 @@ async function route(
     await rpc(registry(env), "/internal/registration-budget", {});
   return authorizationServer.fetch(request, env, ctx as never);
 }
+type AuditRoute = "authorize" | "authorize_complete" | "token" | "register";
+function auditRoute(path: string): AuditRoute | null {
+  if (path === "/authorize") return "authorize";
+  if (path === "/authorize/complete") return "authorize_complete";
+  if (path === "/token") return "token";
+  if (path === "/register") return "register";
+  return null;
+}
+function originClass(request: Request): string {
+  const value = request.headers.get("origin");
+  if (!value) return "missing";
+  if (value === "null") return "null";
+  if (value === new URL(request.url).origin) return "same";
+  if (value === "https://perchance.org") return "perchance";
+  if (value === "https://chatgpt.com" || value === "https://chat.openai.com") return "chatgpt";
+  return "other";
+}
+function auditOAuth(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  status: number,
+  code: string,
+  traceId: string,
+): void {
+  const routeName = auditRoute(new URL(request.url).pathname);
+  if (!routeName || !["GET", "POST"].includes(request.method)) return;
+  // Audit is best effort; a logging outage must never prevent authorization.
+  // Do not persist raw URL, Origin, query, OAuth credentials, handles or bodies.
+  ctx.waitUntil(
+    rpc(registry(env), "/internal/diagnostic-event", {
+      route: routeName,
+      method: request.method,
+      originClass: originClass(request),
+      status,
+      code,
+      traceId,
+    }).then(() => undefined).catch(() => undefined),
+  );
+}
 export default {
   async fetch(
     request: Request,
     env: Env,
     ctx: ExecutionContext,
   ): Promise<Response> {
-    let issuer: string | null = env.ISSUER_URL ?? null;
+    const issuer: string | null = env.ISSUER_URL ?? null;
     try {
       if (!allowedOrigin(request, env, issuer))
         throw new ApiError("SCOPE_DENIED", "Origin is not allowed.", 403);
       if (request.method === "OPTIONS")
         return cors(new Response(null, { status: 204 }), request, env, issuer);
       const response = await route(request, env, ctx);
+      auditOAuth(
+        request, env, ctx, response.status,
+        response.status === 302 ? "COMPLETE" :
+          response.status >= 400 ? "HTTP_ERROR" : "PENDING_OR_INFO",
+        crypto.randomUUID(),
+      );
       return cors(response, request, env, issuer);
     } catch (error) {
-      return cors(errorResponse(error), request, env, issuer);
+      const traceId = crypto.randomUUID();
+      const response = errorResponse(error, traceId);
+      auditOAuth(
+        request, env, ctx, response.status,
+        error instanceof ApiError ? error.code : "INTERNAL_ERROR",
+        traceId,
+      );
+      return cors(response, request, env, issuer);
     }
   },
 };

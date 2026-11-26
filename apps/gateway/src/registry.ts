@@ -214,6 +214,35 @@ export class Registry {
   private async route(request: Request): Promise<Response> {
     const url = new URL(request.url),
       path = url.pathname;
+    if (path === "/internal/diagnostic-event") {
+      // Called only through the private Durable Object binding by the Worker.
+      // No URLs, HTTP headers, OAuth tokens, form fields or source are stored.
+      const b = await parseBody(request, 1024);
+      fields(b, ["route", "method", "originClass", "status", "code", "traceId"]);
+      const route = str(b.route, "route", 32),
+        method = str(b.method, "method", 8),
+        originClass = str(b.originClass, "originClass", 20),
+        code = str(b.code, "code", 40);
+      if (
+        !["authorize", "authorize_complete", "token", "register"].includes(route) ||
+        !["GET", "POST"].includes(method) ||
+        !["missing", "null", "same", "perchance", "chatgpt", "other"].includes(originClass) ||
+        typeof b.status !== "number" || !Number.isInteger(b.status) || b.status < 200 || b.status > 599 ||
+        !/^[a-f0-9-]{36}$/.test(String(b.traceId))
+      ) throw new ApiError("INVALID_INPUT", "Invalid bounded diagnostic event.");
+      this.db.transaction(() => {
+        const now = Date.now(),
+          budget = this.db.get<{ minute: number; count: number }>("diagnostic-budget", { minute: Math.floor(now / 60000), count: 0 }),
+          minute = Math.floor(now / 60000),
+          count = budget.minute === minute ? budget.count : 0;
+        if (count >= 120) return;
+        this.db.put("diagnostic-budget", { minute, count: count + 1 });
+        const rows = this.db.get<Record<string, unknown>[]>("diagnostic-events", []);
+        rows.push({ at: now, route, method, originClass, status: b.status, code, traceId: b.traceId });
+        this.db.put("diagnostic-events", rows.filter((row) => Number(row.at) > now - 7 * 86400000).slice(-100));
+      });
+      return json({ ok: true });
+    }
     if (path === "/internal/registration-budget") {
       return json(
         this.db.transaction(() => {
@@ -853,6 +882,12 @@ export class Registry {
     // Resource endpoints initialize/validate their library independently.
     const c = this.core(),
       prefix = "/api/v1/admin/";
+    if (path === prefix + "diagnostics")
+      return json({
+        schemaVersion: 1,
+        gatewayVersion: VERSION,
+        events: this.db.get<Record<string, unknown>[]>("diagnostic-events", []),
+      });
     if (path === prefix + "state")
       return json({
         revision: c.revision,

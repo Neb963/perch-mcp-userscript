@@ -109,3 +109,28 @@ test("transient management GET retries safely, while a failed POST never replays
   );
   assert.equal(calls, 3, "mutating POST must not be retried");
 });
+
+test("transport audit records safe route templates and gateway trace ID, never credentials", async () => {
+  const store = new MemoryStore();
+  await store.set("perch:pairing", {
+    schemaVersion: 1,
+    origin: "https://perch.example.workers.dev",
+    browserInstallationId: "fixture-id",
+    adminCredential: "DO-NOT-EXPORT-ADMIN",
+    executionCredential: "DO-NOT-EXPORT-EXEC",
+  });
+  const transport = new GatewayTransport(store, (async () => Response.json({
+    code: "SCOPE_DENIED",
+    message: "DO-NOT-EXPORT-SERVER-MESSAGE",
+    traceId: "a4eef3e9-ce3f-40be-961f-5c2d47d50250",
+  }, { status: 403 })) as typeof fetch);
+  await transport.initialize();
+  await assert.rejects(transport.request("GET", "/api/v1/admin/approvals/client-private-id/decision?cursor=sensitive"), () => true);
+  const data = transport.diagnostics();
+  assert.equal(data.events.length, 1);
+  assert.equal(data.events[0]?.route, "/api/v1/admin/approvals/:id/decision");
+  assert.equal(data.events[0]?.status, 403);
+  assert.equal(data.events[0]?.code, "SCOPE_DENIED");
+  assert.equal(data.events[0]?.traceId, "a4eef3e9-ce3f-40be-961f-5c2d47d50250");
+  assert.doesNotMatch(JSON.stringify(data), /DO-NOT-EXPORT|client-private-id|sensitive/);
+});

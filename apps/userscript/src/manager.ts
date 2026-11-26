@@ -16,6 +16,8 @@ export interface ManagerClient {
   /** Adds management credential, JSON type and a fresh Idempotency-Key for writes. Never redirects credentials. */
   request(method: string, path: string, body?: unknown): Promise<unknown>;
   health(origin?: string): Promise<unknown>;
+  /** Read-only, bounded redacted local request outcomes; never returns credentials. */
+  diagnostics?(): unknown;
   probe?(): Promise<unknown>;
   fetchHosts?(): Promise<string[]>;
   setFetchHosts?(hosts: string[]): Promise<void>;
@@ -238,6 +240,101 @@ export function exportSafeSettings(
     requiresPairing: true,
     requiresRebind: true,
   });
+}
+/**
+ * A diagnostic report is independent of MCP Activity; OAuth events are not
+ * operations. Always produce a useful file even when the gateway is offline.
+ * Only allowlisted scalar projections are ever exported.
+ */
+export async function buildDiagnosticReport(
+  client: ManagerClient,
+  version: string,
+  current?: ManagerStatus,
+): Promise<Record<string, unknown>> {
+  const config = client.configuration();
+  const get = async (task: () => Promise<unknown>) => {
+    try { return { ok: true, value: await task() }; }
+    catch (error) {
+      const r = record(error);
+      return {
+        ok: false,
+        code: /^[A-Z][A-Z0-9_]{0,47}$/.test(str(r.code)) ? r.code : "REQUEST_FAILED",
+        status: num(r.status),
+        traceId: /^[0-9a-f-]{36}$/.test(str(r.traceId)) ? r.traceId : undefined,
+      };
+    }
+  };
+  const [health, stateResult, remote] = await Promise.all([
+    get(() => client.health()),
+    get(() => client.request("GET", `${ADMIN}/state`)),
+    get(() => client.request("GET", `${ADMIN}/diagnostics`)),
+  ]);
+  const safeHealth = record("value" in health ? health.value : undefined),
+    safeState = record("value" in stateResult ? stateResult.value : undefined);
+  const rawEvents = record("value" in remote ? remote.value : undefined).events;
+  const approvedRoutes = new Set(["authorize", "authorize_complete", "token", "register"]);
+  const approvedOrigins = new Set(["missing", "null", "same", "perchance", "chatgpt", "other"]);
+  const events = Array.isArray(rawEvents) ? rawEvents.slice(-100).filter(isRecord)
+    .map((event) => ({
+      at: num(event.at),
+      route: approvedRoutes.has(str(event.route)) ? event.route : "other",
+      method: ["GET", "POST"].includes(str(event.method)) ? event.method : "other",
+      originClass: approvedOrigins.has(str(event.originClass)) ? event.originClass : "other",
+      status: num(event.status),
+      code: /^[A-Z_][A-Z0-9_]{0,47}$/.test(str(event.code)) ? event.code : "UNKNOWN",
+      traceId: /^[0-9a-f-]{36}$/.test(str(event.traceId)) ? event.traceId : undefined,
+    })) : [];
+  const local = record(client.diagnostics?.());
+  const localEvents = Array.isArray(local.events) ? local.events.slice(-100).filter(isRecord)
+    .map((event) => ({
+      at: num(event.at),
+      method: ["GET", "POST", "PATCH", "PUT", "DELETE"].includes(str(event.method)) ? event.method : "other",
+      route: /^\/(?:api\/v1\/(?:admin|tab)\/|health$)/.test(str(event.route))
+        ? str(event.route).split("?")[0]!.slice(0, 120)
+            .replace(/\/(workspaces|agents|approvals|grants|resources)\/[^/]+/g, "/$1/:id")
+            .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ":id")
+        : "redacted",
+      status: num(event.status),
+      elapsedMs: num(event.elapsedMs),
+      code: /^[A-Z_][A-Z0-9_]{0,47}$/.test(str(event.code)) ? event.code : "UNKNOWN",
+      traceId: /^[0-9a-f-]{36}$/.test(str(event.traceId)) ? event.traceId : undefined,
+    })) : [];
+  return {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    purpose: "OAuth, connection and management diagnostics. No source, tokens or credentials.",
+    userscriptVersion: version,
+    gatewayOrigin: config.origin,
+    paired: config.paired,
+    manager: {
+      connection: current?.connection ?? "unknown",
+      workspaceSelected: !!current?.workspace,
+    },
+    health: {
+      ok: health.ok,
+      ...(!health.ok ? { error: health } : {
+        version: str(safeHealth.version, "unknown"),
+        schemaVersion: num(safeHealth.schemaVersion),
+        configured: safeHealth.configured === true,
+        paired: safeHealth.paired === true,
+        providerWritesEnabled: safeHealth.providerWritesEnabled === true,
+      }),
+    },
+    registry: {
+      ok: stateResult.ok,
+      ...(!stateResult.ok ? { error: stateResult } : {
+        version: str(safeState.version, "unknown"),
+        revision: num(safeState.revision),
+        policyRevision: num(safeState.policyRevision),
+        paused: safeState.paused === true,
+        workspaces: num(safeState.workspaces),
+        agents: num(safeState.agents),
+      }),
+    },
+    oauthAudit: { ok: remote.ok, ...(!remote.ok ? { error: remote } : {}), events },
+    transport: { events: localEvents },
+    note: "OAuth events do not appear in MCP operation Activity; inspect oauthAudit and transport.",
+  };
 }
 export function mountManager(options: ManagerOptions): ManagerHandle {
   const doc = options.document ?? document,
@@ -1993,7 +2090,8 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       );
     }
     body.append(
-      button("Export redacted activity", async () => {
+      button("Export complete diagnostics (OAuth + network)", exportDiagnostics),
+      button("Export MCP operation activity only", async () => {
         client.download(
           "perch-mcp-activity.json",
           json({
@@ -2012,6 +2110,11 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         );
       }),
     );
+  }
+  async function exportDiagnostics(): Promise<void> {
+    const report = await buildDiagnosticReport(client, options.version, status);
+    client.download("perch-mcp-diagnostics.json", json(report), "application/json");
+    announce("Redacted diagnostic report exported, including OAuth audit and transport failures.");
   }
   async function promptCredential(
     purpose: "bootstrap" | "recovery",
@@ -2177,6 +2280,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     }
     actions(
       body,
+      button("Export complete diagnostics (OAuth + network)", exportDiagnostics),
       button("Read-only editor probe", async () => {
         // The probe must remain available when native identity is missing.
         const probe = client.probe ? await client.probe() : undefined;
