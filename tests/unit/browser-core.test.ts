@@ -142,3 +142,19 @@ test('successful text/base64 write receipts include byte-accurate SHA-256; faile
  }),rejectsCode('STALE_REVISION'));
  assert.equal((await f.vfs.snapshot()).revision,before.revision);
 });
+
+test('restore fails before effects on mismatched durable checkpoint digest, preserves current draft',async()=>{
+ const f=fixture();
+ const before=await f.vfs.snapshot();
+ const receipt=await f.vfs.checkpoint('checksum fixture',true);
+ const key=`${f.vfs.prefix}:checkpoint:${receipt.id}`;
+ const prior=await f.store.get<Record<string,unknown>>(key);
+ assert.ok(prior);
+ await f.store.set(key,{...prior,sha256:'0'.repeat(64)});
+ await assert.rejects(f.vfs.restore(receipt.id,before.revision),rejectsCode('STORAGE_CORRUPT'));
+ assert.equal((await f.vfs.snapshot()).revision,before.revision);
+ assert.equal(decodeText(await f.vfs.read('main.pjs')),'animal\n  otter\n');
+ await f.store.set(key,prior);
+ await assert.rejects(f.vfs.restore(receipt.id,'stale-revision'),rejectsCode('STALE_REVISION'));
+ assert.equal((await f.vfs.snapshot()).revision,before.revision);
+});
