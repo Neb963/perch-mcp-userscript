@@ -67,6 +67,10 @@ test("retired lease only accepts exact outstanding terminal; UNKNOWN resolution 
     const status = await h.status(f, operationId);
     assert.equal(status.status, "UNKNOWN");
     assert.equal(status.epoch, f.lease.epoch);
+    const recoveryBefore = await h.get('/api/v1/admin/workspaces/'+f.workspaceId+'/recovery');
+    assert.equal(recoveryBefore.action,'RECONCILE');
+    assert.deepEqual((recoveryBefore.blockingOperations as {operationId:string;resolvable:boolean}[])
+      .map(x=>[x.operationId,x.resolvable]),[[operationId,true]]);
     const list = await h.get("/api/v1/admin/workspaces");
     const w = (list.items as Record<string, unknown>[])[0]!;
     const resolution = {
@@ -95,6 +99,17 @@ test("retired lease only accepts exact outstanding terminal; UNKNOWN resolution 
         .resolvedByOperator,
       true,
     );
+    const afterFirst=await h.get('/api/v1/admin/workspaces/'+f.workspaceId);
+    // An interrupted Worker-to-Registry resolution acknowledgement must not
+    // produce a second epoch or become an unrecoverable stale revision.
+    const retry=await h.request('/api/v1/admin/workspaces/'+f.workspaceId+'/resolve',resolution);
+    assert.equal(retry.status,'UNKNOWN');
+    assert.equal((await h.get('/api/v1/admin/workspaces/'+f.workspaceId)).revision,afterFirst.revision);
+    await assert.rejects(()=>h.request('/api/v1/admin/workspaces/'+f.workspaceId+'/resolve',
+      {...resolution,evidence:'different observation'}));
+    const recoveryAfter = await h.get('/api/v1/admin/workspaces/'+f.workspaceId+'/recovery');
+    assert.equal(recoveryAfter.action,'RECONNECT');
+    assert.deepEqual(recoveryAfter.blockingOperations,[]);
     await h.reclaim(f);
     await h.cycle(f);
     assert.equal((await h.status(f, operationId)).status, "UNKNOWN");

@@ -491,6 +491,37 @@ export class Workspace {
           : summary,
       );
     }
+    // Admin-only read-only diagnostic path. Exposed by the top-level Worker
+    // only after its regular Registry admin authentication succeeds. Never
+    // disclose lease secrets, request arguments, provider content or tokens.
+    if (path === "/internal/recovery") {
+      const workspaceId = id(b.workspaceId);
+      const current = this.db.get<Lease>("lease");
+      const now = Date.now();
+      const active = current && current.workspaceId === workspaceId && current.expiresAt > now
+        ? {epoch:current.epoch,bindingRevision:current.bindingRevision,expiresAt:current.expiresAt}
+        : null;
+      const claiming = this.db.get<{expiresAt:number}>("claiming");
+      const pendingClaimUntil = claiming && claiming.expiresAt > now ? claiming.expiresAt : null;
+      const operations = this.operations()
+        .filter(op=>op.workspaceId === workspaceId && blocksNewLease(op))
+        .sort((a,z)=>a.createdAt-z.createdAt)
+        .slice(0,128)
+        .map(op=>({
+          operationId:op.operationId,tool:op.tool,phase:op.phase,
+          epoch:op.epoch,bindingRevision:op.bindingRevision,
+          createdAt:op.createdAt,deadlineMs:op.deadlineMs,
+          terminalAt:op.terminalAt??null,
+          resolvable: ['UNKNOWN','PARTIAL'].includes(op.phase) && !op.resolution,
+        }));
+      return json({schemaVersion:1,workspaceId,observedAt:now,
+        activeLease:active,pendingClaimUntil,blockingOperations:operations,
+        leaseClaimAvailable:!active&&!pendingClaimUntil&&!operations.length,
+        action: operations.some(op=>op.resolvable) ? 'RECONCILE' :
+          operations.length ? 'WAIT_FOR_TERMINAL' :
+          active||pendingClaimUntil ? 'WAIT_FOR_LEASE' : 'RECONNECT',
+      });
+    }
     if (path === "/api/v1/tab/claim") {
       const workspaceId = id(b.workspaceId),
         tabInstanceId = id(b.tabInstanceId),

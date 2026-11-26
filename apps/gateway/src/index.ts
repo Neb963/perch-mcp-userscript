@@ -455,6 +455,20 @@ async function route(
     return html(
       "<h1>Perch MCP gateway</h1><p>Install the userscript in Firefox with Violentmonkey. Open its Settings, enter this gateway origin and the dashboard bootstrap secret. The URL grants no access.</p><p>This candidate requires the live acceptance checklist before a full release.</p>",
     );
+  const recoveryMatch = /^\/api\/v1\/admin\/workspaces\/([a-zA-Z0-9_-]+)\/recovery$/.exec(path);
+  if (recoveryMatch) {
+    if (request.method !== "GET")
+      throw new ApiError("INVALID_INPUT", "Recovery status is read-only.", 405);
+    // Reuse the existing admin authorization and Workspace visibility check;
+    // never expose the internal Durable Object endpoint unauthenticated.
+    const authenticated = (await registry(env).fetch(
+      new Request(new URL("/api/v1/admin/workspaces/" + recoveryMatch[1], request.url),
+        {method:"GET",headers:request.headers}) as never,
+    )) as unknown as Response;
+    if (!authenticated.ok) return authenticated;
+    return json(await rpc(workspace(env,recoveryMatch[1]!),
+      "/internal/recovery",{workspaceId:recoveryMatch[1]}));
+  }
   if (path.startsWith("/api/v1/admin/")) {
     if (/^\/api\/v1\/admin\/workspaces\/[^/]+\/resolve$/.test(path)) {
       const check = new Request(new URL("/api/v1/admin/state", request.url), {

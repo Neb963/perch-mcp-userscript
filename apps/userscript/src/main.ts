@@ -189,6 +189,9 @@ async function start(): Promise<void> {
     },
     sourceBackup: () => controller.sourceBackup(),
     reconcileOperation: (operation) => controller.reconcileOperation(operation),
+    localRecovery: workspaceId => controller.localRecovery(workspaceId),
+    resolveLocalHold: (workspaceId,journalId,expectedRevision,evidence) =>
+      controller.resolveLocalHold(workspaceId,journalId,expectedRevision,evidence),
     restoreSourceBackup: (backup) => controller.restoreSourceBackup(backup),
     importSettings: async (settings) => {
       const origin = gatewayOrigin(settings.gatewayOrigin);
@@ -278,10 +281,13 @@ async function start(): Promise<void> {
       const code = error && typeof error === "object" && "code" in error &&
         typeof error.code === "string" ? error.code : "RECONNECT_FAILED";
       manager?.setStatus({
-        connection: code === "EFFECT_UNKNOWN" ? "blocked" : "offline",
+        connection: ["EFFECT_UNKNOWN","TAB_BUSY"].includes(code) ? "blocked" : "offline",
+        workspace: candidate.id,
         reason: code === "EFFECT_UNKNOWN"
-          ? "Gateway retained an uncertain prior operation. Open Activity, inspect and resolve its exact record before Reconnect. Do not re-pair, rebind or repeat the operation. A gateway earlier than the viewport-recovery patch cannot automatically reclaim a CSS-only partial effect."
-          : `Automatic reconnect did not complete (${code}). Inspect diagnostics and use Reconnect if no effects are pending.`,
+          ? "An unresolved Gateway effect prevents a new lease. Open Recovery for the exact held operation. Never repeat the unknown effect or re-pair to clear it."
+          : code === "TAB_BUSY"
+            ? "A lease or claim is still active. Open Recovery to inspect its expiry and owner-safe next action; do not force takeover."
+            : `Automatic reconnect did not complete (${code}). Open Recovery and inspect Gateway and local state.`,
       });
     }
   }

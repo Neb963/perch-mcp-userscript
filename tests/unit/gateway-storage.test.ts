@@ -413,3 +413,39 @@ test('HAR-native policy admits exactly Save, Rename and Listing; cannot widen pr
  assert.equal(permitsHarNativeAction(enabled,'save_generator',['SAVE','MEDIA']),false);
  assert.equal(permitsHarNativeAction(enabled,'set_listing',['LISTING','PRODUCTION_RESTORE']),false);
 });
+
+test('read-only Workspace Recovery distinguishes active lease, running and uncertain operations without secrets',async()=>{
+ const f=fixture();
+ try{
+   const db=new SqlRecords(f.storage),now=Date.now();
+   db.put('lease',{workspaceId:'fixture-workspace',epoch:7,bindingRevision:2,
+     tabInstanceId:'private-tab',secretHash:'never-visible-lease-secret',
+     expiresAt:now+90000,credentialEpoch:1,permissions:['READ_SOURCE']});
+   const running={...opFixture('RUNNING'),operationId:'running-work',
+     phase:'RUNNING',deadlineMs:now+120000,terminalAt:undefined};
+   const unknown={...opFixture('UNKNOWN'),operationId:'unknown-work',
+     tool:'save_generator',phase:'UNKNOWN',terminalNotified:true,terminalAt:now};
+   db.put('operation/running-work',running);db.put('operation/unknown-work',unknown);
+   const inspect=async()=>{
+     const response=await new Workspace(f.state,{} as Env).fetch(
+       new Request('https://internal/internal/recovery',{
+         method:'POST',headers:{'content-type':'application/json'},
+         body:JSON.stringify({workspaceId:'fixture-workspace'})}));
+     assert.equal(response.status,200);return response.json() as Promise<{
+       activeLease:null|{epoch:number;expiresAt:number};action:string;
+       blockingOperations:{operationId:string;resolvable:boolean;phase:string}[];
+     }>;
+   };
+   let result=await inspect();assert.equal(result.action,'RECONCILE');
+   assert.equal(result.activeLease?.epoch,7);
+   assert.deepEqual(result.blockingOperations.map(x=>[x.operationId,x.resolvable]),
+     [['running-work',false],['unknown-work',true]]);
+   assert.doesNotMatch(JSON.stringify(result),/never-visible|private-tab|never-log-fixture-source|fixture-grant/);
+   db.put('operation/unknown-work',{...unknown,resolution:{resolvedByOperator:true}});
+   result=await inspect();assert.equal(result.action,'WAIT_FOR_TERMINAL');
+   db.put('operation/running-work',{...running,phase:'SUCCEEDED',terminalAt:now,terminalNotified:true});
+   result=await inspect();assert.equal(result.action,'WAIT_FOR_LEASE');
+   db.delete('lease');result=await inspect();assert.equal(result.action,'RECONNECT');
+   assert.equal(result.blockingOperations.length,0);
+ } finally{f.db.close();}
+});

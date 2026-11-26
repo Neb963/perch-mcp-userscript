@@ -206,3 +206,17 @@ Implementation:
 - No capability toggles, Worker deployment, native pixel-capture claims, invalid-source injection, paid media calls, or production provider writes.
 
 Verification: strict TypeScript, unit/integration tests with intercepted Save and failure injection, package integrity and Worker dry-run in PR Actions. Live T3/T4 acceptance remains open for Save, actual-pixel capture, syntax, and lifecycle/provider tools. See docs/verification/epoch8-regression-v0110.md.
+
+### Epoch 10 / v0.1.12 — gateway lease and unknown-effect Recovery
+
+Source: operator v0.1.11 diagnostics8, gateway 0.1.6, paired, browser paused, two 409 EFFECT_UNKNOWN claims. No exact operation ID exposed in the diagnostic export. Root cause of operator deadlock: unresolved Workspace claim gate without a complete corresponding actionable UI surface, plus first-page-only interactive Activity and unsafe bulk local journal acknowledgement.
+
+Implementation:
+- Add scoped read-only Workspace recovery status to Worker, listing lease/claim deadlines and exact unresolved operation IDs/phases, without secrets or tool arguments.
+- Add high-density Recovery tab for Workspace selection, classified next steps, explicit per-operation acknowledgements and per-local-journal acknowledgements. Route blocked Reconnect directly to Recovery, distinguish TAB_BUSY active leases from terminal UNKNOWN.
+- Render later Activity pages interactively, not as inert JSON.
+- Correct controller journal reconciliation to exact matching operation only, preserve other holds; add exact local intent evidence/revision, keep post-rename stable-ID safe manual reconciliation.
+- Make Registry resolution idempotently repeatable after lost DO acknowledgement without a second epoch increment; reject different evidence.
+- Prove Gateway read-only secrecy, lease/blocker state matrix, UI recovery actions, lost-ack retry, namespace isolation, full checks and packaging. No production user draft mutation, resolution or Cloudflare deployment performed during implementation.
+
+Evidence: docs/verification/epoch10-recovery-v0112.md. Gateway v0.1.7 must be deployed in place before installing userscript v0.1.12 to expose the Recovery status endpoint. Live operator exact hold still requires the new read-only status after installation; do not guess the operation from these diagnostics.

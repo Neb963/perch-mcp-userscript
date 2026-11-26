@@ -1226,6 +1226,23 @@ export class Registry {
         "acknowledgeUncertainty",
       ]);
       const w = this.getWorkspace(resolutionMatch[1]!);
+      const operationId = id(b.operationId);
+      const prior = this.db.get<{
+        resolvedByOperator:boolean;observedRevision:string;observedDigest:string;
+        evidence:string;epoch?:number;bindingRevision?:number;
+      }>("resolution/"+w.id+"/"+operationId);
+      if(prior){
+        // The Registry can commit before the Workspace DO acknowledges.
+        // A lost acknowledgement must be repairable without incrementing
+        // the epoch again or treating a second request as a new resolution.
+        if(b.acknowledgeUncertainty!==true || prior.epoch!==b.epoch ||
+           prior.bindingRevision!==b.bindingRevision ||
+           prior.observedRevision!==b.observedRevision ||
+           prior.observedDigest!==b.observedDigest || prior.evidence!==b.evidence)
+          throw new ApiError("CONFLICT","Prior resolution differs; inspect authoritative state.",409);
+        return {workspaceId:w.id,operationId,epoch:b.epoch,
+          bindingRevision:b.bindingRevision,resolution:prior,workspaceRevision:w.revision};
+      }
       revision(b.expectedRevision, w.revision);
       if (
         b.acknowledgeUncertainty !== true ||
@@ -1238,8 +1255,7 @@ export class Registry {
           "Exact binding and acknowledged uncertainty required.",
           409,
         );
-      const operationId = id(b.operationId),
-        observedRevision = str(b.observedRevision, "observedRevision", 256),
+      const observedRevision = str(b.observedRevision, "observedRevision", 256),
         observedDigest = str(b.observedDigest, "observedDigest", 64),
         evidence = str(b.evidence, "evidence", 512);
       if (!/^[a-f0-9]{64}$/.test(observedDigest))
@@ -1252,6 +1268,7 @@ export class Registry {
         observedRevision,
         observedDigest,
         evidence,
+        epoch:b.epoch as number,bindingRevision:b.bindingRevision as number,
         timestamp: Date.now(),
       };
       w.epoch++;

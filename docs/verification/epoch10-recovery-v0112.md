@@ -1,0 +1,22 @@
+# Epoch 10 — blocked lease recovery (0.1.12 userscript / 0.1.7 gateway)
+
+## Evidence
+
+The operator-supplied `perch-mcp-diagnostics8.json` shows 0.1.11 userscript, deployed 0.1.6 gateway, paired/healthy registry, 3 Workspaces, 3 Agents, management `paused`, browser `leasePresent:false`, and two 409 `EFFECT_UNKNOWN` responses on `/api/v1/tab/claim` (trace IDs `ea512f5a-0bb4-4241-b49c-fa6eabf75466`, `0387bda6-a3c6-4c04-b16c-6c42abca09d4`). No poll failure was observed. These errors identify a Workspace lease hold, not an OAuth failure. The report omits the blocking operation ID, so its exact cause cannot be attributed to Save, Rename or another tool from this export alone.
+
+## Recovery architecture
+
+- Gateway GET `admin/workspaces/:id/recovery` requires an existing authenticated admin session and an existing Workspace. The Worker queries only that Workspace Durable Object. It returns redacted active lease expiry/epoch/binding revision, in-progress claim expiry, and the actual operations passing `blocksNewLease` (tool, operation ID, phase, source epoch, binding revision, deadline and terminal readiness). It never returns native source, tool arguments, lease tokens, browser credentials, OAuth secrets or private identifiers. It is read-only and does not change a lease, operation, Registry or draft.
+- A new Recovery tab lists all configured Workspaces. It separates active lease (`WAIT_FOR_LEASE`), outstanding execution (`WAIT_FOR_TERMINAL`), terminal unresolved effect (`RECONCILE`) and unblocked state (`RECONNECT`). It never suggests a force takeover, blindly retries a provider action, or reports an unknown effect as success. Reconnect errors `TAB_BUSY` and `EFFECT_UNKNOWN` navigate directly to the affected Workspace's Recovery view.
+- For terminal UNKNOWN/PARTIAL, exact operation ID, epoch and binding revision are loaded from the authoritative Workspace; Operator evidence and an affirmative acknowledgement are required. Resolution uses the already-existing two-sided Registry/Workspace resolution protocol. The original phase remains UNKNOWN/PARTIAL in Activity. A renamed Generator can be manually reconciled by stable Generator ID and Draft ID without automatically rebinding or asserting a successful rename.
+- Local VFS intents are a separate failure domain. The Recovery tab shows local journals only when the current editor is exactly bound to the selected Workspace. Each local intent needs independent evidence and the current source revision. A Gateway resolution now acknowledges **only** a local journal with the exact same operation ID. A separate local journal never becomes resolved merely because it predates a gateway resolution.
+- Registry resolution now recognizes an exact replay of its prior committed resolution (`operationId`, epoch, binding revision, observed digest/revision, evidence). If the initial Registry write committed but the Workspace acknowledgement was lost, retry completes the Workspace write without a second epoch/revision increment. A different observation or evidence remains a conflict.
+- Activity's subsequent pages are rendered as full interactive tables rather than inert JSON, so a record after the first page remains actionable.
+
+## Verification
+
+The regression suite covers live-style 409 hold diagnosis, active lease and running/unknown transitions, no secrets in read-only state, safe resolution retry, conflicting observations, direct navigation after reconnect error, exact per-operation reconciliation, local-journal separation and dynamic Activity pagination. Strict TypeScript, full suite, byte-identical `.user.txt`/`.user.js`, package hashes and Worker dry-run must pass on the final committed tree. These are synthetic proofs, not a claim that a 0.1.7 Worker has been deployed or that the user's current hold has been resolved.
+
+## Deployment
+
+In-place upgrade of existing Cloudflare Worker to 0.1.7 is required to expose authenticated recovery status. Preserve Worker name, namespace bindings, migrations, secrets, the existing Registry/Workspace records and pairing. Do not create a new Worker or remove the prior operation. Install the matching 0.1.12 Violentmonkey userscript. In Recovery, select the blocked Workspace, read the exact operation and inspect the native state. For a still-running operation, wait until its deadline; for a terminal UNKNOWN/PARTIAL, record an explicit informed resolution; for an active lease, stop its original tab or wait for expiry. Then Reconnect. The act of resolving records inspection, not successful execution.
