@@ -163,3 +163,10 @@ Remediation in `fix/viewport-hold-reconnect-v018`:
 **Rollout ordering:** v0.1.8 userscript includes a Worker change. Deploy the packaged Worker **v0.1.5** to the existing Cloudflare deployment first, preserving Durable Object bindings, KV and secrets. Then replace the existing Violentmonkey script with the tested v0.1.8 `.user.txt`. If Worker remains v0.1.4, auto-reconnect still rejects the old viewport PARTIAL: use Activity → Resolve uncertain operation after inspecting the source/preview, then Workspaces → Reconnect. Do not re-pair, detach or rebind.
 
 Acceptance T1/T2: strict typecheck; deterministic effects/legacy Registry unit tests; Miniflare epoch-5 partial viewport→release→claim→read-only status→write end-to-end; negative source/Save/provider effect holds; build/archive checksum and Worker dry-run. T3 real Firefox/Violentmonkey and T4 deployed Cloudflare+ChatGPT retest remain necessary. Fetching public plugin slugs and native geometry restoring still require fresh live positive tests. Save gate, real-pixel capture, supported media/provider-state/lifecycle tools remain independently unaccepted; do not claim full product parity.
+
+
+## Epoch 7 remediation (open)
+
+Base: 454cf6d91d29bb87483e00a196174decbe13ddda (0.1.8). Operator regression appendix confirms dirty Save blocked by independent acceptance/policy gates, public read followed by INVALID_INPUT during import, delayed iframe reset, incomplete metadata and syntax diagnostics. Preserve epoch-7 draft; no production Save or policy bypass during repair.
+
+Plan: harden byte validation against cross-realm typed arrays and large Base64; distinguish import preflight failure from uncertain publication; use bounded actual two-axis viewport convergence with frame fencing; improve metadata/diagnostic provenance; add regressions and run full CI if local runtime cannot fetch dependencies. Keep capability gates explicit until actual authorized evidence. Check final reconnect and source integrity separately from synthetic tests.
