@@ -48,20 +48,48 @@ export class PreviewAdapter {
   private nativeBaseline: { width: number; height: number; parentWidth: number; parentHeight: number } | undefined;
   private viewport: { width: number; height: number } | undefined;
   private readonly attested = new Set<'refresh' | 'evaluate' | 'preamble'>();
+  private readonly failedAttestation = new Set<'refresh' | 'evaluate' | 'preamble'>();
+  private attestedFrame: HTMLIFrameElement | null = null;
+  private syncAttestationFrame(): void {
+    const frame = this.options.frame();
+    if (frame !== this.attestedFrame) {
+      this.attested.clear(); this.failedAttestation.clear();
+      this.attestedFrame = frame;
+    }
+  }
   constructor(private readonly options: PreviewOptions) {}
   private async requireCapability(capability: 'refresh' | 'evaluate' | 'preamble'): Promise<void> {
+    this.syncAttestationFrame();
     if (this.options.verified?.[capability]) return;
-    if (!this.options.bridge?.attest ||
-        !(await this.options.bridge.attest(capability)))
-      throw new ExecutionError('UNSUPPORTED_INTERFACE',
-        `Native preview ${capability} capability could not be verified on the exact bound output frame.`);
-    this.attested.add(capability);
+    try {
+      if (!this.options.bridge?.attest || !(await this.options.bridge.attest(capability)))
+        throw new ExecutionError('UNSUPPORTED_INTERFACE',
+          `Native preview ${capability} capability could not be verified on the exact bound output frame.`);
+      this.syncAttestationFrame();
+      this.attested.add(capability);
+      this.failedAttestation.delete(capability);
+    } catch (error) {
+      this.attested.delete(capability);
+      this.failedAttestation.add(capability);
+      throw error;
+    }
   }
-  availability(): Record<string, { available: boolean; reason?: string }> {
-    const available = (enabled: boolean, reason: string) => enabled ? { available: true } : { available: false, reason };
+  availability(): Record<string, { available: boolean; state: 'available'|'not-yet-attested'|'probe-failed'|'unavailable'; reason?: string }> {
+    this.syncAttestationFrame();
+    const available = (enabled: boolean, reason: string) => enabled
+      ? { available:true, state:'available' as const }
+      : { available:false, state:'unavailable' as const, reason };
+    const capability = (key: 'evaluate'|'refresh', reason: string) => {
+      if (this.options.bridge && (this.options.verified?.[key] || this.attested.has(key)))
+        return available(true, reason);
+      if (!this.options.bridge?.attest || !this.options.frame()) return available(false, reason);
+      return {available:false,
+        state:this.failedAttestation.has(key)?'probe-failed' as const:'not-yet-attested' as const,
+        reason};
+    };
     return {
-      page_eval: available(Boolean(this.options.bridge && (this.options.verified?.evaluate || this.attested.has('evaluate'))), 'Native preview evaluation has not yet passed a live response-correlated capability probe.'),
-      page_refresh: available(Boolean(this.options.bridge && (this.options.verified?.refresh || this.attested.has('refresh'))), 'Native preview refresh has not yet passed a structural capability probe and source-receipt verification.'),
+      page_eval: capability('evaluate', 'Native preview evaluation requires a response-correlated probe on the bound frame.'),
+      page_refresh: capability('refresh', 'Native preview refresh requires structural capability and source-receipt verification.'),
       preview_diagnostics: available(Boolean(this.options.bridge?.diagnostics), 'No verified native diagnostics collector is attached.'),
       set_viewport_size: available(Boolean(this.options.frame()), 'The native output frame is unavailable.'),
       capture_page_image: available(Boolean(this.options.verified?.capture && this.options.bridge?.capture), 'No real-pixel native capture or consented capture adapter is verified.'),
@@ -119,6 +147,7 @@ export class PreviewAdapter {
     const receipt = checkedReceipt(await deadline(this.options.bridge.refresh(preambleJs), 30_000));
     if (receipt.appliedRevision !== expected || await this.options.revision() !== expected) throw new ExecutionError('NATIVE_CONFLICT', 'Source changed during refresh or the native frame did not attest the intended source revision. Refresh again after inspecting manual edits.', 'PARTIAL');
     this.appliedRevision = expected; this.generation = receipt.previewGeneration;
+    this.syncAttestationFrame(); this.attested.add('refresh');
     if (this.viewport) await this.setViewport(this.viewport.width, this.viewport.height);
     return { ...receipt, ...await this.freshness() };
   }
@@ -437,20 +466,52 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
     if(await this.options.revision()!==sourceBefore)
       throw new ExecutionError('STALE_REVISION',
         'Native editor changed during syntax collection. Diagnostics were not attributed to a stale revision.');
-    if(!Array.isArray(raw)||raw.length>500)
+    const panes: Record<string, 'main.pjs'|'index.html'> = {
+      'main.pjs':'main.pjs', pjs:'main.pjs', model:'main.pjs',
+      modelText:'main.pjs', modelTextErrors:'main.pjs', modelTextEditor:'main.pjs',
+      'index.html':'index.html', html:'index.html', output:'index.html',
+      outputTemplate:'index.html', outputTemplateErrors:'index.html', outputTemplateEditor:'index.html',
+    };
+    let rows: {entry:unknown;pathHint?:'main.pjs'|'index.html'}[] = [];
+    let shape = 'unknown';
+    let partialShape = false;
+    if (Array.isArray(raw) && raw.length <= 500) {
+      rows = raw.map(entry => ({entry})); shape = 'array';
+    } else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const record = raw as Record<string,unknown>;
+      const keys = Object.keys(record);
+      if (keys.length <= 24) {
+        for (const key of keys) {
+          const pathHint = Object.hasOwn(panes,key) ? panes[key] : undefined;
+          if (!pathHint && key !== 'errors' && key !== 'syntaxErrors') { partialShape = true; continue; }
+          const values = record[key];
+          if (!Array.isArray(values) || values.length > 500 || rows.length + values.length > 500) {
+            partialShape = true; continue;
+          }
+          shape = 'grouped-arrays';
+          rows.push(...values.map(entry => ({entry,pathHint})));
+        }
+      }
+    }
+    if (shape === 'unknown')
       return {...receipt,diagnosticsAvailability:availability,
-        diagnosticChannels:{editorSyntax:'unsupported-result',console:'preview-iframe',nativeWarnings:'native-editor'}};
-    let precise=true;
+        diagnosticChannels:{editorSyntax:'unsupported-result',editorSyntaxShape:
+          raw===null?'null':Array.isArray(raw)?'oversized-array':typeof raw,
+          console:'preview-iframe',nativeWarnings:'native-editor'}};
+    let precise=!partialShape;
     const errors:Record<string,unknown>[]=[];
-    for(const entry of raw){
+    for(const {entry,pathHint} of rows){
+      if(typeof entry === 'string') {
+        precise=false; errors.push({category:'editor-syntax',message:entry.slice(0,2000),path:pathHint??null,line:null,column:null,locationVerified:false,locationProvenance:'native-unverified',sourceRevision:sourceBefore}); continue;
+      }
       if(!entry||typeof entry!=='object'||Array.isArray(entry)) {precise=false;continue;}
       const e=entry as Record<string,unknown>;
       const name=typeof e.message==='string'?e.message:typeof e.error==='string'?e.error:null;
       if(name===null){precise=false;continue;}
       const source=e.path??e.file??e.pane??e.type;
-      const path=source==='main.pjs'||source==='model'||source==='pjs'
-        ? 'main.pjs' : source==='index.html'||source==='output'||source==='html'
-          ? 'index.html' : null;
+      const explicitPath=typeof source==='string'&&Object.hasOwn(panes,source)?panes[source]:undefined;
+      const conflict=explicitPath && pathHint && explicitPath!==pathHint;
+      const path=conflict?null:explicitPath??pathHint??null;
       const line=e.line??e.lineNumber;
       const column=e.column??e.col;
       const validLine=Number.isSafeInteger(line) && (line as number)>0 && (line as number)<=1000000;
@@ -466,7 +527,7 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
     // until a deliberately malformed live disposable source is verified.
     availability.syntax=precise&&errors.length>0?'captured':'partial';
     return {...receipt,syntaxErrors:errors,diagnosticsAvailability:availability,
-      diagnosticChannels:{editorSyntax:availability.syntax,console:'preview-iframe',
+      diagnosticChannels:{editorSyntax:availability.syntax,editorSyntaxShape:shape,console:'preview-iframe',
         nativeWarnings:'native-editor',syntaxSourceRevision:sourceBefore}};
   }
 
