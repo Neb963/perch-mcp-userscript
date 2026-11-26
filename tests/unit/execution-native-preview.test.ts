@@ -1,0 +1,67 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {JSDOM} from 'jsdom';
+import {createNativePreviewBridge,NativeProtocolPreviewBridge,type PreviewReceipt} from '../../apps/userscript/src/preview.js';
+import {type ExecutionError} from '../../apps/userscript/src/compute.js';
+
+const publicId='b95e4473dace29730b4433ad33b4c64c';
+async function hash(value:unknown){return Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(value)))).toString('hex')}
+async function fixture(){
+ const dom=new JSDOM(`<iframe src="https://${publicId}.perchance.org/minimal"></iframe>`,{url:'https://perchance.org/minimal#edit'});
+ const frame=dom.window.document.querySelector('iframe')! as unknown as HTMLIFrameElement;
+ const stamp={revision:await hash(['minimal','animal\n  otter','<p>hello</p>']),srcRevision:await hash([['asset.png','abc.png']]),epoch:1,srcHasPending:false,srcChangedDuringRender:false};
+ let revision='r1',generation:string|null=null,preambleRan=false,onUser:(()=>void)|undefined;
+ const requests:Record<string,unknown>[]=[];
+ const page:Record<string,unknown>={generatorPublicId:publicId,app:{data:{generator:{name:'minimal'}}},modelTextEditor:{getValue:()=> 'animal\n  otter'},outputTemplateEditor:{getValue:()=>'<p>hello</p>'},srcState:{manifestForIframe:()=>({'asset.png':{key:'abc.png'}}),hasPending:()=>false}};
+ page.hardReloadOutputIframe=async()=>{const preamble=String(page.__aiAgentPreambleJs);generation=/generation:"([^"]+)"/.exec(preamble)?.[1]??null;preambleRan=true;stamp.epoch++;};
+ const emit=(request:Record<string,unknown>,result:unknown,override:Record<string,unknown>={})=>dom.window.dispatchEvent(new dom.window.MessageEvent('message',{source:frame.contentWindow as unknown as Window,origin:`https://${publicId}.perchance.org`,data:{type:'evaluateJsResponse',callerId:request.callerId,result,error:null},...override}));
+ frame.contentWindow!.postMessage=((request:Record<string,unknown>,origin:string)=>{requests.push(request);assert.equal(origin,`https://${publicId}.perchance.org`);const diagnostic=String(request.js).startsWith('return (() => { const p=document.__perchanceInternal');
+   queueMicrotask(()=>{if(!diagnostic)onUser?.();const result=diagnostic?{receipt:{...stamp},generation,consoleOutput:['log: fixture'],errors:[],warnings:[],preambleRan}:42;
+    emit(request,'forged',{origin:'https://evil.invalid'});emit(request,'forged',{source:null});emit({...request,callerId:'wrong'},'forged');emit(request,result);
+   });}) as Window['postMessage'];
+ const options={host:dom.window as unknown as Window,frame:()=>frame,revision:async()=>revision};
+ const bridge=createNativePreviewBridge(page,options)!;
+ return{dom,frame,page,stamp,requests,bridge,setRevision:(r:string)=>{revision=r},onUser:(fn:()=>void)=>{onUser=fn}};
+}
+
+test('actual native evaluateJs wire format maps results and rejects forged replies',async()=>{
+ const f=await fixture();
+ const result=await f.bridge.evaluate('return 42;',1000);
+ assert.equal(result.result,42);
+ assert.ok(f.requests.every(r=>r.command==='evaluateJs'&&typeof r.callerId==='string'&&r.callerId.startsWith('perch-')));
+ assert.equal(result.diagnosticsAvailability?.syntax,'unavailable');
+});
+
+test('actual native hard reload installs one-load preamble, verifies panel/src hashes and restores hook',async()=>{
+ const f=await fixture();
+ const receipt=await f.bridge.refresh('window.fixturePreamble=true;');
+ assert.equal(receipt.appliedRevision,'r1');assert.match(receipt.previewGeneration!,/^[0-9a-f-]+:2$/);
+ assert.equal(Object.hasOwn(f.page,'__aiAgentPreambleJs'),false);
+ assert.equal((await f.bridge.evaluate('return 42;',1000)).previewGeneration,receipt.previewGeneration);
+});
+
+test('native startup manifest mismatch or changed source cannot masquerade as current preview',async()=>{
+ const f=await fixture();f.stamp.srcRevision='0'.repeat(64);
+ await assert.rejects(f.bridge.refresh(),(e:ExecutionError)=>e.code==='NATIVE_CONFLICT'&&e.effectState==='PARTIAL');
+ assert.equal(Object.hasOwn(f.page,'__aiAgentPreambleJs'),false);
+ const second=await fixture();const original=second.page.hardReloadOutputIframe as ()=>Promise<void>;second.page.hardReloadOutputIframe=async()=>{await original();second.setRevision('r2')};
+ await assert.rejects(second.bridge.refresh(),(e:ExecutionError)=>e.code==='NATIVE_CONFLICT');
+});
+
+test('native preamble ownership and reload concurrency block without replacing existing hooks',async()=>{
+ const f=await fixture();f.page.__aiAgentPreambleJs='owner code';
+ await assert.rejects(f.bridge.refresh(),(e:ExecutionError)=>e.code==='TAB_BUSY');assert.equal(f.page.__aiAgentPreambleJs,'owner code');
+ delete f.page.__aiAgentPreambleJs;f.page.currentlyReloadingOutputIframePromise=Promise.resolve();
+ await assert.rejects(f.bridge.refresh(),(e:ExecutionError)=>e.code==='TAB_BUSY');
+});
+
+test('a trusted DOM frame reload fences a pending native evaluation',async()=>{
+ const f=await fixture();await f.bridge.refresh();
+ f.onUser(()=>f.frame.dispatchEvent(new f.dom.window.Event('load')));
+ await assert.rejects(f.bridge.evaluate('return 42;',1000),(e:ExecutionError)=>e.code==='STALE_EPOCH'&&e.effectState==='UNKNOWN');
+});
+
+test('native frame Public ID mismatch denies requests before dispatch',async()=>{
+ const f=await fixture();f.page.generatorPublicId='0'.repeat(32);
+ await assert.rejects(f.bridge.evaluate('return 42;',1000),(e:ExecutionError)=>e.code==='BINDING_MISMATCH');assert.equal(f.requests.length,0);
+});

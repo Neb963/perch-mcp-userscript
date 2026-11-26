@@ -49,3 +49,27 @@ Remote baseline: main `9b018fb44423b8d00e1ec90afebb0a9b42da6c9e`; only main exis
 - Test dependencies are pinned in one lockfile. Production writes remain gated until their native proof gates pass. Preserve full product requirements when reporting unavailable capabilities.
 
 P01 and P02: **in progress**, not accepted. P03–P11: independently achievable implementation work queued behind tested local contracts; external acceptance gates remain open.
+
+## Candidate integration plans and evidence — 2026-11-26
+
+The following independently achievable slices were implemented alongside the P01/P02 feasibility work. These statuses do not satisfy external dependency acceptance by themselves. Each remaining integration step below is bounded and must be verified before its status changes.
+
+| Phase | Implemented slice | Integration/verification plan and remaining gate |
+|---|---|---|
+| P01 | Read-only installed manager probe, native source adapter, current public native guard detection | Check pure native guard/draft/access interfaces, retain read-only use when unknown; complete real Firefox/Violentmonkey and disposable fixture proof. |
+| P02 | Official OAuth/MCP gateway, SQLite Registry/Workspace, pairing, management, lease polling, durable handles | Verify current published profiles, exact resource isolation/revocation, dashboard package dry-run; deployed clean-account/real connector evidence stays pending. |
+| P03 | 52 strict tool contracts, permission ceilings, schemas and typed error/state envelopes | Run schema boundary/security tests and actual controller→local Worker integration; freeze effective Grant intersection for composed calls. |
+| P04 | Complete source/scratch/binary tools, exact patch preflight, safe regex/parser, imports, checkpoints/recovery | Run default/nondefault draft and manual-edit/partial-effect/BOM fixtures; preserve exact bytes and unresolved history. Real native semantics require T3. |
+| P05 | Actual native preview protocol candidate, isolated QuickJS Worker and allowlisted public fetch | Verify worker isolation/termination/child permits, source/preview generation fencing and actual protocol-shaped fixtures; real pixel capture/source lint remain open. |
+| P06 | Gated Save/lifecycle candidates and exact independent complete saved-source reader | Exercise lost receipt/stale/empty/binary/owner/listing/delete cases; qualify actual creation/upload/native effects only in authorized disposable provider environment. |
+| P07 | Versioned scoped Resource library, safe ZIP preflight/import/export and expanded eleven original skills | Verify seed preservation, ACL/history/CAS, hostile imports, paged tool-only delivery and real local Worker manager journeys. |
+| P08 | Optional paid music adapter and durable scoped chunk handler; public media investigation | Integrate bounded browser artifact download/decoding/revision commit and no-replay recovery. No paid call authorized/executed; production-state/general screenshot parity remains blocked. |
+| P09 | Complete manager setup, Workspaces/Agents/OAuth, Library, Activity, Settings/recovery | Connect actual transport/controller, separate source/settings restore, trusted fetch hosts, explicit UNKNOWN resolution; verify keyboard/focus/failed-save cases. Rendered browser proof remains missing. |
+| P10 | Cross-boundary security review, 1/5/10/20 synthetic concurrency, fault/recovery fixtures | Run final complete suite, dry-run packaged Worker, and 30-minute20-Workspace local soak. Do not infer deployed quotas/browser memory from local metrics. |
+| P11 | Reproducible single-script/TXT + deployment/candidate ZIP packaging | Verify build startup, identical mirrors, package manifests/checksums, operator instructions and acceptance gaps; publish only a verification candidate until all mandatory gates pass. |
+
+Verified checkpoints include contracts `1bb0107`, Resource library `8b47387`/`9dc30fd`, manager `6e0398c`/`324d816`, source `dba7226`/`6c34525`, isolated compute `5b629e2`, native preview protocol `1c0986d`, gateway `8755a8a`, paid media journal `1e2fc5b`, and browser controller `4d0b691` (local commit identifiers; remote checkpoint commits may aggregate equivalent trees).
+
+The full suite reached194 tests with one integration assertion failure caused by the new metadata-only Resource catalog. The test had compared detailed metadata to an intentionally omitted catalog field; the corrected test fetches full canonical detail and asserts exact body/metadata preservation (`b191ae9`). The focused genuine local Worker manager journey passes. Final aggregate results will follow; no failed run is described as passed.
+
+Current external proof limits: Firefox connector calls failed internally; local Chromium binary missing; official browser download403; cloud browser cannot reach local fixture. No production deployment, native account mutation, native Helper session, CAPTCHA bypass or paid inference occurred. Real Firefox/Cloudflare/web-client/provider gates remain open. Candidate instructions: docs/INSTALLATION.md, CONNECTORS.md, RECOVERY.md and RELEASE_VERIFICATION.md.

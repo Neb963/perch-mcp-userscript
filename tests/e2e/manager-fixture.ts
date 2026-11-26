@@ -1,0 +1,15 @@
+import { mountManager } from '../../apps/userscript/src/manager.js';
+const w = Array.from({ length: 20 }, (_, i) => ({ id: `w-${i}`, label: `Workspace ${i + 1}`, revision: 1, bindingRevision: 1, permissions: ['READ_SOURCE', 'WRITE_SOURCE'], paused: i === 3, binding: { generatorId: `generator-${i}`, slug: `synthetic-${i}`, draftId: '', browserInstallationId: 'install' }, currentRevision: 'a12b34c56d78', lastHeartbeat: '2026-11-26T13:30:00Z' }));
+const a = Array.from({ length: 10 }, (_, i) => ({ id: `a-${i}`, label: `Agent ${i + 1}`, revision: 1, workspaceId: `w-${i}`, suspended: false }));
+const resources = Array.from({ length: 13 }, (_, i) => ({ id: `resource-${i}`, kind: i < 11 ? 'skill' : 'workflow', title: `Resource ${i + 1}`, description: 'Original synthetic reference', body: '# Synthetic skill\n' + Array.from({ length: 50 }, (_, n) => `Line ${n + 1}: This fixture validates single-scroll editing.`).join('\n'), files: { 'reference.txt': 'Reference text' }, revision: 1, enabled: true, dependencies: [], provenance: 'original synthetic', license: 'MIT' }));
+const events = Array.from({ length: 20 }, (_, i) => ({ operationId: `operation-${i}`, workspaceId: `w-${i % 10}`, tool: i % 2 ? 'read' : 'write', phase: i === 3 ? 'UNKNOWN' : 'SUCCEEDED', timestamp: '2026-11-26T13:30:00Z', durationMs: i * 2 }));
+const handle = mountManager({ version: '0.1.0-synthetic', client: { configuration: () => ({ origin: 'https://perch-mcp.example.workers.dev', paired: true, browserInstallationId: 'install' }), request: async (method, path, body) => { if (path.endsWith('/state'))
+            return { revision: 1, policyRevision: 1, paused: false, version: '0.1.0', schemaVersion: 1 }; if (path.endsWith('/workspaces'))
+            return { items: w, revision: 1 }; if (path.endsWith('/agents'))
+            return { items: a, revision: 1 }; if (path.endsWith('/resources'))
+            return { items: resources, revision: 1 }; if (path.includes('/resources/resource-'))
+            return resources.find(x => path.endsWith(x.id)) ?? { items: resources.slice(0, 2), revision: 1 }; if (path.endsWith('/activity'))
+            return { items: events, revision: 1 }; if (path.endsWith('/approvals'))
+            return { items: [{ id: 'p1', kind: 'oauth', code: '4821', digest: 'abc123', workspaceId: 'w-1', agentId: 'a-1', clientId: 'client-1', redirectUri: 'https://client.example/oauth/callback', scope: 'source:write', expiresAt: '2026-11-26T13:35:00Z', state: 'pending', revision: 1 }], revision: 1 }; return { items: [], revision: 1 }; }, health: async () => ({ version: '0.1.0' }), pair: async () => { }, currentIdentity: async () => ({ generatorId: 'generator-1', slug: 'synthetic', draftId: '' }), copy: async () => { }, download: () => { }, pauseLocal: () => { } } });
+(window as any).perchSynthetic = handle;
+void handle.open();

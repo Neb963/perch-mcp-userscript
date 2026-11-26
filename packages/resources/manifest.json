@@ -1,85 +1,91 @@
 {
   "schemaVersion": 1,
   "packageId": "perch-mcp-defaults",
-  "version": "0.1.0",
-  "provenance": "Independently authored factual reference seeds, reviewed against historical discovery and public documentation; not copies of original skills.",
+  "version": "0.2.1",
+  "provenance": "Independently authored skills with 2026-11-26 public plugin source and documentation review; no upstream implementation redistributed.",
   "resources": [
     {
       "id": "perchance-platform",
       "kind": "skill",
       "path": "skills/perchance-platform/SKILL.md",
-      "revision": 1
+      "revision": 2
     },
     {
       "id": "ai-text-plugin",
       "kind": "skill",
       "path": "skills/ai-text-plugin/SKILL.md",
-      "revision": 1
+      "revision": 2
     },
     {
       "id": "text-to-image-plugin",
       "kind": "skill",
       "path": "skills/text-to-image-plugin/SKILL.md",
-      "revision": 1
+      "revision": 2
     },
     {
       "id": "server-plugin",
       "kind": "skill",
       "path": "skills/server-plugin/SKILL.md",
-      "revision": 1
+      "revision": 2
     },
     {
       "id": "comments-plugin",
       "kind": "skill",
       "path": "skills/comments-plugin/SKILL.md",
-      "revision": 1
+      "revision": 2
     },
     {
       "id": "dynamic-metadata",
       "kind": "skill",
       "path": "skills/dynamic-metadata/SKILL.md",
-      "revision": 1
+      "revision": 2
     },
     {
       "id": "kv-plugin",
       "kind": "skill",
       "path": "skills/kv-plugin/SKILL.md",
-      "revision": 1
+      "revision": 2
     },
     {
       "id": "secret-plugin",
       "kind": "skill",
       "path": "skills/secret-plugin/SKILL.md",
-      "revision": 1
+      "revision": 2
     },
     {
       "id": "super-fetch-plugin",
       "kind": "skill",
       "path": "skills/super-fetch-plugin/SKILL.md",
-      "revision": 1
+      "revision": 2
     },
     {
       "id": "upload-plugin",
       "kind": "skill",
       "path": "skills/upload-plugin/SKILL.md",
-      "revision": 1
+      "revision": 2
     },
     {
       "id": "music-generation",
       "kind": "skill",
       "path": "skills/music-generation/SKILL.md",
-      "revision": 1
+      "revision": 3
     },
     {
       "id": "generator-development",
       "kind": "workflow",
       "path": "workflows/generator-development.md",
-      "revision": 1
+      "revision": 2
     },
     {
       "id": "engineering",
       "kind": "instruction",
       "path": "instructions/engineering.md",
+      "revision": 2
+    },
+    {
+      "id": "public-source-review",
+      "kind": "document",
+      "path": "documentation/public-source-review.md",
       "revision": 1
     }
   ]

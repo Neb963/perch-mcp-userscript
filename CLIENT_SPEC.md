@@ -1,6 +1,6 @@
 # Perch MCP — client specification v0.1
 
-Status: design baseline, ready for gated implementation; unverified platform dependencies remain explicit. Product owner decisions: single Firefox/Violentmonkey userscript + Cloudflare Worker; no local bridge/Tailscale; per-tab agent isolation; OAuth managed in userscript; editable/importable/exportable skills, workflows, instructions and documentation; full functional parity except platform reporting. Web UI AI clients are the target; operator reports testing custom connectors in ChatGPT, Claude and Gemini. Their exact tool/media/OAuth behaviors still require interoperability tests. No OpenCode dependency.
+Status: accepted v0.1 contract; candidate implementation and external acceptance status are tracked in todo.md and docs/RELEASE_VERIFICATION.md. Unverified platform dependencies remain explicit. Product owner decisions: single Firefox/Violentmonkey userscript + Cloudflare Worker; no local bridge/Tailscale; per-tab agent isolation; OAuth managed in userscript; editable/importable/exportable skills, workflows, instructions and documentation; full functional parity except platform reporting. Web UI AI clients are the target; operator reports testing custom connectors in ChatGPT, Claude and Gemini. Their exact tool/media/OAuth behaviors still require interoperability tests. No OpenCode dependency.
 
 ## 1. Lexicon
 | Identifier | Meaning |

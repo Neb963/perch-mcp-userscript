@@ -1,0 +1,441 @@
+import { after, before, test } from "node:test";
+import assert from "node:assert/strict";
+import { build } from "esbuild";
+import { Miniflare } from "miniflare";
+let mf: Miniflare;
+const base = "https://gateway.test";
+const bootstrap = "fixture-bootstrap-".padEnd(64, "x");
+let admin = "",
+  execution = "";
+let w: Record<string, unknown>, a: Record<string, unknown>;
+let lease: Record<string, unknown>;
+let token = "";
+async function request(
+  path: string,
+  body?: unknown,
+  credential = admin,
+  method = body === undefined ? "GET" : "POST",
+  extra: Record<string, string> = {},
+) {
+  return mf.dispatchFetch(base + path, {
+    method,
+    headers: {
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(credential ? { Authorization: "Bearer " + credential } : {}),
+      "Idempotency-Key": crypto.randomUUID(),
+      ...extra,
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+}
+async function data(
+  path: string,
+  body?: unknown,
+  credential = admin,
+  method?: string,
+) {
+  const r = await request(path, body, credential, method);
+  const b = (await r.json()) as Record<string, unknown>;
+  assert.equal(r.status, 200, JSON.stringify(b));
+  return b;
+}
+async function mcp(
+  name: string,
+  args: Record<string, unknown> = {},
+  access = token,
+  endpoint = String(a.id),
+) {
+  const r = await request(
+    "/mcp/" + endpoint,
+    {
+      jsonrpc: "2.0",
+      id: crypto.randomUUID(),
+      method: "tools/call",
+      params: { name, arguments: args },
+    },
+    access,
+    "POST",
+    {
+      Accept: "application/json, text/event-stream",
+      "MCP-Protocol-Version": "2025-11-25",
+    },
+  );
+  const raw = await r.text();
+  if (r.status < 400) assert.ok(raw, `MCP ${name} empty response ${r.status}`);
+  return {
+    status: r.status,
+    body: (raw ? JSON.parse(raw) : {}) as {
+      result?: { structuredContent: Record<string, unknown>; isError: boolean };
+      error?: unknown;
+    },
+  };
+}
+before(async () => {
+  const result = await build({
+    entryPoints: ["apps/gateway/src/index.ts"],
+    bundle: true,
+    write: false,
+    format: "esm",
+    platform: "browser",
+    target: "es2022",
+    external: ["cloudflare:*", "node:*"],
+    conditions: ["workerd", "worker", "browser"],
+  });
+  mf = new Miniflare({
+    modules: true,
+    script: result.outputFiles[0]!.text,
+    compatibilityDate: "2026-07-30",
+    compatibilityFlags: ["nodejs_compat", "global_fetch_strictly_public"],
+    kvNamespaces: ["OAUTH_KV"],
+    durableObjects: {
+      REGISTRY: { className: "Registry", useSQLite: true },
+      WORKSPACES: { className: "Workspace", useSQLite: true },
+    },
+    bindings: {
+      BOOTSTRAP_SECRET: bootstrap,
+      ISSUER_URL: base,
+      PROVIDER_WRITES_ENABLED: "false",
+    },
+  });
+  await mf.ready;
+});
+after(async () => {
+  await mf?.dispose();
+});
+test("bootstrap, admin authentication, idempotency, native binding and Agent isolation", async () => {
+  const health = await data("/health", undefined, "");
+  assert.equal(health.paired, false);
+  assert.equal(
+    (await request("/api/v1/admin/state", undefined, "")).status,
+    401,
+  );
+  assert.equal(
+    (
+      await request(
+        "/api/v1/admin/pair",
+        {
+          bootstrapSecret: "wrong".padEnd(64, "x"),
+          browserInstallationId: "browser-fixture",
+        },
+        "",
+      )
+    ).status,
+    401,
+  );
+  const pair = await data(
+    "/api/v1/admin/pair",
+    { bootstrapSecret: bootstrap, browserInstallationId: "browser-fixture" },
+    "",
+  );
+  admin = String(pair.adminCredential);
+  execution = String(pair.executionCredential);
+  assert.equal(
+    (
+      await request(
+        "/api/v1/admin/pair",
+        {
+          bootstrapSecret: bootstrap,
+          browserInstallationId: "browser-fixture",
+        },
+        "",
+      )
+    ).status,
+    409,
+  );
+  const key = crypto.randomUUID();
+  const first = await request(
+    "/api/v1/admin/workspaces",
+    { label: "First" },
+    admin,
+    "POST",
+    { "Idempotency-Key": key },
+  );
+  w = (await first.json()) as Record<string, unknown>;
+  assert.equal(first.status, 200);
+  const repeat = await request(
+    "/api/v1/admin/workspaces",
+    { label: "First" },
+    admin,
+    "POST",
+    { "Idempotency-Key": key },
+  );
+  assert.deepEqual(await repeat.json(), w);
+  assert.equal(
+    (
+      await request(
+        "/api/v1/admin/workspaces",
+        { label: "Other" },
+        admin,
+        "POST",
+        { "Idempotency-Key": key },
+      )
+    ).status,
+    409,
+  );
+  const bind = {
+    generatorId: "123",
+    slug: "fixture-one",
+    draftId: "",
+    browserInstallationId: "browser-fixture",
+  };
+  w = await data("/api/v1/admin/workspaces/" + w.id + "/bind", {
+    expectedRevision: w.revision,
+    binding: bind,
+  });
+  a = await data("/api/v1/admin/agents", {
+    workspaceId: w.id,
+    label: "Agent one",
+  });
+  lease = await data(
+    "/api/v1/tab/claim",
+    {
+      workspaceId: w.id,
+      binding: bind,
+      tabInstanceId: "tab-one",
+      adapterVersion: "1",
+    },
+    execution,
+  );
+  assert.equal(
+    (
+      await request(
+        "/api/v1/tab/claim",
+        {
+          workspaceId: w.id,
+          binding: bind,
+          tabInstanceId: "tab-clone",
+          adapterVersion: "1",
+        },
+        execution,
+      )
+    ).status,
+    409,
+  );
+  const second = await data("/api/v1/admin/workspaces", { label: "Second" });
+  await data("/api/v1/admin/workspaces/" + second.id + "/bind", {
+    expectedRevision: second.revision,
+    binding: { ...bind, generatorId: "456", slug: "fixture-two" },
+  });
+  const a2 = await data("/api/v1/admin/agents", {
+    workspaceId: second.id,
+    label: "Agent two",
+  });
+  assert.notEqual(a2.endpoint, a.endpoint);
+  assert.equal(
+    (await request("/api/v1/admin/state", undefined, execution)).status,
+    401,
+  );
+});
+test("OAuth S256 approval, exact resource audience and MCP tool-only library", async () => {
+  const registration = await request(
+    "/register",
+    {
+      client_name: "Fixture connector",
+      redirect_uris: ["https://client.example/callback"],
+      token_endpoint_auth_method: "none",
+    },
+    "",
+  );
+  const client = (await registration.json()) as { client_id: string };
+  assert.equal(registration.status, 201, JSON.stringify(client));
+  const verifier = "verifier-".padEnd(64, "v"),
+    challenge = Buffer.from(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
+    ).toString("base64url");
+  const params = new URLSearchParams({
+    client_id: client.client_id,
+    redirect_uri: "https://client.example/callback",
+    response_type: "code",
+    scope: "mcp offline_access",
+    state: "state-fixture",
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    resource: String(a.endpoint),
+  });
+  const authorize = await request("/authorize?" + params, undefined, "");
+  const page = await authorize.text();
+  assert.equal(authorize.status, 200, page);
+  const approvalId = /name="id" value="([^"]+)"/.exec(page)?.[1];
+  const handle = /name="handle" value="([^"]+)"/.exec(page)?.[1];
+  assert.ok(approvalId && handle);
+  const pending = await data("/api/v1/admin/approvals");
+  const approval = (pending.items as Record<string, unknown>[]).find(
+    (x) => x.id === approvalId,
+  )!;
+  assert.ok(!("handleHash" in approval));
+  assert.equal(
+    (
+      await request("/api/v1/admin/approvals/" + approvalId + "/decision", {
+        expectedRevision: approval.revision,
+        digest: "wrong",
+        decision: "approve",
+      })
+    ).status,
+    409,
+  );
+  await data("/api/v1/admin/approvals/" + approvalId + "/decision", {
+    expectedRevision: approval.revision,
+    digest: approval.digest,
+    decision: "approve",
+  });
+  const complete = await mf.dispatchFetch(base + "/authorize/complete", {
+    redirect: "manual",
+    method: "POST",
+    headers: {
+      Origin: base,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ id: approvalId, handle }),
+  });
+  assert.equal(complete.status, 302, await complete.clone().text());
+  const callback = new URL(complete.headers.get("location")!);
+  assert.equal(callback.searchParams.get("state"), "state-fixture");
+  assert.equal(callback.searchParams.get("iss"), base);
+  const exchange = await mf.dispatchFetch(base + "/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: client.client_id,
+      redirect_uri: "https://client.example/callback",
+      code: callback.searchParams.get("code")!,
+      code_verifier: verifier,
+      resource: String(a.endpoint),
+    }),
+  });
+  const exchangeRaw = await exchange.text();
+  assert.ok(exchangeRaw, `Token exchange empty ${exchange.status}`);
+  const issued = JSON.parse(exchangeRaw) as { access_token: string };
+  assert.equal(exchange.status, 200, JSON.stringify(issued));
+  token = issued.access_token;
+  assert.ok(token);
+  const initialized = await request(
+    "/mcp/" + a.id,
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "fixture", version: "1" },
+      },
+    },
+    token,
+    "POST",
+    { Accept: "application/json, text/event-stream" },
+  );
+  assert.equal(initialized.status, 200);
+  const initializeRaw = await initialized.text();
+  assert.ok(initializeRaw, "Initialize response empty");
+  assert.equal(
+    (JSON.parse(initializeRaw) as { result: { protocolVersion: string } })
+      .result.protocolVersion,
+    "2025-11-25",
+  );
+  const skills = await mcp("list_skills");
+  assert.equal(skills.status, 200);
+  assert.equal(
+    (skills.body.result?.structuredContent.items as unknown[]).length,
+    11,
+  );
+  const skill = await mcp("skill", { id: "perchance-platform" });
+  assert.match(String(skill.body.result?.structuredContent.body), /Perchance/);
+  const agents = await data("/api/v1/admin/agents");
+  const other = (agents.items as Record<string, unknown>[]).find(
+    (x) => x.id !== a.id,
+  )!;
+  const swapped = await mcp("workspace_status", {}, token, String(other.id));
+  assert.equal(swapped.status, 401);
+  const forged = await mcp("read", {
+    path: "main.pjs",
+    workspaceId: "another",
+  });
+  assert.equal(forged.body.result?.isError, true);
+});
+test("durable browser queue, strict reply identity, terminal result recovery and immediate revocation", async () => {
+  const call = await mcp("read", { path: "main.pjs" });
+  const operationId = String(call.body.result?.structuredContent.operationId);
+  assert.ok(operationId);
+  assert.equal(call.body.result?.structuredContent.status, "ADMITTED");
+  const auth = String(lease.leaseCredential),
+    context = {
+      workspaceId: w.id,
+      epoch: lease.epoch,
+      tabInstanceId: lease.tabInstanceId,
+    };
+  const poll = await data("/api/v1/tab/poll", { ...context, waitMs: 0 }, auth);
+  const operation = (poll.operations as Record<string, unknown>[])[0]!;
+  assert.equal(operation.operationId, operationId);
+  assert.ok(Array.isArray(operation.permissions));
+  assert.equal(
+    (
+      await request(
+        "/api/v1/tab/reply",
+        {
+          ...context,
+          epoch: Number(lease.epoch) + 1,
+          operationId,
+          phase: "RUNNING",
+        },
+        auth,
+      )
+    ).status,
+    409,
+  );
+  await data(
+    "/api/v1/tab/reply",
+    { ...context, operationId, phase: "RUNNING" },
+    auth,
+  );
+  const terminal = {
+    operationId,
+    status: "SUCCEEDED",
+    effectState: "VERIFIED",
+    data: { path: "main.pjs", text: "fixture" },
+  };
+  await data(
+    "/api/v1/tab/reply",
+    { ...context, operationId, phase: "SUCCEEDED", result: terminal },
+    auth,
+  );
+  const status = await mcp("operation_status", { operationId });
+  assert.equal(status.body.result?.structuredContent.status, "SUCCEEDED");
+  assert.equal(
+    (status.body.result?.structuredContent.data as { data: { text: string } })
+      .data.text,
+    "fixture",
+  );
+  const queued = await mcp("read", { path: "index.html" });
+  assert.equal(queued.body.result?.structuredContent.status, "ADMITTED");
+  const grants = await data("/api/v1/admin/grants");
+  const grant = (grants.items as Record<string, unknown>[])[0]!;
+  await data("/api/v1/admin/grants/" + grant.id + "/revoke", {
+    expectedRevision: grant.revision,
+  });
+  const denied = await data(
+    "/api/v1/tab/poll",
+    { ...context, waitMs: 0 },
+    auth,
+  );
+  assert.equal((denied.operations as unknown[]).length, 0);
+  assert.equal((await mcp("list_skills")).status, 403); // Registry overlay rejects immediately, no stale KV authority
+});
+test("CORS accepts exact editor origin and rejects opaque/hostile origins", async () => {
+  const good = await request("/health", undefined, "", "GET", {
+    Origin: "https://perchance.org",
+  });
+  assert.equal(
+    good.headers.get("access-control-allow-origin"),
+    "https://perchance.org",
+  );
+  const bad = await request("/health", undefined, "", "GET", {
+    Origin: "https://evil.example",
+  });
+  assert.equal(bad.status, 403);
+  assert.equal(bad.headers.get("access-control-allow-origin"), null);
+  const opaque = await request("/health", undefined, "", "GET", {
+    Origin: "null",
+  });
+  assert.equal(opaque.status, 403);
+});

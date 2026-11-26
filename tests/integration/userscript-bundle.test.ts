@@ -1,0 +1,11 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {build} from 'esbuild';import vm from 'node:vm';import {JSDOM} from 'jsdom';
+test('single bundled userscript starts offline without blocking or changing the native editor',async()=>{
+ const bundled=await build({entryPoints:['apps/userscript/src/main.ts'],bundle:true,write:false,platform:'browser',format:'iife',target:'firefox128',define:{__COMPUTE_WORKER_SOURCE__:JSON.stringify('/* no compute invoked in this startup test */')}});
+ const dom=new JSDOM('<!doctype html><body><textarea id="native-editor">Operator draft</textarea></body>',{url:'https://perchance.org/fixture#edit'});
+ const original=dom.window.document.querySelector('textarea')!.value;const values=new Map<string,unknown>();
+ const context=vm.createContext({window:dom.window,document:dom.window.document,location:dom.window.location,unsafeWindow:{},GM_info:{injectInto:'content',version:'synthetic',scriptHandler:'Violentmonkey'},GM_getValue:(key:string)=>values.get(key),GM_setValue:(key:string,value:unknown)=>values.set(key,value),GM_deleteValue:(key:string)=>values.delete(key),GM_listValues:()=>[...values.keys()],GM_registerMenuCommand:()=>{},GM_setClipboard:()=>{},crypto,fetch:async()=>{throw new Error('offline');},TextEncoder,TextDecoder,Blob,URL,AbortSignal,AbortController,console,setTimeout,clearTimeout,setInterval,clearInterval,structuredClone,atob,btoa});
+ vm.runInContext(bundled.outputFiles[0]!.text,context);dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
+ for(let i=0;i<20&&!dom.window.document.querySelector('[data-perch-mcp-manager]');i++)await new Promise(r=>setTimeout(r,5));
+ const host=dom.window.document.querySelector('[data-perch-mcp-manager]')!;assert.ok(host,'offline manager is mounted');assert.equal(dom.window.document.querySelector('textarea')!.value,original);const shadow=host.shadowRoot!;assert.ok(shadow.querySelector('button'));assert.equal(shadow.querySelector('dialog')!.hasAttribute('open'),false);
+ shadow.querySelector<HTMLButtonElement>('button')!.click();await new Promise(r=>setTimeout(r,10));assert.ok(shadow.querySelector('dialog')!.hasAttribute('open'));assert.ok(shadow.textContent!.includes('Pair installation'));dom.window.close();
+});
