@@ -1,10 +1,20 @@
 import { BrowserError, canonicalPath, equalBytes, equalIdentity, snapshotRevision, utf8, type CapabilityReport, type FileWrite, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
 interface TextEditor { state?: {readOnly?:unknown}; getValue(): unknown; setValue(value: string): unknown; isClean?(): unknown }
 interface SrcState { ready(): unknown; idle?(): unknown; list(): unknown; readFile(path: string): unknown; writeFile(path: string, bytes: unknown): unknown; deleteFile(path: string): unknown; getDraftId(): unknown; isDirty?(): unknown; hasPending?(): unknown }
-interface NativePage { generatorPublicId?:unknown; app?: { data?: { generator?: { id?: unknown; name?: unknown; publicId?: unknown } }; saveGenerator?: () => unknown; userOwnsThisGenerator?: unknown; userCanSaveThisGenerator?: () => unknown }; modelTextEditor?: TextEditor; outputTemplateEditor?: TextEditor; srcState?: SrcState; currentInterfaceMode?: unknown; __editorReady?: unknown; __draftChoiceSettled?: unknown; perchanceSaveState?: unknown; __generatorIdentityTransition?: unknown; __draftHandoffClosed?:unknown; editorCollabInitialSyncIsPending?:unknown; __collabRoomFailed?:unknown; yjsProvider?:unknown; aiAgentActivityState?:()=>unknown; __aiGeneratorGuard?:{blocked?:()=>unknown}; editor?: { handleReloadButtonClick?: () => unknown }; editorUndoManagers?: Record<string, { undo?: () => unknown; redo?: () => unknown }> }
+interface NativePage { generatorPublicId?:unknown; app?: { data?: { generator?: { id?: unknown; name?: unknown; publicId?: unknown } }; saveGenerator?: () => unknown; userOwnsThisGenerator?: unknown; userCanSaveThisGenerator?: unknown }; modelTextEditor?: TextEditor; outputTemplateEditor?: TextEditor; srcState?: SrcState; currentInterfaceMode?: unknown; __editorReady?: unknown; __draftChoiceSettled?: unknown; perchanceSaveState?: unknown; __generatorIdentityTransition?: unknown; __draftHandoffClosed?:unknown; editorCollabInitialSyncIsPending?:unknown; __collabRoomFailed?:unknown; yjsProvider?:unknown; aiAgentActivityState?:()=>unknown; __aiGeneratorGuard?:{blocked?:()=>unknown}; editor?: { handleReloadButtonClick?: () => unknown }; editorUndoManagers?: Record<string, { undo?: () => unknown; redo?: () => unknown }> }
 export interface AdapterOptions { cloneInto?: (value: unknown) => unknown; externalWritesVerified?: boolean; maxSnapshotBytes?: number }
 export interface SaveContext { operationId: string; permission: boolean; previousSavedSnapshot: NativeSnapshot; readSavedSnapshot(): Promise<NativeSnapshot>; receipt?: { status: string } }
 function identityString(value: unknown, field: string): string { if (typeof value === 'string' && value.length <= 512) return value; if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value); throw new BrowserError('UNSUPPORTED_INTERFACE', `Native ${field} is not a losslessly serializable identifier.`); }
+/** A recognized native field may be a boolean or a zero-argument method.
+ * Never coerce truthy values, promises, or missing predicates into authority. */
+function nativeBoolean(owner: object | undefined, key: string): boolean | null {
+  if (!owner) return null;
+  try {
+    const value: unknown = Reflect.get(owner, key);
+    const observed: unknown = typeof value === 'function' ? Reflect.apply(value, owner, []) : value;
+    return typeof observed === 'boolean' ? observed : null;
+  } catch { return null; }
+}
 function boundedString(value: unknown): string { if (typeof value !== 'string' || value.length > 4 * 1024 * 1024) throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native editor returned invalid text.'); return value; }
 async function nativeBytes(value: unknown): Promise<Uint8Array> {
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
@@ -40,13 +50,8 @@ export class NativeAdapter {
     savedBaseRevision: { known: false; value: null; reason: string };
   } {
     const app = this.page.app;
-    const owned = typeof app?.userOwnsThisGenerator === 'boolean'
-      ? app.userOwnsThisGenerator : null;
-    let allowed: boolean | null = null;
-    try {
-      const access = app?.userCanSaveThisGenerator?.();
-      if (typeof access === 'boolean') allowed = access;
-    } catch { /* A failing native predicate cannot establish authority. */ }
+    const owned = nativeBoolean(app,'userOwnsThisGenerator');
+    const allowed = nativeBoolean(app,'userCanSaveThisGenerator');
     const generator = app?.data?.generator as Record<string, unknown> | undefined;
     const explicitListing = generator?.listing;
     const listed = explicitListing === 'listed' || explicitListing === 'unlisted'
@@ -165,7 +170,7 @@ export class NativeAdapter {
     this.assertMutationReady();
     const intended = await this.snapshot(); if (intended.revision !== intendedRevision) throw new BrowserError('STALE_REVISION', 'Intended revision no longer matches current draft.');
     if (!equalIdentity(context.previousSavedSnapshot.identity, intended.identity)) throw new BrowserError('BINDING_MISMATCH', 'Saved base identity differs.');
-    if (this.page.app?.userOwnsThisGenerator !== true && this.page.app?.userCanSaveThisGenerator?.() !== true) throw new BrowserError('SCOPE_DENIED', 'Native Save authorization is unavailable.');
+    if (nativeBoolean(this.page.app,'userOwnsThisGenerator') !== true && nativeBoolean(this.page.app,'userCanSaveThisGenerator') !== true) throw new BrowserError('SCOPE_DENIED', 'Native Save authorization is unavailable.');
     if (this.page.srcState?.hasPending?.() === true) throw new BrowserError('TAB_BUSY', 'Pending native viewer buffers require operator settlement.');
     const currentSaved = await context.readSavedSnapshot(); if (currentSaved.revision !== context.previousSavedSnapshot.revision) throw new BrowserError('NATIVE_CONFLICT', 'Provider source changed since saved base.');
     if ((await this.snapshot()).revision !== intendedRevision) throw new BrowserError('STALE_REVISION', 'Draft changed during Save preflight.');
