@@ -36,3 +36,16 @@ apps/gateway (Worker + DO + OAuth), apps/userscript (top controller, frame execu
 
 ## P00 handoff amendment
 Operator selected Violentmonkey, and requested a standalone coding handoff. Read docs/HANDOFF.md and the checked-in implementation references. All phases may be planned from repository alone. P01/P02 still require real environments for final proof; implement test harnesses and other independently eligible work without waiting for owner attachments. Unresolved authorized media/state integrations are parity blockers, not missing input files.
+
+## Implementation session — 2026-11-26
+
+Remote baseline: main `9b018fb44423b8d00e1ec90afebb0a9b42da6c9e`; only main exists, no PRs or Actions runs. All required handoff files and default fixtures inspected. Runtime work uses `implement/runtime`; no production mutations/deployment authorized or attempted.
+
+### Active P01/P02 plan
+- Build a read-only native capability probe and injectable native adapter with deterministic editor/draft/src fixtures; record unsupported live interfaces explicitly.
+- Build gateway using pinned official OAuth/MCP implementations, SQLite Durable Objects, isolated assignments, management credential pairing, grant revocation, fenced tab leases and durable operations.
+- Run local positive/negative and emulator tests before any external enablement. Browser feature detection must not infer live verification.
+- Independent contract/schema, resource and manager modules may be implemented alongside these feasibility harnesses; their higher-tier acceptance remains pending.
+- Test dependencies are pinned in one lockfile. Production writes remain gated until their native proof gates pass. Preserve full product requirements when reporting unavailable capabilities.
+
+P01 and P02: **in progress**, not accepted. P03–P11: independently achievable implementation work queued behind tested local contracts; external acceptance gates remain open.
