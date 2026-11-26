@@ -752,7 +752,11 @@ export class BrowserController {
       const partial = e.effectState === "PARTIAL";
       // Only expose bounded, code-authored public API errors. Never forward
       // arbitrary native/preview/provider messages, source, URLs or tokens.
-      const message = envelope.tool === 'fetch_generator' &&
+      const message = envelope.tool === 'set_viewport_size' &&
+        typeof (error as {message?:unknown}).message === 'string' &&
+        /^Viewport (?:reset|set):/.test((error as Error).message)
+          ? (error as Error).message.slice(0,420)
+          : envelope.tool === 'fetch_generator' &&
         typeof (error as {message?:unknown}).message === 'string' &&
         /^(?:Public (?:metadata|asset|generator|source|manifest)|Use a canonical public)/.test((error as Error).message)
           ? `fetch_generator/public-api: ${(error as Error).message.slice(0,260)}`
