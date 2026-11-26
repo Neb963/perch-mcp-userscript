@@ -104,7 +104,7 @@ export class PreviewAdapter {
     return { pendingSrcChanges: this.appliedRevision !== undefined && current !== this.appliedRevision, pageFreshnessUnknown: this.appliedRevision === undefined, previewRevision: this.appliedRevision, previewGeneration: this.generation };
   }
   async refresh(preambleJs?: string): Promise<unknown> {
-    if (!this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview bridge unavailable.');
+    if (!this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview bridge unavailable or not verified.');
     await this.requireCapability('refresh');
     if (preambleJs !== undefined) await this.requireCapability('preamble');
     const expected = await this.options.revision();
@@ -115,7 +115,7 @@ export class PreviewAdapter {
     return { ...receipt, ...await this.freshness() };
   }
   async evaluate(js: string, options: { reload?: boolean; timeoutMs?: number; resultPath?: string } = {}): Promise<unknown> {
-    if (!this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview bridge unavailable.');
+    if (!this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview bridge unavailable or not verified.');
     await this.requireCapability('evaluate');
     const timeout = options.timeoutMs ?? 120_000;
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > 500_000 || new TextEncoder().encode(js).byteLength > 262_144) throw new ExecutionError('INVALID_INPUT', 'Preview code or timeout exceeds its limit.');
