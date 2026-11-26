@@ -1,6 +1,6 @@
 # Setup and operator experience contract
 
-This is the intended release UX, not a working deployment guide yet.
+This remains the accepted release UX contract. The executable candidate guide is INSTALLATION.md; actual acceptance and remaining real-environment gates are in RELEASE_VERIFICATION.md.
 
 ## First installation (dashboard-first)
 1. Open release README and click Deploy to Cloudflare. Use official Deploy button for public repository with pinned reviewed release branch/tag where supported. Cloudflare creates/imports deployment repository and provisions declared bindings. If button cannot deploy pinned ref, provide released source archive and dashboard Git integration to exact release branch. Do not auto-deploy development main. User needs Cloudflare account and Workers enabled. No custom domain required; workers.dev HTTPS default.

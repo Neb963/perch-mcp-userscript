@@ -1,0 +1,334 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { SqlRecords } from "../../apps/gateway/src/sql.js";
+import { Registry } from "../../apps/gateway/src/registry.js";
+import { Workspace } from "../../apps/gateway/src/workspace.js";
+import type {
+  DurableObjectStorage,
+  DurableObjectState,
+} from "@cloudflare/workers-types";
+import type { Env } from "../../apps/gateway/src/common.js";
+function fixture() {
+  const db = new DatabaseSync(":memory:");
+  let alarm: number | null = null;
+  const storage = {
+    async getAlarm() {
+      return alarm;
+    },
+    async setAlarm(value: number | Date) {
+      alarm = Number(value);
+    },
+    async deleteAlarm() {
+      alarm = null;
+    },
+    sql: {
+      exec(sql: string, ...args: (string | number)[]) {
+        const statement = db.prepare(sql);
+        const rows = sql.trim().startsWith("SELECT")
+          ? statement.all(...args)
+          : (statement.run(...args), []);
+        return { toArray: () => rows };
+      },
+    },
+    transactionSync<T>(fn: () => T) {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const result = fn();
+        db.exec("COMMIT");
+        return result;
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    },
+  } as unknown as DurableObjectStorage;
+  return { db, storage, state: { storage } as DurableObjectState };
+}
+test("SQLite chunks preserve Unicode at boundaries and rollback atomically", () => {
+  const f = fixture();
+  try {
+    const records = new SqlRecords(f.storage);
+    const value = {
+      body: "a".repeat(31990) + "😀".repeat(40000),
+      empty: "",
+      bytes: [0, 255, 1, 128, 10],
+    };
+    records.transaction(() => records.put("resource", value));
+    assert.deepEqual(records.get("resource"), value);
+    assert.throws(() =>
+      records.transaction(() => {
+        records.put("resource", { body: "changed" });
+        records.put("other", true);
+        throw new Error("fixture rollback");
+      }),
+    );
+    assert.deepEqual(records.get("resource"), value);
+    assert.deepEqual(records.keys("other"), []);
+  } finally {
+    f.db.close();
+  }
+});
+test("newer Registry/Workspace schemas reject downgrade without rewriting data", async () => {
+  const f = fixture();
+  try {
+    const records = new SqlRecords(f.storage);
+    records.put("core", { schemaVersion: 2, revision: 1 });
+    const registry = new Registry(f.state, {} as Env);
+    const response = await registry.fetch(
+      new Request("https://internal/internal/health"),
+    );
+    assert.equal(response.status, 409);
+    assert.equal(
+      (records.get("core") as { schemaVersion: number }).schemaVersion,
+      2,
+    );
+    records.put("schema", 2);
+    assert.throws(() => new Workspace(f.state, {} as Env), /schema is newer/);
+    assert.equal(records.get("schema"), 2);
+  } finally {
+    f.db.close();
+  }
+});
+test("operational entity budgets validate exact positive integers", async () => {
+  const { configuredBudget } = await import("../../apps/gateway/src/common.js");
+  assert.equal(configuredBudget(undefined, 1000), 1000);
+  assert.equal(configuredBudget("1", 1000), 1);
+  assert.equal(configuredBudget("100000", 1000), 100000);
+  for (const value of ["0", "-1", "1.5", "NaN", "100001", "01"])
+    assert.throws(() => configuredBudget(value, 1000));
+});
+test("operation handles preserve120s compute/preview/fetch/media defaults and explicit valid deadlines", async () => {
+  const { operationTimeoutMs } = await import(
+    "../../apps/gateway/src/common.js"
+  );
+  for (const tool of [
+    "page_eval",
+    "execute_js",
+    "fetch_url",
+    "generate_image",
+    "upload_file",
+  ])
+    assert.equal(operationTimeoutMs(tool, {}), 120000);
+  assert.equal(operationTimeoutMs("generate_music", {}), 600000);
+  assert.equal(operationTimeoutMs("read", {}), 30000);
+  assert.equal(operationTimeoutMs("page_eval", { timeoutMs: 500000 }), 500000);
+  assert.equal(
+    operationTimeoutMs("execute_js", { timeoutMs: 3600000 }),
+    3600000,
+  );
+  assert.equal(operationTimeoutMs("fetch_url", { timeoutMs: 1000 }), 1000);
+  assert.throws(() => operationTimeoutMs("page_eval", { timeoutMs: 500001 }));
+  assert.throws(() => operationTimeoutMs("execute_js", { timeoutMs: 0 }));
+});
+
+function opFixture(phase = "RUNNING") {
+  return {
+    operationId: "fixture-operation",
+    sequence: 1,
+    argsDigest: "fixture-digest",
+    workspaceId: "fixture-workspace",
+    epoch: 1,
+    bindingRevision: 1,
+    tabInstanceId: "fixture-tab",
+    deadlineMs: Date.now() - 1,
+    tool: phase === "UNKNOWN" ? "generate_music" : "read",
+    args: { source: "never-log-fixture-source" },
+    permissions: ["READ_SOURCE"],
+    requiredPermissions: ["READ_SOURCE"],
+    mutating: false,
+    props: {
+      grantId: "fixture-grant",
+      agentId: "fixture-agent",
+      workspaceId: "fixture-workspace",
+      bindingRevision: 1,
+    },
+    agentId: "fixture-agent",
+    traceId: "fixture-trace",
+    phase,
+    createdAt: Date.now() - 100,
+    ...(phase === "UNKNOWN"
+      ? {
+          terminalAt: Date.now(),
+          result: {
+            operationId: "fixture-operation",
+            status: "UNKNOWN",
+            effectState: "POSSIBLE",
+            error: { code: "EFFECT_UNKNOWN", message: "fixture" },
+          },
+        }
+      : {}),
+  };
+}
+test("terminal outbox survives receipt loss and instance restart without duplicate Activity or revision bump", async () => {
+  const local = fixture(),
+    authority = fixture();
+  try {
+    const localDb = new SqlRecords(local.storage),
+      registryDb = new SqlRecords(authority.storage);
+    registryDb.put("workspace/fixture-workspace", {
+      id: "fixture-workspace",
+      binding: null,
+    });
+    const reg = new Registry(authority.state, {} as Env);
+    let loseReceipt = true,
+      calls = 0;
+    const env = {
+      REGISTRY: {
+        idFromName: () => "installation",
+        get: () => ({
+          fetch: async (request: Request) => {
+            calls++;
+            const response = await reg.fetch(request);
+            if (loseReceipt) throw new Error("lost metadata receipt");
+            return response;
+          },
+        }),
+      },
+    } as unknown as Env;
+    localDb.put("operation/fixture-operation", opFixture());
+    const request = () =>
+      new Request("https://internal/internal/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: "fixture-workspace",
+          operationId: "fixture-operation",
+        }),
+      });
+    const first = await new Workspace(local.state, env).fetch(request());
+    assert.equal(
+      ((await first.json()) as { status: string }).status,
+      "UNKNOWN",
+    );
+    assert.equal(
+      localDb.get<{ terminalNotified?: boolean }>("operation/fixture-operation")
+        .terminalNotified,
+      undefined,
+    );
+    assert.ok((await local.storage.getAlarm())! > Date.now());
+    const revision = registryDb.get<{ revision: number }>("core").revision;
+    loseReceipt = false;
+    const restarted = new Workspace(local.state, env);
+    await restarted.fetch(request());
+    assert.equal(
+      localDb.get<{ terminalNotified: boolean }>("operation/fixture-operation")
+        .terminalNotified,
+      true,
+    );
+    assert.equal(
+      registryDb.get<{ revision: number }>("core").revision,
+      revision,
+    );
+    assert.equal(registryDb.get<unknown[]>("activity").length, 1);
+    const event = registryDb.get<Record<string, unknown>[]>("activity")[0]!;
+    assert.equal(event.errorCode, "EFFECT_UNKNOWN");
+    assert.equal(event.traceId, "fixture-trace");
+    assert.equal(event.phase, "UNKNOWN");
+    assert.equal(event.epoch, 1);
+    assert.ok(!JSON.stringify(event).includes("never-log-fixture-source"));
+    assert.equal(calls, 2);
+  } finally {
+    local.db.close();
+    authority.db.close();
+  }
+});
+test("deadline alarm and provider-written UNKNOWN both publish durable redacted recovery notices", async () => {
+  for (const phase of ["RUNNING", "UNKNOWN"]) {
+    const local = fixture(),
+      authority = fixture();
+    try {
+      const localDb = new SqlRecords(local.storage),
+        registryDb = new SqlRecords(authority.storage);
+      registryDb.put("workspace/fixture-workspace", {
+        id: "fixture-workspace",
+        binding: null,
+      });
+      const reg = new Registry(authority.state, {} as Env),
+        env = {
+          REGISTRY: {
+            idFromName: () => "installation",
+            get: () => ({ fetch: (request: Request) => reg.fetch(request) }),
+          },
+        } as unknown as Env;
+      localDb.put("operation/fixture-operation", opFixture(phase));
+      await new Workspace(local.state, env).alarm();
+      const event =
+        registryDb.get<{ phase: string; errorCode: string }[]>("activity")[0]!;
+      assert.equal(event.phase, "UNKNOWN");
+      assert.equal(event.errorCode, "EFFECT_UNKNOWN");
+      assert.equal(
+        localDb.get<{ terminalNotified: boolean }>(
+          "operation/fixture-operation",
+        ).terminalNotified,
+        true,
+      );
+    } finally {
+      local.db.close();
+      authority.db.close();
+    }
+  }
+});
+test("Activity preserves an old unresolved hold beyond the rolling terminal window", async () => {
+  const authority = fixture();
+  try {
+    const db = new SqlRecords(authority.storage),
+      { digest } = await import("../../apps/gateway/src/common.js");
+    const credential = "activity-test-".padEnd(64, "x");
+    db.put("core", {
+      schemaVersion: 1,
+      revision: 3,
+      policyRevision: 1,
+      paused: false,
+      issuer: "https://unit.test",
+      paired: true,
+      adminHash: await digest(credential),
+      executionHash: "fixture",
+      browserInstallationId: "fixture",
+      credentialEpoch: 1,
+    });
+    const event = {
+      operationId: "old-unknown",
+      workspaceId: "fixture-workspace",
+      tool: "save_generator",
+      phase: "UNKNOWN",
+      epoch: 4,
+      bindingRevision: 2,
+      traceId: "old-trace",
+      timestamp: 1,
+      errorCode: "EFFECT_UNKNOWN",
+      durationMs: 3,
+    };
+    db.put("terminal-notice/fixture-workspace/old-unknown", {
+      phase: "UNKNOWN",
+      expires: 1,
+      event,
+    });
+    db.put(
+      "activity",
+      Array.from({ length: 1000 }, (_, i) => ({
+        operationId: "new-" + i,
+        workspaceId: "other",
+        tool: "read",
+        phase: "SUCCEEDED",
+        timestamp: Date.now() + i,
+      })),
+    );
+    const registry = new Registry(authority.state, {} as Env);
+    const response = await registry.fetch(
+      new Request("https://internal/api/v1/admin/activity", {
+        headers: { Authorization: "Bearer " + credential },
+      }),
+    );
+    assert.equal(response.status, 200);
+    const result = (await response.json()) as {
+      items: (typeof event)[];
+      cursor: string;
+    };
+    assert.equal(result.items[0]!.operationId, "old-unknown");
+    assert.equal(result.items[0]!.epoch, 4);
+    assert.ok(result.cursor);
+  } finally {
+    authority.db.close();
+  }
+});

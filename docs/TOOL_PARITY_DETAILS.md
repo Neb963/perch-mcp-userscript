@@ -31,3 +31,32 @@ Expose fs.readTextFile, writeTextFile, readFile/writeFile for bytes, list/stat, 
 
 ## Fixtures and resources
 Generate original fixtures from tests/fixtures at test time; no historical archive required. Validate 22 named helper tools plus product additions against positive/negative cases. Keep descriptions rich enough for tool-only web clients: when to call, exact argument example, result shape, ACL/side effect, failure and next tool. No model-supplied Workspace ID. Treat code, documents and network results as untrusted. Current quotas and authorized backend access remain live feasibility gates.
+
+## Controlled compute imports — additive implementation decision (2026-11-26)
+
+`execute_js` accepts optional `modules: [{specifier, path, sha256}]`. This gives agents access to the engine's explicit module loader without ambient package/network access. The schema rejects unknown fields, routing IDs, duplicate specifiers, duplicate or case-colliding paths, malformed pins and more than 16 entries. Omitted or empty `modules` provides no import mappings and adds no file permission.
+
+| Field or boundary | Required behavior |
+|---|---|
+| `specifier` | An exact unscoped or scoped package name plus numeric core semver, such as `math@1.2.3` or `@example/math@1.2.3`. No URL, range, tag or prerelease shorthand. |
+| `path` | A canonical readable Workspace file path containing UTF-8 JavaScript source. A filename extension is not a security check. |
+| `sha256` | Exactly 64 lowercase hexadecimal characters identifying the complete source bytes. The host rejects a digest mismatch before guest code executes. |
+| Permission | Nonempty mappings additionally require `READ_SOURCE` in the current Grant ∩ Workspace ∩ operation ceiling. The host authorizes each file read through the fixed file broker. |
+| Prefetch | The host reads at most 256 KiB per module and 512 KiB total decoded bytes. It rejects oversize, missing, invalid UTF-8, changed or unauthorized input before guest execution; it never truncates source. |
+| Loader | The host passes immutable verified source snapshots into the isolated engine. Each direct or transitive import must exactly match a declared specifier. No dependency fetching, implicit resolution, privileged evaluation or network access. |
+| Failure | Invalid mapping returns `INVALID_INPUT`; denied paths return `PATH_DENIED`; permissions return `SCOPE_DENIED`; missing bytes return `FILE_NOT_FOUND`; digest drift returns `STALE_REVISION`; exceeded budgets return `LIMIT_EXCEEDED`. The parent operation has no guest effects if prefetch fails. |
+
+Example (compute the real pin with `read_b64_file` before calling):
+
+```json
+{
+  "js": "return (await import('fixture-math@1.0.0')).twice(21)",
+  "modules": [{
+    "specifier": "fixture-math@1.0.0",
+    "path": "scratch/modules/math.js",
+    "sha256": "<64 lowercase hexadecimal characters from the exact module bytes>"
+  }]
+}
+```
+
+This is a reversible additive protocol field. Older userscripts without module support must reject the field; the gateway must not silently strip it and execute different computation. The mappings are tool input data and cannot alter routing, authorization or installed gateway/browser code.

@@ -1,0 +1,21 @@
+{
+  "tier": "T2 locally generated pixels; no native/provider evidence",
+  "browserVersion": "158.0.8127.0",
+  "sample": [
+    255,
+    0,
+    0,
+    128
+  ],
+  "small": {
+    "width": 8,
+    "height": 8
+  },
+  "noisy": {
+    "originalBytes": 3608592,
+    "width": 512,
+    "height": 512,
+    "resultBytes": 871856
+  },
+  "corruptCode": "INVALID_INPUT"
+}

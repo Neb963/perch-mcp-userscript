@@ -1,0 +1,58 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readPublicGenerator } from "../../apps/userscript/src/public-generator.js";
+const generator = {
+  id: 42,
+  name: "fixture",
+  modelText: "output = test",
+  outputTemplate: "[output]",
+  srcManifest: {
+    "empty.bin": { key: "empty", size: 0 },
+    "binary.bin": { key: "binary", size: 3 },
+  },
+};
+test("complete public snapshot verifies exact binary and zero bytes without credentials", async () => {
+  const calls: RequestInit[] = [];
+  const f = (async (url: string | URL | Request, init: RequestInit) => {
+    calls.push(init);
+    return String(url).includes("getGeneratorPageData")
+      ? Response.json({ status: "success", generator })
+      : new Response(
+          String(url).endsWith("/empty")
+            ? new Uint8Array()
+            : new Uint8Array([0, 255, 1]),
+        );
+  }) as typeof fetch;
+  const s = await readPublicGenerator("fixture", f);
+  assert.equal(s.generatorId, "42");
+  assert.equal(s.files["src/empty.bin"]!.length, 0);
+  assert.deepEqual(s.files["src/binary.bin"], new Uint8Array([0, 255, 1]));
+  assert.ok(
+    calls.every((c) => c.credentials === "omit" && c.redirect === "error"),
+  );
+});
+test("saved revision drift or incomplete manifest rejects instead of returning partial success", async () => {
+  let n = 0;
+  const f = (async (url: string | URL | Request) =>
+    String(url).includes("getGeneratorPageData")
+      ? Response.json({
+          status: "success",
+          generator: { ...generator, saveCount: ++n },
+        })
+      : new Response(
+          String(url).endsWith("/empty")
+            ? new Uint8Array()
+            : new Uint8Array([0, 255, 1]),
+        )) as typeof fetch;
+  await assert.rejects(
+    readPublicGenerator("fixture", f),
+    (e) => (e as { code: string }).code === "STALE_REVISION",
+  );
+  await assert.rejects(
+    readPublicGenerator("fixture", (async () =>
+      Response.json({
+        status: "success",
+        generator: { ...generator, srcManifest: undefined },
+      })) as typeof fetch),
+  );
+});

@@ -1,0 +1,500 @@
+{
+  "command": "node --import tsx tests/integration/gateway-soak.ts",
+  "date": "2026-11-26",
+  "sourceCaveat": "Run began before final MCP transport/UI hardening; source bundle hash was not recorded. This is T2 component evidence, not final-commit T3/T4/T5 acceptance.",
+  "samples": [
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 61219,
+      "iterations": 12,
+      "operations": 240,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 490.28448000000026,
+        "p95": 625.6379000000015,
+        "p99": 639.4985369999995,
+        "max": 640.6040910000011
+      },
+      "nodeRssBytes": 323698688,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 122189,
+      "iterations": 23,
+      "operations": 460,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 488.20283900000504,
+        "p95": 644.832269999999,
+        "p99": 687.8298099999956,
+        "max": 688.7909610000061
+      },
+      "nodeRssBytes": 344772608,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 183648,
+      "iterations": 34,
+      "operations": 680,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 494.7630480000007,
+        "p95": 733.1662020000222,
+        "p99": 819.0970359999919,
+        "max": 842.8963179999992
+      },
+      "nodeRssBytes": 345690112,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 245620,
+      "iterations": 45,
+      "operations": 900,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 506.98560899999575,
+        "p95": 735.5815739999816,
+        "p99": 842.6909650000161,
+        "max": 850.7018540000136
+      },
+      "nodeRssBytes": 347787264,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 307381,
+      "iterations": 56,
+      "operations": 1120,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 522.4541389999977,
+        "p95": 732.8558769999654,
+        "p99": 841.9766880000243,
+        "max": 850.7018540000136
+      },
+      "nodeRssBytes": 349884416,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 369050,
+      "iterations": 67,
+      "operations": 1340,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 542.5336519999983,
+        "p95": 729.478311999992,
+        "p99": 841.6826230000006,
+        "max": 850.7018540000136
+      },
+      "nodeRssBytes": 351268864,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 431303,
+      "iterations": 78,
+      "operations": 1560,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 553.0097459999961,
+        "p95": 736.113966999983,
+        "p99": 841.3345090000075,
+        "max": 850.7018540000136
+      },
+      "nodeRssBytes": 351531008,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 493966,
+      "iterations": 89,
+      "operations": 1780,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 566.8307749999803,
+        "p95": 753.0597760000383,
+        "p99": 840.8234830000147,
+        "max": 850.7018540000136
+      },
+      "nodeRssBytes": 352841728,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 556989,
+      "iterations": 100,
+      "operations": 2000,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 583.7095990000525,
+        "p95": 810.9468999999808,
+        "p99": 859.4553409999935,
+        "max": 891.1421420000261
+      },
+      "nodeRssBytes": 353759232,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 621194,
+      "iterations": 111,
+      "operations": 2220,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 600.1570720000309,
+        "p95": 836.5781410000054,
+        "p99": 1041.2052420000546,
+        "max": 1175.5884489999153
+      },
+      "nodeRssBytes": 354021376,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 685179,
+      "iterations": 122,
+      "operations": 2440,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 612.0384949999861,
+        "p95": 842.3200110000325,
+        "p99": 1038.7130290000932,
+        "max": 1175.5884489999153
+      },
+      "nodeRssBytes": 354676736,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 749103,
+      "iterations": 133,
+      "operations": 2660,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 627.6829739999957,
+        "p95": 864.6567590000341,
+        "p99": 1038.3808880000142,
+        "max": 1175.5884489999153
+      },
+      "nodeRssBytes": 354807808,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 813981,
+      "iterations": 144,
+      "operations": 2880,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 637.4966480000003,
+        "p95": 931.7303979999851,
+        "p99": 1097.9381710001035,
+        "max": 1175.5884489999153
+      },
+      "nodeRssBytes": 354807808,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 879500,
+      "iterations": 155,
+      "operations": 3100,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 646.4304620000039,
+        "p95": 997.7578680000734,
+        "p99": 1097.565189999994,
+        "max": 1175.5884489999153
+      },
+      "nodeRssBytes": 354807808,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 944914,
+      "iterations": 166,
+      "operations": 3320,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 663.8110640000086,
+        "p95": 1027.5788810000522,
+        "p99": 1121.9883179999888,
+        "max": 1274.616749000037
+      },
+      "nodeRssBytes": 355201024,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1009330,
+      "iterations": 177,
+      "operations": 3540,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 678.7775039999979,
+        "p95": 1020.4496600000421,
+        "p99": 1121.3798380000517,
+        "max": 1274.616749000037
+      },
+      "nodeRssBytes": 355332096,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1074535,
+      "iterations": 188,
+      "operations": 3760,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 695.1096419999958,
+        "p95": 1026.8521039999323,
+        "p99": 1121.1242210000055,
+        "max": 1274.616749000037
+      },
+      "nodeRssBytes": 355332096,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1139817,
+      "iterations": 199,
+      "operations": 3980,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 707.5641790000373,
+        "p95": 1028.4096589999972,
+        "p99": 1102.0411859999876,
+        "max": 1274.616749000037
+      },
+      "nodeRssBytes": 355332096,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1201237,
+      "iterations": 209,
+      "operations": 4180,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 721.9653920000419,
+        "p95": 1038.070853000041,
+        "p99": 1279.8885580000933,
+        "max": 1895.3258860001806
+      },
+      "nodeRssBytes": 355332096,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1262845,
+      "iterations": 219,
+      "operations": 4380,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 736.6047820000094,
+        "p95": 1094.7912319998723,
+        "p99": 1368.2396819998976,
+        "max": 1895.3258860001806
+      },
+      "nodeRssBytes": 355463168,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1323858,
+      "iterations": 229,
+      "operations": 4580,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 752.0971200000495,
+        "p95": 1143.4896850001533,
+        "p99": 1367.6977099999785,
+        "max": 1895.3258860001806
+      },
+      "nodeRssBytes": 355463168,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1384217,
+      "iterations": 239,
+      "operations": 4780,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 769.6808320001,
+        "p95": 1146.3871830001008,
+        "p99": 1367.5286199999973,
+        "max": 1895.3258860001806
+      },
+      "nodeRssBytes": 355463168,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1445153,
+      "iterations": 249,
+      "operations": 4980,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 778.3456589999842,
+        "p95": 1132.20932000014,
+        "p99": 1367.3099459998775,
+        "max": 1895.3258860001806
+      },
+      "nodeRssBytes": 355463168,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1507588,
+      "iterations": 259,
+      "operations": 5180,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 785.6182130000088,
+        "p95": 1171.1302539999597,
+        "p99": 1367.0443639999721,
+        "max": 1895.3258860001806
+      },
+      "nodeRssBytes": 355463168,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1569201,
+      "iterations": 269,
+      "operations": 5380,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 792.5266019999981,
+        "p95": 1191.06587400008,
+        "p99": 1366.8427349999547,
+        "max": 1895.3258860001806
+      },
+      "nodeRssBytes": 355463168,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1630347,
+      "iterations": 279,
+      "operations": 5580,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 810.3462539999746,
+        "p95": 1194.9380339998752,
+        "p99": 1366.604222000111,
+        "max": 1895.3258860001806
+      },
+      "nodeRssBytes": 355237888,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1692261,
+      "iterations": 289,
+      "operations": 5780,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 817.8945930000627,
+        "p95": 1207.024204999907,
+        "p99": 1368.637413999997,
+        "max": 1895.3258860001806
+      },
+      "nodeRssBytes": 355631104,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": false,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1754322,
+      "iterations": 299,
+      "operations": 5980,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 823.4756869999692,
+        "p95": 1217.0155299999751,
+        "p99": 1368.4852790001314,
+        "max": 1895.3258860001806
+      },
+      "nodeRssBytes": 355631104,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    },
+    {
+      "final": true,
+      "tier": "T2",
+      "workspaces": 20,
+      "elapsedMs": 1800002,
+      "iterations": 306,
+      "operations": 6120,
+      "failures": 0,
+      "latencyMs": {
+        "p50": 827.1041419999674,
+        "p95": 1215.8472890001722,
+        "p99": 1368.2396819998976,
+        "max": 1895.3258860001806
+      },
+      "nodeRssBytes": 355631104,
+      "notes": "Local workerd synthetic native replies; not deployed CPU/quota or Firefox evidence."
+    }
+  ]
+}

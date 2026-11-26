@@ -1,0 +1,5 @@
+# Generate at least 32 random bytes; never use this literal placeholder.
+BOOTSTRAP_SECRET=REPLACE_WITH_32_RANDOM_BYTES_BASE64URL
+# Optional recovery: provision a DIFFERENT fresh secret only when needed.
+# RECOVERY_SECRET=REPLACE_WITH_A_DIFFERENT_SECRET
+# ISSUER_URL=https://your-worker.your-subdomain.workers.dev

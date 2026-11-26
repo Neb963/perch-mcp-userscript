@@ -1,6 +1,6 @@
 # Protocol and persistence supplement — v1 design
 
-Normative supplement to DESIGN.md and TOOLS.md. No runtime implementation yet. Values are proposed initial defaults; change only through versioned configuration and tests. Security policy cannot be weakened by Resource content.
+Normative supplement to DESIGN.md and TOOLS.md. Runtime candidate implementation and verification status are recorded in RELEASE_VERIFICATION.md and todo.md. Values are proposed initial defaults; change only through versioned configuration and tests. Security policy cannot be weakened by Resource content.
 
 ## 1. Management API
 All management writes require admin credential in Authorization header, JSON content type, explicit expected entity revision (creation uses absent ID), and client-generated idempotency key (128-bit). Gateway verifies credential and revocation before parsing expensive payload. Registry persists idempotency result and request digest atomically with mutation; conflicting key reuse returns 409. Never accept IDs in request body that contradict path. Every list returns cursor and snapshot revision; no unbounded list. Public setup status never reveals IDs, users or secrets.
@@ -74,3 +74,14 @@ A page message from the expected preview WindowProxy and origin is still generat
 
 ## 7. Deployment configuration design
 Worker root config in deployable release declares entry point, explicit compatibility date tested at release, workers_dev true, bindings REGISTRY and WORKSPACES to exported SQLite DO classes with initial new_sqlite_classes migration, OAUTH_KV for OAuth library, required BOOTSTRAP_SECRET and optional RECOVERY_SECRET through dashboard. One deployment only. No fabricated KV namespace IDs in committed config; Deploy workflow provisions them or setup guide supplies dashboard fallback. Canonical issuer derived from configured exact URL, initialized through trusted deployment configuration or first secret-authenticated pairing; never trust arbitrary Host/forwarded headers. Health validates binding readiness without disclosing secrets. Use official SDK/provider library release with tested exact resource routing. Pin all versions and package lock in implementation. Config is design only until P02 supplies actual working Worker and verifies deployment.
+
+## Implementation decision: operation permission ceiling (2026-11-26)
+Every browser request envelope includes `permissions`, produced only by the gateway as the intersection of the current Grant and Workspace policy. The gateway persists this ceiling at admission and may narrow it at dispatch; the gateway never expands an admitted operation's authority. The browser intersects the envelope ceiling with the active lease for the parent tool and every compute/tool-broker child call. Child calls retain the original binding, Epoch, deadline and immutable execution context. A model cannot supply or override this ceiling through a tool argument. This prevents a COMPUTE-only Grant from inheriting broader file/media/upload permissions merely because the Workspace permits them. Unknown permission names or a missing ceiling reject the envelope before execution.
+
+## Final boundary and recovery amendments (2026-11-26)
+
+- Agent operation-result access binds to Agent ID and Binding revision, as well as Workspace ID. Administrative reconciliation retains a separately authorized view of older uncertain operations.
+- Rebinding or detaching refuses consumed dispatch permits and unresolved terminal notices, including read operations, so no effect or result is stranded by a concurrent target change.
+- Credential recovery unbinds and pauses execution, invalidates credentials/Grants/leases, and retains only an inert previous Binding tuple for exact old-operation reconciliation. This tuple cannot claim a lease; explicit new binding/authorization remains mandatory.
+- Operator resolution preserves UNKNOWN/PARTIAL history, records the inspected source revision/digest and acknowledgement, and releases only the corresponding reservation. Local recovery can reuse an already recorded resolution only when current complete source still matches its exact observed revision.
+- Production manager UI uses a closed ShadowRoot and rejects untrusted UI events. Credentials enter through the isolated native browser-prompt callback, never page-DOM fields. Firefox content-world/Xray/native-prompt behavior still requires real-browser qualification.

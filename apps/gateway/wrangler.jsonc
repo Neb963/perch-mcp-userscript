@@ -1,0 +1,24 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "perch-mcp-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-30",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [
+      { "name": "REGISTRY", "class_name": "Registry" },
+      { "name": "WORKSPACES", "class_name": "Workspace" },
+    ],
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Registry", "Workspace"] },
+  ],
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  "vars": {
+    "PROVIDER_WRITES_ENABLED": "false",
+    "ALLOWED_ORIGINS": "https://perchance.org",
+  },
+  "secrets": { "required": ["BOOTSTRAP_SECRET"] },
+  "observability": { "enabled": false },
+}
