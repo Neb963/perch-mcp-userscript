@@ -11,7 +11,7 @@ import {
 import { NativeAdapter } from "./adapter.js";
 import { VirtualFileSystem } from "./vfs.js";
 import { SourceTools } from "./source-tools.js";
-import { GatewayTransport } from "./transport.js";
+import { GatewayTransport, TransportError } from "./transport.js";
 import { ArtifactStore } from "./artifacts.js";
 import {
   base64ToBytes,
@@ -43,7 +43,7 @@ interface LocalOperation {
   resolvedByOperator?: boolean;
 }
 export interface ControllerStatus {
-  connection: "unpaired" | "connected" | "paused" | "offline" | "blocked";
+  connection: "unpaired" | "connected" | "degraded" | "paused" | "offline" | "blocked";
   workspace?: string;
   dirty?: boolean;
   revision?: string;
@@ -79,6 +79,12 @@ export class BrowserController {
   private vfs?: VirtualFileSystem;
   private source?: SourceTools;
   private heartbeat?: ReturnType<typeof setInterval>;
+  private pollAbort?: AbortController;
+  private renewalInFlight = false;
+  private consecutivePollFailures = 0;
+  private lastPollSuccessAt?: number;
+  private lastFailureCode?: string;
+  private currentStatus: ControllerStatus = { connection: "offline" };
   private stopped = true;
   private executing = false;
   private running?: Promise<void>;
@@ -91,6 +97,21 @@ export class BrowserController {
     readonly status: (state: ControllerStatus) => void = () => {},
   ) {
     this.artifacts = new ArtifactStore(store);
+  }
+  private updateStatus(next: ControllerStatus): void {
+    this.currentStatus = next;
+    this.status(next);
+  }
+  diagnostics() {
+    return {
+      connection: this.currentStatus.connection,
+      reasonCode: this.lastFailureCode ?? null,
+      consecutivePollFailures: this.consecutivePollFailures,
+      lastPollSuccessAt: this.lastPollSuccessAt ?? null,
+      leasePresent: !!this.lease,
+      leaseRemainingMs: this.lease ? Math.max(0, this.lease.expiresAt - Date.now()) : 0,
+      stopped: this.stopped,
+    };
   }
   async attach(workspace: Record<string, unknown>): Promise<void> {
     if (this.executing)
@@ -141,28 +162,37 @@ export class BrowserController {
     this.vfs = candidateVfs;
     this.source = new SourceTools(this.vfs, this.adapter);
     this.stopped = false;
+    this.lastFailureCode = undefined;
+    this.consecutivePollFailures = 0;
+    this.pollAbort = new AbortController();
     this.heartbeat = setInterval(() => {
       void this.renew(claim);
     }, 60000);
     (this.heartbeat as unknown as { unref?: () => void }).unref?.();
-    this.status({
+    this.updateStatus({
       connection: "connected",
       workspace: String(workspace.id),
       dirty: probe.dirty,
     });
-    this.running = this.poll().catch(() => {
-      if (this.lease !== claim) return;
+    this.running = this.poll().catch((error: unknown) => {
+      if (this.lease !== claim || this.stopped) return;
       this.stopped = true;
-      this.status({
+      this.pollAbort?.abort();
+      if (this.heartbeat) clearInterval(this.heartbeat);
+      this.heartbeat = undefined;
+      this.lastFailureCode = error instanceof TransportError
+        ? error.code : "POLL_FAILED";
+      this.updateStatus({
         connection: "offline",
         workspace: String(workspace.id),
-        reason:
-          "Connection lost. Reconnect after inspecting pending operations.",
+        reason: `Poll stopped (${this.lastFailureCode}). Inspect diagnostics and reconcile uncertain operations before reconnecting.`,
       });
     });
   }
   async pause(): Promise<void> {
     this.stopped = true;
+    this.pollAbort?.abort();
+    this.pollAbort = undefined;
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
     this.abort?.abort();
@@ -181,12 +211,13 @@ export class BrowserController {
       }
     }
     this.tools?.dispose?.();
-    this.status({
+    this.updateStatus({
       connection: this.transport.configuration().paired ? "paused" : "unpaired",
     });
   }
   private async renew(lease: Lease): Promise<void> {
-    if (this.stopped || this.lease !== lease) return;
+    if (this.stopped || this.lease !== lease || this.renewalInFlight) return;
+    this.renewalInFlight = true;
     try {
       const state = (await this.transport.tab(
         "/api/v1/tab/heartbeat",
@@ -204,18 +235,31 @@ export class BrowserController {
         lease.permissions = lease.permissions.filter((p) =>
           state.permissions.includes(p),
         );
-    } catch {
-      if (this.lease === lease) {
-        this.stopped = true;
-        this.abort?.abort();
-        if (this.heartbeat) clearInterval(this.heartbeat);
-        this.status({
-          connection: "blocked",
-          workspace: lease.workspaceId,
-          reason:
-            "Lease renewal failed. Inspect pending effects before reconnecting.",
+    } catch (error) {
+      if (this.stopped || this.lease !== lease) return;
+      const code = error instanceof TransportError ? error.code : "HEARTBEAT_FAILED";
+      this.lastFailureCode = code;
+      // The poll request also refreshes the same lease. A transient failed
+      // heartbeat is not proof of lease revocation or loss of connection.
+      const temporary = ["GATEWAY_TIMEOUT", "GATEWAY_UNAVAILABLE"].includes(code);
+      if (temporary && lease.expiresAt > Date.now() + 1000) {
+        this.updateStatus({
+          connection: "degraded", workspace: lease.workspaceId,
+          reason: `Heartbeat temporarily unavailable (${code}); existing lease retained.`,
         });
+        return;
       }
+      this.stopped = true;
+      this.pollAbort?.abort();
+      this.abort?.abort();
+      if (this.heartbeat) clearInterval(this.heartbeat);
+      this.heartbeat = undefined;
+      this.updateStatus({
+        connection: "blocked", workspace: lease.workspaceId,
+        reason: `Lease renewal rejected (${code}). Inspect pending effects before reconnecting.`,
+      });
+    } finally {
+      this.renewalInFlight = false;
     }
   }
   private ids(lease: Lease) {
@@ -367,7 +411,7 @@ export class BrowserController {
       await this.store.set(key, local);
     }
     void resolution;
-    this.status({
+    this.updateStatus({
       connection: "paused",
       workspace: workspaceId,
       reason:
@@ -380,11 +424,40 @@ export class BrowserController {
   private async poll(): Promise<void> {
     while (!this.stopped && this.lease) {
       const lease = this.lease;
-      const reply = (await this.transport.tab(
-        "/api/v1/tab/poll",
-        this.ids(lease),
-        lease.leaseCredential,
-      )) as { operations?: unknown[]; expiresAt?: number };
+      let reply: { operations?: unknown[]; expiresAt?: number };
+      try {
+        // The Worker holds an idle poll for up to 25 seconds. A 45-second
+        // browser budget allows network/proxy latency without a false offline
+        // transition. Abort on explicit Pause or document navigation.
+        reply = (await this.transport.tab(
+          "/api/v1/tab/poll", this.ids(lease), lease.leaseCredential,
+          { timeoutMs: 45000, signal: this.pollAbort?.signal },
+        )) as { operations?: unknown[]; expiresAt?: number };
+      } catch (error) {
+        if (this.stopped || this.lease !== lease) return;
+        const code = error instanceof TransportError ? error.code : "POLL_FAILED";
+        this.lastFailureCode = code;
+        this.consecutivePollFailures++;
+        // The gateway serializes dispatched Operations. Re-polling the
+        // current lease never issues a new Workspace claim or duplicates an
+        // operation ACK. Only transient network failures are retried here.
+        if (
+          !["GATEWAY_TIMEOUT", "GATEWAY_UNAVAILABLE"].includes(code) ||
+          this.consecutivePollFailures >= 3 ||
+          Date.now() + 3000 >= lease.expiresAt
+        ) throw error;
+        this.updateStatus({
+          connection: "degraded", workspace: lease.workspaceId,
+          reason: `Poll interrupted (${code}); recovering existing lease, attempt ${this.consecutivePollFailures + 1}/3.`,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 750 * this.consecutivePollFailures));
+        continue;
+      }
+      this.consecutivePollFailures = 0;
+      this.lastPollSuccessAt = Date.now();
+      this.lastFailureCode = undefined;
+      if (this.currentStatus.connection === "degraded")
+        this.updateStatus({ connection: "connected", workspace: lease.workspaceId });
       if (this.stopped || this.lease !== lease) return;
       if (
         !reply ||
@@ -431,7 +504,7 @@ export class BrowserController {
     const identity = await this.adapter.identity();
     if (!this.identity || !equalIdentity(identity, this.identity)) {
       this.stopped = true;
-      this.status({
+      this.updateStatus({
         connection: "blocked",
         reason: "Generator or Draft changed. Rebind explicitly.",
       });
@@ -712,7 +785,7 @@ export class BrowserController {
     );
     if (result.status === "UNKNOWN" || result.status === "PARTIAL") {
       this.stopped = true;
-      this.status({
+      this.updateStatus({
         connection: "blocked",
         workspace: lease.workspaceId,
         reason: "Uncertain or partial effect. Inspect and reconcile.",
