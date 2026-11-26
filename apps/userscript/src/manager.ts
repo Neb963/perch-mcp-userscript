@@ -282,6 +282,11 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     },
     tab: Tab = client.configuration().paired ? "Workspaces" : "Settings";
   let resourceLoad = 0;
+  let approvalRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  function stopApprovalRefresh() {
+    if (approvalRefreshTimer !== undefined) clearInterval(approvalRefreshTimer);
+    approvalRefreshTimer = undefined;
+  }
   let generation = 0,
     destroyed = false,
     opened = false,
@@ -564,6 +569,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     return { s: record(s), w: list(w), a: list(a) };
   }
   async function refresh() {
+    stopApprovalRefresh();
     const own = ++generation;
     if (!opened || destroyed) return;
     announce("Loading…");
@@ -944,124 +950,173 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       ],
       agents.items,
     );
-    const [approvalResponse, grantResponse] = await Promise.all([
-      loadList(`${ADMIN}/approvals`),
-      loadList(`${ADMIN}/grants`),
-    ]);
-    if (own !== generation) return;
-    const approvals = list(approvalResponse);
-    heading("Pending approvals");
-    table(
-      [
-        {
-          key: "code",
-          label: "Request",
-          render(a, td) {
-            p(`${str(a.kind)} · ${str(a.code)}`, td);
-            p(`Agent ${str(a.agentId)} · Workspace ${str(a.workspaceId)}`, td);
-            p(
-              `Client ${str(a.clientId)} · expires ${str(a.expiresAt)}`,
-              td,
-              "muted",
-            );
+    // The time-limited OAuth request must be visible without waiting for
+    // unrelated Grant data. A failure in either list does not hide the other.
+    const approvalPanel = el("section");
+    const grantsPanel = el("section");
+    body.append(approvalPanel, grantsPanel);
+    let lastApprovalState = "";
+    const loadApprovals = async () => {
+      const approvals = await loadList(`${ADMIN}/approvals`);
+      if (own !== generation || destroyed || !opened || tab !== "Agents")
+        return;
+      const pending = approvals.items.filter(
+        (item) => item.state === "pending" && num(item.expiresAt) > Date.now(),
+      );
+      const fingerprint = JSON.stringify(pending);
+      if (fingerprint === lastApprovalState) return; // Preserve focus while polling.
+      lastApprovalState = fingerprint;
+      approvalPanel.replaceChildren();
+      heading("Pending approvals", approvalPanel);
+      p(
+        "This list refreshes automatically while Agents is open. Match the code, Client and callback before approving.",
+        approvalPanel,
+        "muted",
+      );
+      table(
+        [
+          {
+            key: "code",
+            label: "Request",
+            render(a, td) {
+              p(`${str(a.kind)} · ${str(a.code)}`, td);
+              p(`Agent ${str(a.agentId)} · Workspace ${str(a.workspaceId)}`, td);
+              p(
+                `Client ${str(a.clientId)} · expires ${str(a.expiresAt)}`,
+                td,
+                "muted",
+              );
+            },
           },
-        },
-        {
-          key: "digest",
-          label: "Exact authorization",
-          render(a, td) {
-            p(`Redirect: ${str(a.redirectUri)}`, td);
-            p(
-              `Scope: ${Array.isArray(a.scope) ? arrayStrings(a.scope).join(", ") : str(a.scope)}`,
-              td,
-            );
-            p(`Digest: ${str(a.digest)}`, td);
-            if (a.tool)
-              p(`Operation ${str(a.operationId)} · ${str(a.tool)}`, td);
+          {
+            key: "digest",
+            label: "Exact authorization",
+            render(a, td) {
+              p(`Redirect: ${str(a.redirectUri)}`, td);
+              p(
+                `Scope: ${Array.isArray(a.scope) ? arrayStrings(a.scope).join(", ") : str(a.scope)}`,
+                td,
+              );
+              p(`Digest: ${str(a.digest)}`, td);
+              if (a.tool)
+                p(`Operation ${str(a.operationId)} · ${str(a.tool)}`, td);
+            },
           },
-        },
-        {
-          key: "state",
-          label: "Decision",
-          render(a, td) {
-            p(str(a.state), td);
-            actions(
-              td,
-              button("Approve exact request", async () => {
-                await client.request(
-                  "POST",
-                  `${ADMIN}/approvals/${encodeURIComponent(str(a.id))}/decision`,
-                  {
-                    expectedRevision: num(a.revision) || approvals.revision,
-                    digest: str(a.digest),
-                    decision: "approve",
-                  },
-                );
-                await refresh();
-              }),
-              button(
-                "Deny",
-                async () => {
+          {
+            key: "state",
+            label: "Decision",
+            render(a, td) {
+              p(str(a.state), td);
+              actions(
+                td,
+                button("Approve exact request", async () => {
                   await client.request(
                     "POST",
                     `${ADMIN}/approvals/${encodeURIComponent(str(a.id))}/decision`,
                     {
                       expectedRevision: num(a.revision) || approvals.revision,
                       digest: str(a.digest),
-                      decision: "deny",
+                      decision: "approve",
                     },
                   );
                   await refresh();
-                },
-                "danger",
-              ),
-            );
+                }),
+                button(
+                  "Deny",
+                  async () => {
+                    await client.request(
+                      "POST",
+                      `${ADMIN}/approvals/${encodeURIComponent(str(a.id))}/decision`,
+                      {
+                        expectedRevision: num(a.revision) || approvals.revision,
+                        digest: str(a.digest),
+                        decision: "deny",
+                      },
+                    );
+                    await refresh();
+                  },
+                  "danger",
+                ),
+              );
+            },
           },
-        },
-      ],
-      approvals.items,
-    );
-    heading("Grants");
-    table(
-      [
-        {
-          key: "agentId",
-          label: "Agent / Workspace",
-          render(g, td) {
-            p(`${str(g.agentId)} / ${str(g.workspaceId)}`, td);
-            p(str(g.clientId), td, "muted");
-          },
-        },
-        {
-          key: "state",
-          label: "Authorization",
-          render(g, td) {
-            p(`${str(g.state)} · expires ${str(g.expiresAt)}`, td);
-          },
-        },
-        {
-          key: "id",
-          label: "Actions",
-          render(g, td) {
-            td.append(
-              button(
-                "Revoke Grant",
-                async () => {
-                  await client.request(
-                    "POST",
-                    `${ADMIN}/grants/${encodeURIComponent(str(g.id))}/revoke`,
-                    { expectedRevision: num(g.revision) },
-                  );
-                  await refresh();
-                },
-                "danger",
-              ),
-            );
-          },
-        },
-      ],
-      list(grantResponse).items,
-    );
+        ],
+        pending,
+        approvalPanel,
+      );
+    };
+    const showApprovalsFailure = (error: unknown) => {
+      if (own !== generation || !opened || destroyed || tab !== "Agents") return;
+      if (!approvalPanel.textContent?.includes("Pending approvals")) {
+        approvalPanel.replaceChildren();
+        heading("Pending approvals", approvalPanel);
+        p("Could not retrieve approvals. Automatic retry is active.", approvalPanel);
+      }
+      announce(errorText(error), true);
+    };
+    try {
+      await loadApprovals();
+    } catch (error) {
+      showApprovalsFailure(error);
+    }
+    if (own !== generation || destroyed || !opened || tab !== "Agents") return;
+    approvalRefreshTimer = setInterval(() => {
+      void loadApprovals().catch(showApprovalsFailure);
+    }, 4000);
+    void (async () => {
+      try {
+        const grants = await loadList(`${ADMIN}/grants`);
+        if (own !== generation || destroyed || !opened || tab !== "Agents") return;
+        grantsPanel.replaceChildren();
+        heading("Grants", grantsPanel);
+        table(
+          [
+            {
+              key: "agentId",
+              label: "Agent / Workspace",
+              render(g, td) {
+                p(`${str(g.agentId)} / ${str(g.workspaceId)}`, td);
+                p(str(g.clientId), td, "muted");
+              },
+            },
+            {
+              key: "state",
+              label: "Authorization",
+              render(g, td) {
+                p(`${str(g.state)} · expires ${str(g.expiresAt)}`, td);
+              },
+            },
+            {
+              key: "id",
+              label: "Actions",
+              render(g, td) {
+                td.append(
+                  button(
+                    "Revoke Grant",
+                    async () => {
+                      await client.request(
+                        "POST",
+                        `${ADMIN}/grants/${encodeURIComponent(str(g.id))}/revoke`,
+                        { expectedRevision: num(g.revision) },
+                      );
+                      await refresh();
+                    },
+                    "danger",
+                  ),
+                );
+              },
+            },
+          ],
+          grants.items,
+          grantsPanel,
+        );
+      } catch {
+        if (own !== generation || destroyed || !opened || tab !== "Agents") return;
+        grantsPanel.replaceChildren();
+        heading("Grants", grantsPanel);
+        p("Grant history is temporarily unavailable; pending OAuth approvals remain actionable.", grantsPanel);
+      }
+    })();
   }
   function normalizeResource(value: Row): ResourceDraft {
     const files: Record<string, string> = Object.create(null) as Record<
@@ -2398,6 +2453,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   }
   function close() {
     if (!opened) return;
+    stopApprovalRefresh();
     opened = false;
     ++generation;
     try {
@@ -2511,6 +2567,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     refresh,
     setStatus,
     destroy() {
+      stopApprovalRefresh();
       destroyed = true;
       opened = false;
       ++generation;
