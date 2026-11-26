@@ -3,6 +3,8 @@ import { ExecutionError } from './compute.js';
 export interface PreviewDiagnostics { consoleOutput: string[]; perchanceErrors: unknown[]; syntaxErrors: unknown[] }
 export interface PreviewReceipt extends PreviewDiagnostics { appliedRevision?: string; previewGeneration?: string; result?: unknown; warnings?:unknown[]; diagnosticsAvailability?:Record<string,string> }
 export interface PreviewBridge {
+  /** Live, zero-source-mutation native protocol probe before first use. */
+  attest?(capability: 'evaluate' | 'refresh' | 'preamble'): Promise<boolean>;
   refresh(preambleJs?: string): Promise<PreviewReceipt>;
   evaluate(js: string, timeoutMs: number): Promise<PreviewReceipt>;
   diagnostics?(): Promise<PreviewReceipt>;
@@ -38,12 +40,21 @@ export class PreviewAdapter {
   private generation: string | undefined;
   private original: { frame: HTMLIFrameElement; style: string | null } | undefined;
   private viewport: { width: number; height: number } | undefined;
+  private readonly attested = new Set<'refresh' | 'evaluate' | 'preamble'>();
   constructor(private readonly options: PreviewOptions) {}
+  private async requireCapability(capability: 'refresh' | 'evaluate' | 'preamble'): Promise<void> {
+    if (this.options.verified?.[capability]) return;
+    if (!this.options.bridge?.attest ||
+        !(await this.options.bridge.attest(capability)))
+      throw new ExecutionError('UNSUPPORTED_INTERFACE',
+        `Native preview ${capability} capability could not be verified on the exact bound output frame.`);
+    this.attested.add(capability);
+  }
   availability(): Record<string, { available: boolean; reason?: string }> {
     const available = (enabled: boolean, reason: string) => enabled ? { available: true } : { available: false, reason };
     return {
-      page_eval: available(Boolean(this.options.verified?.evaluate && this.options.bridge), 'A structured native preview evaluation bridge has not passed Firefox verification.'),
-      page_refresh: available(Boolean(this.options.verified?.refresh && this.options.bridge), 'Applied unsaved-source revision cannot yet be attested by the native preview.'),
+      page_eval: available(Boolean(this.options.bridge && (this.options.verified?.evaluate || this.attested.has('evaluate'))), 'Native preview evaluation has not yet passed a live response-correlated capability probe.'),
+      page_refresh: available(Boolean(this.options.bridge && (this.options.verified?.refresh || this.attested.has('refresh'))), 'Native preview refresh has not yet passed a structural capability probe and source-receipt verification.'),
       preview_diagnostics: available(Boolean(this.options.bridge?.diagnostics), 'No verified native diagnostics collector is attached.'),
       set_viewport_size: available(Boolean(this.options.frame()), 'The native output frame is unavailable.'),
       capture_page_image: available(Boolean(this.options.verified?.capture && this.options.bridge?.capture), 'No real-pixel native capture or consented capture adapter is verified.'),
@@ -80,8 +91,9 @@ export class PreviewAdapter {
     return { pendingSrcChanges: this.appliedRevision !== undefined && current !== this.appliedRevision, pageFreshnessUnknown: this.appliedRevision === undefined, previewRevision: this.appliedRevision, previewGeneration: this.generation };
   }
   async refresh(preambleJs?: string): Promise<unknown> {
-    if (!this.options.verified?.refresh || !this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview refresh lacks a verified applied-source receipt.');
-    if (preambleJs !== undefined && !this.options.verified?.preamble) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Pre-startup preamble ordering has not been verified.');
+    if (!this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview bridge unavailable.');
+    await this.requireCapability('refresh');
+    if (preambleJs !== undefined) await this.requireCapability('preamble');
     const expected = await this.options.revision();
     const receipt = checkedReceipt(await deadline(this.options.bridge.refresh(preambleJs), 30_000));
     if (receipt.appliedRevision !== expected || await this.options.revision() !== expected) throw new ExecutionError('NATIVE_CONFLICT', 'Source changed during refresh or the native frame did not attest the intended source revision. Refresh again after inspecting manual edits.', 'PARTIAL');
@@ -90,7 +102,8 @@ export class PreviewAdapter {
     return { ...receipt, ...await this.freshness() };
   }
   async evaluate(js: string, options: { reload?: boolean; timeoutMs?: number; resultPath?: string } = {}): Promise<unknown> {
-    if (!this.options.verified?.evaluate || !this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview evaluation lacks a verified structured reply contract.');
+    if (!this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview bridge unavailable.');
+    await this.requireCapability('evaluate');
     const timeout = options.timeoutMs ?? 120_000;
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > 500_000 || new TextEncoder().encode(js).byteLength > 262_144) throw new ExecutionError('INVALID_INPUT', 'Preview code or timeout exceeds its limit.');
     if (options.reload) await this.refresh();
@@ -159,6 +172,24 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
   private previousGeneration: string | undefined;
   private knownSource: NativeSourceStamp | undefined;
   private busy=false;
+  async attest(capability: 'evaluate' | 'refresh' | 'preamble'): Promise<boolean> {
+    // For evaluation, prove the native evaluateJs request/reply contract against
+    // the exact preview origin and WindowProxy using an inert constant. A forged
+    // message cannot pass the existing source, origin and callerId checks.
+    this.target();
+    if (capability === 'evaluate')
+      return (await this.request('return 6 * 7;', 4000)) === 42;
+    // A hard reload will separately attest exact panel/src revision, startup
+    // generation and preamble execution before claiming success.
+    if (typeof this.page.hardReloadOutputIframe !== 'function') return false;
+    await this.source();
+    if (capability === 'preamble') {
+      const descriptor=Object.getOwnPropertyDescriptor(this.page,'__aiAgentPreambleJs');
+      return !this.page.__aiAgentPreambleJs &&
+        (!descriptor || ('value' in descriptor ? descriptor.writable !== false : Boolean(descriptor.set)));
+    }
+    return true;
+  }
   constructor(page: unknown, private readonly options: NativePreviewProtocolOptions) {
     if(!page||typeof page!=='object') throw new ExecutionError('UNSUPPORTED_INTERFACE','Native editor window is unavailable.');
     this.page=page as Record<string,unknown>;
