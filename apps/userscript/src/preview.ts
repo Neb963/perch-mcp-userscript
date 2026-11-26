@@ -75,7 +75,20 @@ export class PreviewAdapter {
       case 'preview_diagnostics': {
         if (!this.options.bridge?.diagnostics) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native diagnostics are not available.');
         const receipt = checkedReceipt(await deadline(this.options.bridge.diagnostics(), 10_000));
-        return { ...receipt, ...await this.freshness() };
+        return {
+          ...receipt, ...await this.freshness(),
+          capabilities: this.availability(),
+          diagnosticScope: {
+            nativeWarnings: true,
+            consoleCaptureRequiresInstrumentedRefresh:
+              receipt.diagnosticsAvailability?.console !== 'captured',
+            runtimeErrorsPartial:
+              receipt.diagnosticsAvailability?.runtimeErrors !== 'captured',
+            syntaxErrorsUnavailable:
+              receipt.diagnosticsAvailability?.syntax !== 'captured',
+            previewFreshnessRequiresAppliedReceipt: this.appliedRevision === undefined,
+          },
+        };
       }
       case 'capture_page_image': {
         if (!this.options.verified?.capture || !this.options.bridge?.capture) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Real preview pixels cannot be captured by this verified adapter. DOM reconstruction is not equivalent.');
