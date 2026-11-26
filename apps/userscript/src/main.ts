@@ -1,5 +1,6 @@
 import { APP_VERSION } from "../../../packages/contracts/src/index.js";
 import { NativeAdapter } from "./adapter.js";
+import { resolveNativePageRealm } from "./page-context.js";
 import { GMStore } from "./storage.js";
 import { GatewayTransport, gatewayOrigin } from "./transport.js";
 import { BrowserController } from "./controller.js";
@@ -50,7 +51,10 @@ async function start(): Promise<void> {
   } catch {
     initializationError = true;
   }
-  const page = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+  const page = resolveNativePageRealm(
+    window,
+    typeof unsafeWindow !== "undefined" ? unsafeWindow : undefined,
+  );
   const adapter = new NativeAdapter(page, {
     cloneInto:
       typeof cloneInto === "function" ? (v) => cloneInto(v, page) : undefined,

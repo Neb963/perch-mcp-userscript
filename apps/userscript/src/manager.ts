@@ -732,6 +732,13 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           label: "Actions",
           render(w, td) {
             const bind = async (replace: boolean) => {
+              // Do not change the authoritative remote Binding until the
+              // current editor has passed a read-only native capability check.
+              const probed = client.probe ? record(await client.probe()) : null;
+              if (probed && (probed.ready !== true || !probed.identity))
+                throw new Error(
+                  "The native editor is not ready for attachment. Open Settings → Read-only editor probe to inspect the missing capability.",
+                );
               const identity = await client.currentIdentity();
               const configured = client.configuration();
               const binding = {
@@ -2104,23 +2111,39 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     actions(
       body,
       button("Read-only editor probe", async () => {
-        const identity = await client.currentIdentity();
+        // The probe must remain available when native identity is missing.
         const probe = client.probe ? await client.probe() : undefined;
+        let identity:
+          | Awaited<ReturnType<ManagerClient["currentIdentity"]>>
+          | undefined;
+        let identityError: string | undefined;
+        try {
+          identity = await client.currentIdentity();
+        } catch (error) {
+          identityError = error instanceof Error ? error.message : String(error);
+        }
         body.append(
           el(
             "pre",
             json({
-              identity: {
-                generatorId: identity.generatorId,
-                slug: identity.slug,
-                publicId: identity.publicId,
-                draftId: identity.draftId,
-              },
+              identity: identity
+                ? {
+                    generatorId: identity.generatorId,
+                    slug: identity.slug,
+                    publicId: identity.publicId,
+                    draftId: identity.draftId,
+                  }
+                : null,
+              identityError,
               probe,
             }),
           ),
         );
-        announce("Native identity read without source mutation.");
+        announce(
+          identityError
+            ? "Native identity unavailable; read-only capability report follows."
+            : "Native identity read without source mutation.",
+        );
       }),
       button("Export settings", async () => {
         client.download(
