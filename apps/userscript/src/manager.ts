@@ -969,6 +969,14 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       body,
       "muted",
     );
+    if (status.connection !== "connected")
+      p(
+        "Editor connection: " + status.connection +
+          ". The gateway can approve OAuth while this tab is offline, but MCP tools will not run. " +
+          "Open Workspaces and explicitly reconnect the matching native editor after checking for pending operations.",
+        body,
+        "muted",
+      );
     const row = el("div", undefined, "row"),
       name = field("Agent name"),
       target = select(
