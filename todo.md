@@ -146,3 +146,20 @@ Baseline: Operator-provided Image Studio defect report MCP-01–MCP-14 and redac
 | MCP-14 warning channels | Native warnings and preview console are explicitly separate. Empty warnings/syntax lists do not attest no errors. |
 
 Verification: full TypeScript + deterministic tests + build + userscript/TXT byte identity + Worker dry-run required on the final versioned head; no deployment needed. Real Firefox/Violentmonkey T3, disposable authorized Save and actual-pixel capture remain explicit release gates. Never claim T1/T2 mocks as T3 evidence. Preserve last native source and local Workspace cache, and test on a separate disposable generator before enabling provider effects.
+
+## Epoch-5 reconnect incident / v0.1.8 remediation — 2026-11-26
+
+Source evidence: operator's `Perch-MCP-Epoch-5-Regression-Report-2026-11-26.md`, `Perch-MCP-Save-Gate-Appendix.md` and `perch-mcp-diagnostics5.json`. Gateway live v0.1.4 returns HTTP 409 `EFFECT_UNKNOWN` on `/api/v1/tab/claim`, with healthy OAuth/pairing and Registry. The blocker is terminal `PARTIAL` operation `b5d2a44c-4a28-43a0-8edc-de3a178cdc84`, tool `set_viewport_size`, epoch 5. The original operation result expired but its terminal phase and Activity record persist. Browser lease is absent. Read-only status operations admitted after the hold expired without dispatch. This is not a bootstrap/OAuth failure.
+
+Remediation in `fix/viewport-hold-reconnect-v018`:
+- A terminal `PARTIAL/UNKNOWN` **CSS-only viewport operation** cannot retain the new document's lease or block source edits; a still-`RUNNING/DISPATCHED` viewport operation remains fenced. Other uncertain operations (including page_eval, Save, src writes and uploads) remain held.
+- Registry no longer reserves a generator writer for `set_viewport_size`. A legacy v0.1.4 reservation is reaped only from an exact matching authenticated terminal notice. The old outcome and Activity record are retained, never rewritten to SUCCEEDED.
+- Browser controller remains connected but degraded on future viewport-only uncertainty. It no longer stops its poll loop, and clears the degraded state after verified reset.
+- Viewport API accepts `reset:true` without ignored dimensions; bounded post-layout measurement compares actual iframe dimensions and reports specific numeric mismatches. No CSS-only success proof.
+- `fetch_generator` now distinguishes argument validation, public API metadata/assets and local cache-commit failures without raw private content.
+- Activity distinguishes view-only uncertainty from source/provider uncertainty; automatic reconnect error on old gateway points to exact operation resolution instead of re-pair.
+- Safety invariant: no auto-acknowledgement of an arbitrary unknown effect; no provider policy or privileged Save activation; no production mutation in tests.
+
+**Rollout ordering:** v0.1.8 userscript includes a Worker change. Deploy the packaged Worker **v0.1.5** to the existing Cloudflare deployment first, preserving Durable Object bindings, KV and secrets. Then replace the existing Violentmonkey script with the tested v0.1.8 `.user.txt`. If Worker remains v0.1.4, auto-reconnect still rejects the old viewport PARTIAL: use Activity → Resolve uncertain operation after inspecting the source/preview, then Workspaces → Reconnect. Do not re-pair, detach or rebind.
+
+Acceptance T1/T2: strict typecheck; deterministic effects/legacy Registry unit tests; Miniflare epoch-5 partial viewport→release→claim→read-only status→write end-to-end; negative source/Save/provider effect holds; build/archive checksum and Worker dry-run. T3 real Firefox/Violentmonkey and T4 deployed Cloudflare+ChatGPT retest remain necessary. Fetching public plugin slugs and native geometry restoring still require fresh live positive tests. Save gate, real-pixel capture, supported media/provider-state/lifecycle tools remain independently unaccepted; do not claim full product parity.
