@@ -188,6 +188,7 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
   private previousGeneration: string | undefined;
   private knownSource: NativeSourceStamp | undefined;
   private busy=false;
+  private evaluateAttested=false;
   status(): Record<string, boolean> {
     const frame=this.options.frame();
     const id=this.page.generatorPublicId;
@@ -201,7 +202,7 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
     return {
       framePresent:Boolean(frame?.contentWindow),
       exactFrameOrigin:originMatched,
-      nativeEvaluateProtocolAttested:false, // Per-call proof is represented by PreviewAdapter.availability()
+      nativeEvaluateProtocolAttested:this.evaluateAttested,
       nativeManifestAvailable:typeof src?.manifestForIframe==='function',
       nativePendingStateAvailable:typeof src?.hasPending==='function',
       nativeHardReloadAvailable:typeof this.page.hardReloadOutputIframe==='function',
@@ -213,8 +214,11 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
     // the exact preview origin and WindowProxy using an inert constant. A forged
     // message cannot pass the existing source, origin and callerId checks.
     this.target();
-    if (capability === 'evaluate')
-      return (await this.request('return 6 * 7;', 4000)) === 42;
+    if (capability === 'evaluate') {
+      const ok=(await this.request('return 6 * 7;', 4000)) === 42;
+      this.evaluateAttested=ok;
+      return ok;
+    }
     // A hard reload will separately attest exact panel/src revision, startup
     // generation and preamble execution before claiming success.
     if (typeof this.page.hardReloadOutputIframe !== 'function') return false;
