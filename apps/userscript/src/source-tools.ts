@@ -59,8 +59,38 @@ export class SourceTools {
       const operationId = context.save.operationId; if (!/^[A-Za-z0-9_-]{1,128}$/.test(operationId)) throw new BrowserError('INVALID_INPUT','Invalid Save Operation ID.');
       const key = `${this.vfs.prefix}:journal:${operationId}`; if (await this.vfs.store.get(key)) throw new BrowserError('EFFECT_UNKNOWN','Retained Save intent cannot be replayed; reconcile its Operation ID.');
       const checkpoint = await this.vfs.checkpoint('Before native Save', true); const journal = {id:operationId,state:'INTENT',paths:Object.keys(source.files).filter(path=>!path.startsWith('scratch/')&&!path.startsWith('imports/')),baseRevision:source.revision,checkpointId:checkpoint.id,createdAt:Date.now()}; await this.vfs.store.set(key,journal);
-      try { const result = await this.adapter.save(source.nativeRevision, context.save); journal.state=result.status; await this.vfs.store.set(key,journal); return {...result,revision:(await this.vfs.snapshot()).revision}; }
-      catch(error) { const known = error instanceof BrowserError && ['SCOPE_DENIED','UNSUPPORTED_INTERFACE','STALE_REVISION','BINDING_MISMATCH','TAB_BUSY','NATIVE_CONFLICT','CHALLENGE_REQUIRED'].includes(error.code); journal.state=known?'REJECTED':'UNKNOWN'; await this.vfs.store.set(key,journal); throw error; }
+      let dispatched = false;
+      try {
+        const result = await this.adapter.save(source.nativeRevision, {
+          ...context.save,
+          onDispatch: async () => {
+            // Persist BEFORE native execution. An interrupted or rejected
+            // acknowledgement after this point is never classified NONE.
+            await this.vfs.store.set(key, {...journal,state:'DISPATCHED'});
+            dispatched = true;
+          },
+        });
+        journal.state=result.status;
+        await this.vfs.store.set(key,journal);
+        // A concurrent manual edit may follow a verified native Save. Report
+        // both revisions instead of labelling the newer draft as saved.
+        let current: Awaited<ReturnType<VirtualFileSystem['snapshot']>> | undefined;
+        try { current=await this.vfs.snapshot(); } catch { /* Save receipt remains valid. */ }
+        return {...result,
+          revision:current?.revision??source.revision,
+          workspaceRevisionKnown:current!==undefined,
+          savedRevision:result.status==='SUCCEEDED'?result.revision:null,
+          draftChangedSinceSave:current ? current.nativeRevision!==result.revision : null};
+      } catch(error) {
+        journal.state=dispatched?'UNKNOWN':'REJECTED';
+        await this.vfs.store.set(key,journal);
+        if (dispatched) {
+          const original=error instanceof BrowserError ? error : new BrowserError('EFFECT_UNKNOWN',
+            'Native Save was dispatched but its outcome is unverified.');
+          throw Object.assign(original,{effectState:'UNKNOWN'});
+        }
+        throw error;
+      }
     }
     const expected = typeof args.expectedRevision === 'string' ? args.expectedRevision : undefined;
     if (name === 'checkpoint_list') return {checkpoints:await this.vfs.checkpointList()};
@@ -73,11 +103,11 @@ export class SourceTools {
         dirty:snapshot.dirty,saveState:snapshot.saveState,
         capabilities:await this.adapter.probe(),unresolved:await this.vfs.unresolved() };
       return name === 'generator_info'
-        ? { ...base, ...this.adapter.generatorMetadata(),
+        ? { ...base, ...await this.adapter.generatorMetadata(),
             metadataAvailability: {
-              listing: 'Only an explicit native listing value is reported; otherwise unknown.',
-              ownership: 'Only an explicit native ownership boolean is reported; otherwise unknown.',
-              editAccess: 'Only an explicit native Save-access predicate is reported; otherwise unknown.',
+              listing: 'Only nonconflicting native listing/isListed/isPrivate fields are reported; otherwise unknown.',
+              ownership: 'Only a bounded native ownership boolean or resolved boolean predicate is reported; otherwise unknown.',
+              editAccess: 'Only a bounded native Save-access boolean or resolved boolean predicate is reported; otherwise unknown.',
             } }
         : base;
     }

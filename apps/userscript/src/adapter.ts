@@ -1,26 +1,47 @@
-import { BrowserError, canonicalPath, equalBytes, equalIdentity, snapshotRevision, utf8, type CapabilityReport, type FileWrite, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
+import { BrowserError, canonicalPath, copyArrayBuffer, equalBytes, equalIdentity, snapshotRevision, utf8, type CapabilityReport, type FileWrite, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
 interface TextEditor { state?: {readOnly?:unknown}; getValue(): unknown; setValue(value: string): unknown; isClean?(): unknown }
 interface SrcState { ready(): unknown; idle?(): unknown; list(): unknown; readFile(path: string): unknown; writeFile(path: string, bytes: unknown): unknown; deleteFile(path: string): unknown; getDraftId(): unknown; isDirty?(): unknown; hasPending?(): unknown }
 interface NativePage { generatorPublicId?:unknown; app?: { data?: { generator?: { id?: unknown; name?: unknown; publicId?: unknown } }; saveGenerator?: () => unknown; userOwnsThisGenerator?: unknown; userCanSaveThisGenerator?: unknown }; modelTextEditor?: TextEditor; outputTemplateEditor?: TextEditor; srcState?: SrcState; currentInterfaceMode?: unknown; __editorReady?: unknown; __draftChoiceSettled?: unknown; perchanceSaveState?: unknown; __generatorIdentityTransition?: unknown; __draftHandoffClosed?:unknown; editorCollabInitialSyncIsPending?:unknown; __collabRoomFailed?:unknown; yjsProvider?:unknown; aiAgentActivityState?:()=>unknown; __aiGeneratorGuard?:{blocked?:()=>unknown}; editor?: { handleReloadButtonClick?: () => unknown }; editorUndoManagers?: Record<string, { undo?: () => unknown; redo?: () => unknown }> }
 export interface AdapterOptions { cloneInto?: (value: unknown) => unknown; externalWritesVerified?: boolean; maxSnapshotBytes?: number }
-export interface SaveContext { operationId: string; permission: boolean; previousSavedSnapshot: NativeSnapshot; readSavedSnapshot(): Promise<NativeSnapshot>; receipt?: { status: string } }
+export interface SaveContext {
+  operationId: string;
+  permission: boolean;
+  previousSavedSnapshot: NativeSnapshot;
+  readSavedSnapshot(): Promise<NativeSnapshot>;
+  /** Durable dispatch fence, persisted before invoking native Save. */
+  onDispatch?(): Promise<void>;
+  receipt?: { status: string };
+}
 function identityString(value: unknown, field: string): string { if (typeof value === 'string' && value.length <= 512) return value; if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value); throw new BrowserError('UNSUPPORTED_INTERFACE', `Native ${field} is not a losslessly serializable identifier.`); }
-/** A recognized native field may be a boolean or a zero-argument method.
- * Never coerce truthy values, promises, or missing predicates into authority. */
-function nativeBoolean(owner: object | undefined, key: string): boolean | null {
+/** Read only an explicit native ownership/access predicate. Async predicate
+ * results must settle to an actual boolean within a bounded deadline. */
+async function nativeBoolean(owner: object | undefined, key: string): Promise<boolean | null> {
   if (!owner) return null;
   try {
     const value: unknown = Reflect.get(owner, key);
     const observed: unknown = typeof value === 'function' ? Reflect.apply(value, owner, []) : value;
-    return typeof observed === 'boolean' ? observed : null;
+    if (typeof observed === 'boolean') return observed;
+    if (typeof value !== 'function' || !observed ||
+        typeof (observed as {then?:unknown}).then !== 'function') return null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const bounded = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 1500); });
+      return await Promise.race([Promise.resolve(observed).then(result =>
+        typeof result === 'boolean' ? result : null, () => null), bounded]);
+    } finally { clearTimeout(timer); }
   } catch { return null; }
 }
 function boundedString(value: unknown): string { if (typeof value !== 'string' || value.length > 4 * 1024 * 1024) throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native editor returned invalid text.'); return value; }
 async function nativeBytes(value: unknown): Promise<Uint8Array> {
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
-  if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
+  const exact = copyArrayBuffer(value);
+  if (exact !== null) return exact;
   if (typeof value === 'string') return utf8.encode(value);
-  if (value && typeof value === 'object' && 'arrayBuffer' in value && typeof value.arrayBuffer === 'function') { const buffer: unknown = await value.arrayBuffer(); if (buffer instanceof ArrayBuffer) return new Uint8Array(buffer); }
+  if (value && typeof value === 'object' && 'arrayBuffer' in value && typeof value.arrayBuffer === 'function') {
+    const buffer: unknown = await value.arrayBuffer();
+    const copied = copyArrayBuffer(buffer);
+    if (copied !== null) return copied;
+  }
   throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native file result is not exact bytes.');
 }
 /** Fixed native method adapter. It neither evaluates code nor exports callbacks to the page. */
@@ -42,22 +63,29 @@ export class NativeAdapter {
    * CodeMirror buffer is not proof of generator ownership or Save permission.
    * Unknown listing/ownership must remain unknown, never default to false.
    */
-  generatorMetadata(): {
+  async generatorMetadata(): Promise<{
     ownership: { known: boolean; owned: boolean | null };
     editAccess: { known: boolean; allowed: boolean | null };
     listing: { known: boolean; value: 'listed' | 'unlisted' | null };
     publicId: { known: boolean; value: string | null; provenance: string };
     savedBaseRevision: { known: false; value: null; reason: string };
-  } {
+  }> {
     const app = this.page.app;
-    const owned = nativeBoolean(app,'userOwnsThisGenerator');
-    const allowed = nativeBoolean(app,'userCanSaveThisGenerator');
+    const [owned,allowed] = await Promise.all([
+      nativeBoolean(app,'userOwnsThisGenerator'),
+      nativeBoolean(app,'userCanSaveThisGenerator'),
+    ]);
     const generator = app?.data?.generator as Record<string, unknown> | undefined;
-    const explicitListing = generator?.listing;
-    const listed = explicitListing === 'listed' || explicitListing === 'unlisted'
-      ? explicitListing
-      : typeof generator?.isListed === 'boolean'
-        ? (generator.isListed ? 'listed' : 'unlisted') : null;
+    const listingCandidates: ('listed'|'unlisted')[] = [];
+    if (generator?.listing === 'listed' || generator?.listing === 'unlisted')
+      listingCandidates.push(generator.listing);
+    if (typeof generator?.isListed === 'boolean')
+      listingCandidates.push(generator.isListed ? 'listed' : 'unlisted');
+    if (typeof generator?.isPrivate === 'boolean')
+      listingCandidates.push(generator.isPrivate ? 'unlisted' : 'listed');
+    // Conflicting native fields mean unknown rather than silently preferring one.
+    const listed = listingCandidates.length && listingCandidates.every(v => v === listingCandidates[0])
+      ? listingCandidates[0]! : null;
     // Prefer the saved Generator object's publicId; fall back to the native
     // editor's generatorPublicId only when both representations do not conflict.
     const fromGenerator=generator?.publicId;
@@ -170,13 +198,20 @@ export class NativeAdapter {
     this.assertMutationReady();
     const intended = await this.snapshot(); if (intended.revision !== intendedRevision) throw new BrowserError('STALE_REVISION', 'Intended revision no longer matches current draft.');
     if (!equalIdentity(context.previousSavedSnapshot.identity, intended.identity)) throw new BrowserError('BINDING_MISMATCH', 'Saved base identity differs.');
-    if (nativeBoolean(this.page.app,'userOwnsThisGenerator') !== true && nativeBoolean(this.page.app,'userCanSaveThisGenerator') !== true) throw new BrowserError('SCOPE_DENIED', 'Native Save authorization is unavailable.');
+    const [owned, allowed] = await Promise.all([
+      nativeBoolean(this.page.app,'userOwnsThisGenerator'),
+      nativeBoolean(this.page.app,'userCanSaveThisGenerator'),
+    ]);
+    if (owned !== true && allowed !== true) throw new BrowserError('SCOPE_DENIED', 'Native Save authorization is unavailable.');
     if (this.page.srcState?.hasPending?.() === true) throw new BrowserError('TAB_BUSY', 'Pending native viewer buffers require operator settlement.');
     const currentSaved = await context.readSavedSnapshot(); if (currentSaved.revision !== context.previousSavedSnapshot.revision) throw new BrowserError('NATIVE_CONFLICT', 'Provider source changed since saved base.');
     if ((await this.snapshot()).revision !== intendedRevision) throw new BrowserError('STALE_REVISION', 'Draft changed during Save preflight.');
     if (currentSaved.revision === intendedRevision) return { status: 'SUCCEEDED', revision: intendedRevision, committed: [] };
     if (typeof this.page.app?.saveGenerator !== 'function') throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native Save method unavailable.');
     this.assertMutationReady();
+    // This callback durably records that an external effect is about to begin.
+    // A failure to persist the fence MUST prevent the native dispatch.
+    await context.onDispatch?.();
     let receipt: unknown;
     try { receipt = await this.page.app.saveGenerator(); } catch { return this.unknownSave(intendedRevision); }
     const status = context.receipt?.status ?? (receipt && typeof receipt === 'object' && 'status' in receipt ? receipt.status : undefined);
@@ -185,16 +220,25 @@ export class NativeAdapter {
     // The public bytes, not the shape of a private native Save return value,
     // are the authority. Some native versions return void even after success.
     // Never claim success from status='saved' alone.
-    try {
-      const saved=await context.readSavedSnapshot();
-      if (saved.revision===intendedRevision &&
-          equalIdentity(saved.identity,intended.identity) &&
-          Object.keys(saved.files).length===Object.keys(intended.files).length &&
-          Object.entries(intended.files).every(([path,bytes]) =>
-            saved.files[path] && equalBytes(bytes,saved.files[path]!)))
-        return {status:'SUCCEEDED',revision:intendedRevision,
-          committed:Object.keys(intended.files)};
-    } catch { /* Dispatched effect remains unknown; never replay Save. */ }
+    // CDN/public stored-source readback may lag a successful native Save.
+    // Retry only idempotent reads for a bounded interval; NEVER replay Save.
+    const settleDeadline = Date.now() + 7000;
+    for (let attempt=0; attempt<3; attempt++) {
+      if (attempt) {
+        if (Date.now() >= settleDeadline) break;
+        await new Promise<void>(resolve => setTimeout(resolve, 200*attempt));
+      }
+      try {
+        const saved=await context.readSavedSnapshot();
+        if (saved.revision===intendedRevision &&
+            equalIdentity(saved.identity,intended.identity) &&
+            Object.keys(saved.files).length===Object.keys(intended.files).length &&
+            Object.entries(intended.files).every(([path,bytes]) =>
+              saved.files[path] && equalBytes(bytes,saved.files[path]!)))
+          return {status:'SUCCEEDED',revision:intendedRevision,
+            committed:Object.keys(intended.files)};
+      } catch { /* Read-only lag/unavailability: retry within the same bound. */ }
+    }
     return this.unknownSave(intendedRevision);
   }
   private unknownSave(revision: string): MutationResult { return { status: 'UNKNOWN', revision, committed: [], error: { code: 'EFFECT_UNKNOWN', message: 'Native Save outcome lacks an independent complete-source receipt.', recovery: 'Read-only reconciliation only; do not repeat Save.' } }; }

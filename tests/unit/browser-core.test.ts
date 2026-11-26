@@ -5,7 +5,7 @@ import { NativeAdapter } from '../../apps/userscript/src/adapter.js';
 import { VirtualFileSystem } from '../../apps/userscript/src/vfs.js';
 import { SourceTools, parsePatch } from '../../apps/userscript/src/source-tools.js';
 import { ChunkStore, MemoryStore } from '../../apps/userscript/src/storage.js';
-import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, decodeText, equalBytes, isUint8Array, utf8, type NativeSnapshot } from '../../apps/userscript/src/native-types.js';
+import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, copyArrayBuffer, decodeText, equalBytes, isUint8Array, utf8, type NativeSnapshot } from '../../apps/userscript/src/native-types.js';
 function fixture(){let pjs='animal\n  otter\n';let html='<h1>Fixture</h1>\n';let draft='';const files=new Map<string,Uint8Array>([['empty.bin',new Uint8Array()],['bytes.bin',new Uint8Array([0,255,1,128,10])]]);const page={app:{data:{generator:{id:123,name:'fixture',publicId:'public-fixture'}},userOwnsThisGenerator:true,saveGenerator:async()=>({status:'saved'})},modelTextEditor:{state:{readOnly:false},getValue:()=>pjs,setValue:(v:string)=>{pjs=v;},isClean:()=>false},outputTemplateEditor:{state:{readOnly:false},getValue:()=>html,setValue:(v:string)=>{html=v;},isClean:()=>false},srcState:{ready:async()=>{},idle:async()=>{},getDraftId:()=>draft,list:()=>Object.fromEntries([...files.entries()].map(([path,bytes])=>[path,{size:bytes.length}])),readFile:(path:string)=>files.get(path)!,writeFile:(path:string,bytes:Uint8Array)=>{files.set(path,bytes.slice());},deleteFile:(path:string)=>{files.delete(path);},isDirty:()=>true,hasPending:()=>false},aiAgentActivityState:()=>({active:false,unknown:false,reason:'',queueHeldOnly:false}),__aiGeneratorGuard:{blocked:()=>false},__editorReady:true,__draftChoiceSettled:true,currentInterfaceMode:'edit',perchanceSaveState:'unsaved'};const adapter=new NativeAdapter(page);const store=new MemoryStore();const vfs=new VirtualFileSystem(adapter,store,'fixture');return{page,files,adapter,vfs,store,tools:new SourceTools(vfs,adapter),manualPjs:(v:string)=>{pjs=v;},switchDraft:(v:string)=>{draft=v;}};}
 const rejectsCode=(code:string)=>(error:unknown)=>error instanceof BrowserError&&error.code===code;
 test('read-only probe projects identifiers without native store credentials',async()=>{const f=fixture();(f.page.app as unknown as {store:unknown}).store={sessionToken:'SENSITIVE'};const report=await f.adapter.probe();assert.equal(report.ready,true);assert.equal(report.identity?.generatorId,'123');assert.equal(report.identity?.draftId,'');assert.ok(!JSON.stringify(report).includes('SENSITIVE'));});
@@ -209,15 +209,82 @@ test('large existing scratch and multi-megabyte public import coexist with exact
   assert.equal((await f.vfs.unresolved()).length,0);
 });
 
-test('native metadata recognizes exact boolean fields and receiver-bound methods without coercion',()=>{
- const f=fixture();
- const app=f.page.app as unknown as Record<string,unknown>;
- app.userOwnsThisGenerator=function(this:Record<string,unknown>){return this===app};
- app.userCanSaveThisGenerator=true;
- assert.deepEqual(f.adapter.generatorMetadata().ownership,{known:true,owned:true});
- assert.deepEqual(f.adapter.generatorMetadata().editAccess,{known:true,allowed:true});
- app.userOwnsThisGenerator=()=>Promise.resolve(true);
- app.userCanSaveThisGenerator='true';
- assert.deepEqual(f.adapter.generatorMetadata().ownership,{known:false,owned:null});
- assert.deepEqual(f.adapter.generatorMetadata().editAccess,{known:false,allowed:null});
+test('native metadata handles bounded async predicates, listing conflicts and non-boolean results',async()=>{
+ const f=fixture();const app=f.page.app as unknown as Record<string,unknown>;
+ const gen=f.page.app.data.generator as unknown as Record<string,unknown>;
+ app.userOwnsThisGenerator=function(this:Record<string,unknown>){return Promise.resolve(this===app)};
+ app.userCanSaveThisGenerator=true;gen.isPrivate=true;
+ assert.deepEqual((await f.adapter.generatorMetadata()).ownership,{known:true,owned:true});
+ assert.deepEqual((await f.adapter.generatorMetadata()).editAccess,{known:true,allowed:true});
+ assert.deepEqual((await f.adapter.generatorMetadata()).listing,{known:true,value:'unlisted'});
+ gen.isListed=true;
+ assert.deepEqual((await f.adapter.generatorMetadata()).listing,{known:false,value:null});
+ app.userOwnsThisGenerator=()=>Promise.resolve('true');app.userCanSaveThisGenerator='true';
+ assert.deepEqual((await f.adapter.generatorMetadata()).ownership,{known:false,owned:null});
+ assert.deepEqual((await f.adapter.generatorMetadata()).editAccess,{known:false,allowed:null});
+});
+test('foreign ArrayBuffer copies exact native bytes and rejects tagged impostors',async()=>{
+ const foreign=runInNewContext('new Uint8Array([0,255,17]).buffer');
+ assert.deepEqual([...copyArrayBuffer(foreign)!],[0,255,17]);
+ assert.equal(copyArrayBuffer({[Symbol.toStringTag]:'ArrayBuffer',byteLength:3}),null);
+ const f=fixture();f.files.set('foreign.bin',foreign);
+ const snapshot=await f.adapter.snapshot();
+ assert.deepEqual([...snapshot.files['src/foreign.bin']!],[0,255,17]);
+});
+test('Save retries only independent readback and dispatches exactly once',async()=>{
+ const f=fixture();const adapter=new NativeAdapter(f.page,{externalWritesVerified:true});
+ const before=await adapter.snapshot();f.manualPjs('settlement target');
+ const after=await adapter.snapshot();let calls=0,reads=0,dispatches=0;
+ f.page.app.saveGenerator=async()=>{calls++;return {status:'saved'}};
+ const result=await adapter.save(after.revision,{
+  operationId:'settle',permission:true,previousSavedSnapshot:before,
+  readSavedSnapshot:async()=>++reads<3?before:after,
+  onDispatch:async()=>{dispatches++;}
+ });
+ assert.equal(result.status,'SUCCEEDED');assert.equal(calls,1);
+ assert.equal(dispatches,1);assert.equal(reads,3);
+});
+test('durable native Save dispatch survives loss and blocks automatic replay',async()=>{
+ const f=fixture();const adapter=new NativeAdapter(f.page,{externalWritesVerified:true});
+ const tools=new SourceTools(f.vfs,adapter);const base=await adapter.snapshot();
+ f.manualPjs('changed before save');const snapshot=await f.vfs.snapshot();
+ let calls=0;f.page.app.saveGenerator=async()=>{calls++;return {status:'stale'}};
+ const operationId='save-dispatched';
+ const options={save:{operationId,permission:true,previousSavedSnapshot:base,
+   readSavedSnapshot:async()=>base}};
+ await assert.rejects(tools.call('save_generator',{intendedRevision:snapshot.revision},options),
+  (error:unknown)=>error instanceof BrowserError&&error.code==='NATIVE_CONFLICT'&&
+   (error as BrowserError&{effectState:string}).effectState==='UNKNOWN');
+ assert.equal(calls,1);
+ const key=f.vfs.prefix+':journal:'+operationId;
+ assert.equal((await f.store.get<{state:string}>(key))?.state,'UNKNOWN');
+ await assert.rejects(tools.call('save_generator',{intendedRevision:snapshot.revision},options),
+  rejectsCode('EFFECT_UNKNOWN'));
+ await f.store.set(f.vfs.prefix+':journal:simulated-crash',{
+  id:'simulated-crash',state:'DISPATCHED',paths:['main.pjs'],
+  baseRevision:snapshot.revision,createdAt:Date.now()});
+ assert.ok((await f.vfs.unresolved()).some(j=>j.id==='simulated-crash'));
+ await assert.rejects(f.vfs.writeBatch([{path:'main.pjs',bytes:utf8.encode('unsafe replay')}]),
+  rejectsCode('EFFECT_UNKNOWN'));
+ assert.equal(calls,1);
+});
+test('verified native Save and concurrent manual edits preserve two revisions',async()=>{
+ const f=fixture();const adapter=new NativeAdapter(f.page,{externalWritesVerified:true});
+ const tools=new SourceTools(f.vfs,adapter);const before=await adapter.snapshot();
+ f.manualPjs('intended provider Save');const intended=await adapter.snapshot();
+ const ws=await f.vfs.snapshot();let saved=before;let sawDispatch=false;
+ f.page.app.saveGenerator=async()=>{
+  const row=await f.store.get<{state:string}>(f.vfs.prefix+':journal:save-concurrent');
+  sawDispatch=row?.state==='DISPATCHED';
+  saved=intended;f.manualPjs('later manual edit');return{status:'saved'};
+ };
+ const value=await tools.call('save_generator',{intendedRevision:ws.revision},
+  {save:{operationId:'save-concurrent',permission:true,previousSavedSnapshot:before,
+   readSavedSnapshot:async()=>saved}}) as Record<string,unknown>;
+ assert.equal(sawDispatch,true);assert.equal(value.status,'SUCCEEDED');
+ assert.equal(value.savedRevision,intended.revision);
+ assert.equal(value.draftChangedSinceSave,true);
+ assert.equal(value.workspaceRevisionKnown,true);
+ assert.notEqual(value.revision,ws.revision);
+ assert.notEqual(value.revision,value.savedRevision);
 });

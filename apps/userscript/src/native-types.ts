@@ -22,6 +22,17 @@ const typedArrayTag = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint
 export function isUint8Array(value: unknown): value is Uint8Array {
   return ArrayBuffer.isView(value) && typedArrayTag?.call(value) === 'Uint8Array';
 }
+/** Cross-realm ArrayBuffer internal brand; rejects Symbol.toStringTag spoofing. */
+const arrayBufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength')?.get;
+export function copyArrayBuffer(value: unknown): Uint8Array | null {
+  if (!value || typeof value !== 'object') return null;
+  try {
+    const length: unknown = arrayBufferLength?.call(value);
+    if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0) return null;
+    // The native Uint8Array constructor accepts foreign-realm ArrayBuffers.
+    return new Uint8Array(value as ArrayBuffer).slice();
+  } catch { return null; }
+}
 export function bytesToBase64(bytes: Uint8Array): string {
   // Divisible by three: independently encoded blocks concatenate without
   // intermediate padding or one enormous binary string.

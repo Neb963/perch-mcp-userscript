@@ -4,7 +4,7 @@ import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, digest, equa
 export interface WorkspaceSnapshot extends NativeSnapshot { nativeRevision: string; generation: number }
 interface StoredSource { version: 1; identity: NativeIdentity; files: Record<string, string>; revision: string; createdAt: number; label: string; pinned: boolean }
 interface LocalState { version: 1; files: Record<string, string>; lastHash: string; generation: number }
-interface Journal { id: string; state: 'INTENT' | 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN' | 'REJECTED'; paths: string[]; baseRevision: string; checkpointId?: string; kind?: 'SOURCE'|'IMPORT'; createdAt: number; resolvedByOperator?: boolean; inspectedRevision?: string; resolvedAt?: number }
+interface Journal { id: string; state: 'INTENT' | 'DISPATCHED' | 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN' | 'REJECTED'; paths: string[]; baseRevision: string; checkpointId?: string; kind?: 'SOURCE'|'IMPORT'; createdAt: number; resolvedByOperator?: boolean; inspectedRevision?: string; resolvedAt?: number }
 /** Serialized per active lease. Durable generation pointer stores scratch without page-origin storage. */
 export class VirtualFileSystem {
   private chunks: ChunkStore; private tail: Promise<unknown> = Promise.resolve(); private observationTail: Promise<unknown> = Promise.resolve(); readonly prefix: string;
@@ -218,7 +218,7 @@ export class VirtualFileSystem {
       }catch{journal.state='UNKNOWN';try{await this.store.set(journalKey,journal);}catch{/* The durable INTENT remains held. */}throw new BrowserError('EFFECT_UNKNOWN','Imported cache may be published; its complete readback or terminal record is unavailable.','Inspect the retained import intent and current cache; do not replay publication.');}
     });
   }
-  async unresolved(): Promise<Journal[]> { const result: Journal[] = []; for (const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:journal:`))) { const row = await this.store.get<Journal>(key); if (row && ['INTENT', 'PARTIAL', 'UNKNOWN'].includes(row.state) && row.resolvedByOperator !== true) result.push(row); } return result; }
+  async unresolved(): Promise<Journal[]> { const result: Journal[] = []; for (const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:journal:`))) { const row = await this.store.get<Journal>(key); if (row && ['INTENT', 'DISPATCHED', 'PARTIAL', 'UNKNOWN'].includes(row.state) && row.resolvedByOperator !== true) result.push(row); } return result; }
   /** Operator-only acknowledgement: never exposed as an agent tool or automatic retry. */
   async acknowledgeReconciliation(id: string, inspectedRevision: string): Promise<void> { if ((await this.snapshot()).revision !== inspectedRevision) throw new BrowserError('STALE_REVISION', 'Source changed during reconciliation.'); const key = `${this.prefix}:journal:${id}`; const row = await this.store.get<Journal>(key); if (!row) throw new BrowserError('FILE_NOT_FOUND', 'Journal entry missing.'); row.resolvedByOperator = true; row.inspectedRevision = inspectedRevision; row.resolvedAt = Date.now(); await this.store.set(key, row); }
   async exportBackup(): Promise<{ version: 1; identity: NativeIdentity; files: Record<string, string>; revision: string; sha256: string }> { const source = await this.snapshot(); const files = Object.fromEntries(Object.entries(source.files).map(([path, bytes]) => [path, bytesToBase64(bytes)])); return { version: 1, identity: source.identity, files, revision: source.revision, sha256: await digest(JSON.stringify(files)) }; }

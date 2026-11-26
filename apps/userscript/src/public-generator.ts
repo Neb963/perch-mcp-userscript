@@ -34,7 +34,12 @@ async function boundedResponse(response: Response, max: number, stage: 'metadata
   if (contentLength && (!/^\d+$/.test(contentLength) || Number(contentLength) > max))
     throw new ExecutionError('LIMIT_EXCEEDED', `Public ${stage} exceeds its size budget.`);
   const reader = response.body?.getReader();
-  if (!reader) throw new ExecutionError('PROVIDER_REJECTED', `Public ${stage} returned no readable body.`);
+  // The Fetch API may represent a valid 204/declared zero-length asset with
+  // no ReadableStream. Zero-byte native source files are legitimate.
+  if (!reader) {
+    if (status === 204 || contentLength === '0') return new Uint8Array();
+    throw new ExecutionError('PROVIDER_REJECTED', `Public ${stage} returned no readable body.`);
+  }
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
