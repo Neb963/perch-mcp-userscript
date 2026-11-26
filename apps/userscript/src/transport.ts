@@ -273,6 +273,7 @@ export class GatewayTransport {
     // Only the bounded route template is recorded. Never record Origin
     // headers, query strings, payloads, authentication headers or credentials.
     const route = path.split("?")[0]!
+      .replace(/\/(workspaces|agents|approvals|grants|resources)\/[^/]+/g, "/$1/:id")
       .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ":id")
       .slice(0, 120);
     try {
