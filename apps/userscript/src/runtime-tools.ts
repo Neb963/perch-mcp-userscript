@@ -4,6 +4,7 @@ import { fetchPublic } from "./public-fetch.js";
 import { readPublicGenerator } from "./public-generator.js";
 import {
   base64ToBytes,
+  BrowserError,
   bytesToBase64,
   canonicalPath,
   decodeText,
@@ -504,7 +505,7 @@ export class RuntimeTools implements AdditionalTools {
         const code = typeof e?.code === 'string' && /^[A-Z][A-Z0-9_]{0,47}$/.test(e.code)
           ? e.code : 'EFFECT_UNKNOWN';
         throw new ExecutionError(code,
-          `fetch_generator/scratch-commit: local reference publication ${code}; provider source was read but cache commit is not verified.`,
+          `fetch_generator/scratch-commit: ${code}; ${error instanceof BrowserError ? error.message.slice(0, 240) : 'Local publication failed.'} Provider source was read but cache commit is not verified.`,
           code==='EFFECT_UNKNOWN'||e?.effectState==='UNKNOWN'?'UNKNOWN':'NONE');
       }
       return {

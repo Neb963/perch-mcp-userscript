@@ -112,6 +112,8 @@ test('preview refuses activation without verified native protocol support', asyn
 test('preview revision/freshness, preamble, viewport/reset and frame generation are explicit', async () => {
   const dom = new JSDOM('<div><iframe id="p" style="border: 0"></iframe></div>');
   const frame=dom.window.document.querySelector('iframe') as unknown as HTMLIFrameElement;
+  Object.defineProperty(frame,'clientWidth',{get:()=>frame.style.width?parseInt(frame.style.width):917});
+  Object.defineProperty(frame,'clientHeight',{get:()=>frame.style.height?parseInt(frame.style.height):505});
   let revision='r1',generation='g1'; const receipt=()=>({consoleOutput:[],perchanceErrors:[],syntaxErrors:[],appliedRevision:revision,previewGeneration:generation,result:42});
   const adapter=new PreviewAdapter({frame:()=>frame,revision:async()=>revision,
     bridge:{refresh:async()=>receipt(),evaluate:async(js:string)=>js.includes('innerWidth')
@@ -170,4 +172,55 @@ test('viewport reset rejects false success when live child remains at emulated w
   (e:ExecutionError)=>e.code==='NATIVE_CONFLICT'&&e.effectState==='PARTIAL');
  assert.equal(frame.getAttribute('style'),'border:0',
   'reset removes only the adapter-owned CSS without damaging existing native style');
+});
+
+test('viewport reset waits through stale width and height samples before verified success',async()=>{
+  const dom=new JSDOM('<div><iframe style="border:0"></iframe></div>');
+  const frame=dom.window.document.querySelector('iframe') as unknown as HTMLIFrameElement;
+  Object.defineProperty(frame,'clientWidth',{get:()=>frame.style.width?parseInt(frame.style.width):1249});
+  Object.defineProperty(frame,'clientHeight',{get:()=>frame.style.height?parseInt(frame.style.height):505});
+  let reset=false, samples=0;
+  const receipt=()=>({consoleOutput:[],perchanceErrors:[],syntaxErrors:[]});
+  const bridge={
+    refresh:async()=>receipt(),
+    evaluate:async()=>({...receipt(),result:42}),
+    measureViewport:async()=>{
+      if(!reset)return {width:390,height:844};
+      samples++;
+      if(samples===1)return {width:390,height:844};
+      if(samples===2)return {width:1249,height:844};
+      return {width:1249,height:505};
+    }
+  };
+  const adapter=new PreviewAdapter({frame:()=>frame,revision:async()=> 'r1',bridge,verified:{evaluate:true}});
+  await adapter.call('set_viewport_size',{width:390,height:844});
+  reset=true;
+  const result=await adapter.call('set_viewport_size',{reset:true}) as {width:number;height:number;measurementAttempts:number};
+  assert.equal(result.width,1249);
+  assert.equal(result.height,505);
+  assert.equal(result.measurementAttempts,4);
+  assert.equal(frame.getAttribute('style'),'border:0');
+  dom.window.close();
+});
+
+test('viewport verification cannot certify a replaced native frame even with matching dimensions',async()=>{
+  const dom=new JSDOM('<div><iframe></iframe><iframe></iframe></div>');
+  const frames=dom.window.document.querySelectorAll('iframe');
+  let frame=frames[0] as unknown as HTMLIFrameElement;
+  const receipt=()=>({consoleOutput:[],perchanceErrors:[],syntaxErrors:[]});
+  const bridge={
+    refresh:async()=>receipt(),
+    evaluate:async()=>({...receipt(),result:42}),
+    measureViewport:async()=>{
+      frame=frames[1] as unknown as HTMLIFrameElement;
+      return {width:390,height:844};
+    }
+  };
+  const adapter=new PreviewAdapter({frame:()=>frame,revision:async()=> 'r1',bridge,verified:{evaluate:true}});
+  await assert.rejects(adapter.call('set_viewport_size',{width:390,height:844}),
+    (e:ExecutionError)=>e.code==='NATIVE_CONFLICT'&&e.effectState==='PARTIAL');
+  adapter.restoreViewport();
+  assert.equal(frames[0]?.getAttribute('style'),null);
+  assert.equal(frames[1]?.getAttribute('style'),null);
+  dom.window.close();
 });

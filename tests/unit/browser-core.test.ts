@@ -1,10 +1,11 @@
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 import assert from 'node:assert/strict';
 import { NativeAdapter } from '../../apps/userscript/src/adapter.js';
 import { VirtualFileSystem } from '../../apps/userscript/src/vfs.js';
 import { SourceTools, parsePatch } from '../../apps/userscript/src/source-tools.js';
 import { ChunkStore, MemoryStore } from '../../apps/userscript/src/storage.js';
-import { BrowserError, canonicalPath, decodeText, equalBytes, utf8, type NativeSnapshot } from '../../apps/userscript/src/native-types.js';
+import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, decodeText, equalBytes, isUint8Array, utf8, type NativeSnapshot } from '../../apps/userscript/src/native-types.js';
 function fixture(){let pjs='animal\n  otter\n';let html='<h1>Fixture</h1>\n';let draft='';const files=new Map<string,Uint8Array>([['empty.bin',new Uint8Array()],['bytes.bin',new Uint8Array([0,255,1,128,10])]]);const page={app:{data:{generator:{id:123,name:'fixture',publicId:'public-fixture'}},userOwnsThisGenerator:true,saveGenerator:async()=>({status:'saved'})},modelTextEditor:{state:{readOnly:false},getValue:()=>pjs,setValue:(v:string)=>{pjs=v;},isClean:()=>false},outputTemplateEditor:{state:{readOnly:false},getValue:()=>html,setValue:(v:string)=>{html=v;},isClean:()=>false},srcState:{ready:async()=>{},idle:async()=>{},getDraftId:()=>draft,list:()=>Object.fromEntries([...files.entries()].map(([path,bytes])=>[path,{size:bytes.length}])),readFile:(path:string)=>files.get(path)!,writeFile:(path:string,bytes:Uint8Array)=>{files.set(path,bytes.slice());},deleteFile:(path:string)=>{files.delete(path);},isDirty:()=>true,hasPending:()=>false},aiAgentActivityState:()=>({active:false,unknown:false,reason:'',queueHeldOnly:false}),__aiGeneratorGuard:{blocked:()=>false},__editorReady:true,__draftChoiceSettled:true,currentInterfaceMode:'edit',perchanceSaveState:'unsaved'};const adapter=new NativeAdapter(page);const store=new MemoryStore();const vfs=new VirtualFileSystem(adapter,store,'fixture');return{page,files,adapter,vfs,store,tools:new SourceTools(vfs,adapter),manualPjs:(v:string)=>{pjs=v;},switchDraft:(v:string)=>{draft=v;}};}
 const rejectsCode=(code:string)=>(error:unknown)=>error instanceof BrowserError&&error.code===code;
 test('read-only probe projects identifiers without native store credentials',async()=>{const f=fixture();(f.page.app as unknown as {store:unknown}).store={sessionToken:'SENSITIVE'};const report=await f.adapter.probe();assert.equal(report.ready,true);assert.equal(report.identity?.generatorId,'123');assert.equal(report.identity?.draftId,'');assert.ok(!JSON.stringify(report).includes('SENSITIVE'));});
@@ -157,4 +158,66 @@ test('restore fails before effects on mismatched durable checkpoint digest, pres
  await f.store.set(key,prior);
  await assert.rejects(f.vfs.restore(receipt.id,'stale-revision'),rejectsCode('STALE_REVISION'));
  assert.equal((await f.vfs.snapshot()).revision,before.revision);
+});
+
+test('base64 conversion remains bounded for multi-megabyte files and rejects malformed structure',()=>{
+  const input = new Uint8Array(4 * 1024 * 1024 + 1);
+  for (let i=0;i<input.length;i++) input[i]=i%251;
+  const encoded=bytesToBase64(input);
+  assert.equal(encoded,Buffer.from(input).toString('base64'));
+  assert.ok(equalBytes(base64ToBytes(encoded),input));
+  for (const malformed of ['A','AA=A','====','A===','AA =','AAAA\n','AAé='])
+    assert.throws(()=>base64ToBytes(malformed),rejectsCode('INVALID_INPUT'));
+  assert.equal(base64ToBytes('').length,0);
+  for(const input of [Uint8Array.of(255), Uint8Array.of(0,255), Uint8Array.of(1,2,3)])
+    assert.ok(equalBytes(base64ToBytes(bytesToBase64(input)),input));
+});
+
+test('public import accepts exact cross-realm bytes and validates bad types before effects',async()=>{
+  const f=fixture();
+  const before=await f.vfs.snapshot();
+  const foreign=runInNewContext('new Uint8Array([0,255,128])') as Uint8Array;
+  assert.equal(foreign instanceof Uint8Array,false);
+  assert.equal(isUint8Array(foreign),true);
+  assert.equal(isUint8Array(runInNewContext('new Uint16Array([255])')),false);
+  assert.equal(isUint8Array(new DataView(new ArrayBuffer(2))),false);
+  assert.equal(isUint8Array({[Symbol.toStringTag]:'Uint8Array'}),false);
+  const receipt=await f.vfs.importSnapshot('reference',{'main.pjs':foreign,'index.html':new Uint8Array()},before.revision);
+  assert.deepEqual(receipt.paths,['imports/reference/index.html','imports/reference/main.pjs']);
+  assert.ok(equalBytes(await f.vfs.read('imports/reference/main.pjs'),Uint8Array.of(0,255,128)));
+  assert.equal((await f.vfs.read('imports/reference/index.html')).length,0);
+  const committed=await f.vfs.snapshot();
+  await assert.rejects(f.vfs.importSnapshot('invalid',{'main.pjs':new Uint16Array(1) as unknown as Uint8Array},committed.revision),
+    (e:BrowserError)=>e.code==='INVALID_INPUT'&&e.message.includes('file #1'));
+  assert.equal((await f.vfs.snapshot()).revision,committed.revision);
+  assert.equal((await f.vfs.unresolved()).length,0);
+  await assert.rejects(f.vfs.importSnapshot('REFERENCE',{'main.pjs':foreign},committed.revision),rejectsCode('PATH_DENIED'));
+  assert.equal((await f.vfs.snapshot()).revision,committed.revision);
+});
+
+test('large existing scratch and multi-megabyte public import coexist with exact readback',async()=>{
+  const f=fixture();
+  const scratch=new Uint8Array(713148).fill(13);
+  const source=new Uint8Array(4*1024*1024+2).fill(193);
+  const write=await f.vfs.writeBatch([{path:'scratch/reference.html',bytes:scratch}]);
+  assert.equal(write.status,'SUCCEEDED');
+  const before=await f.vfs.snapshot();
+  const receipt=await f.vfs.importSnapshot('large',{'main.pjs':source,'index.html':new Uint8Array()},before.revision);
+  assert.notEqual(receipt.revision,before.revision);
+  assert.ok(equalBytes(await f.vfs.read('scratch/reference.html'),scratch));
+  assert.ok(equalBytes(await f.vfs.read('imports/large/main.pjs'),source));
+  assert.equal((await f.vfs.unresolved()).length,0);
+});
+
+test('native metadata recognizes exact boolean fields and receiver-bound methods without coercion',()=>{
+ const f=fixture();
+ const app=f.page.app as unknown as Record<string,unknown>;
+ app.userOwnsThisGenerator=function(this:Record<string,unknown>){return this===app};
+ app.userCanSaveThisGenerator=true;
+ assert.deepEqual(f.adapter.generatorMetadata().ownership,{known:true,owned:true});
+ assert.deepEqual(f.adapter.generatorMetadata().editAccess,{known:true,allowed:true});
+ app.userOwnsThisGenerator=()=>Promise.resolve(true);
+ app.userCanSaveThisGenerator='true';
+ assert.deepEqual(f.adapter.generatorMetadata().ownership,{known:false,owned:null});
+ assert.deepEqual(f.adapter.generatorMetadata().editAccess,{known:false,allowed:null});
 });

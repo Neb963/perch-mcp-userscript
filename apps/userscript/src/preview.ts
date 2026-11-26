@@ -10,6 +10,7 @@ export interface PreviewBridge {
   refresh(preambleJs?: string): Promise<PreviewReceipt>;
   evaluate(js: string, timeoutMs: number): Promise<PreviewReceipt>;
   diagnostics?(): Promise<PreviewReceipt>;
+  measureViewport?(timeoutMs: number): Promise<unknown>;
   capture?(): Promise<{ dataUrl: string; width: number; height: number }>;
 }
 export interface PreviewOptions {
@@ -44,23 +45,54 @@ export class PreviewAdapter {
   private appliedRevision: string | undefined;
   private generation: string | undefined;
   private original: { frame: HTMLIFrameElement; style: string | null } | undefined;
-  private nativeBaseline: { width: number; height: number; parentWidth: number } | undefined;
+  private nativeBaseline: { width: number; height: number; parentWidth: number; parentHeight: number } | undefined;
   private viewport: { width: number; height: number } | undefined;
   private readonly attested = new Set<'refresh' | 'evaluate' | 'preamble'>();
+  private readonly failedAttestation = new Set<'refresh' | 'evaluate' | 'preamble'>();
+  private attestedFrame: HTMLIFrameElement | null = null;
+  private syncAttestationFrame(): void {
+    const frame = this.options.frame();
+    if (frame !== this.attestedFrame) {
+      this.attested.clear(); this.failedAttestation.clear();
+      this.attestedFrame = frame;
+    }
+  }
   constructor(private readonly options: PreviewOptions) {}
   private async requireCapability(capability: 'refresh' | 'evaluate' | 'preamble'): Promise<void> {
+    this.syncAttestationFrame();
+    const frame = this.attestedFrame;
     if (this.options.verified?.[capability]) return;
-    if (!this.options.bridge?.attest ||
-        !(await this.options.bridge.attest(capability)))
-      throw new ExecutionError('UNSUPPORTED_INTERFACE',
-        `Native preview ${capability} capability could not be verified on the exact bound output frame.`);
-    this.attested.add(capability);
+    try {
+      if (!this.options.bridge?.attest || !(await this.options.bridge.attest(capability)))
+        throw new ExecutionError('UNSUPPORTED_INTERFACE',
+          `Native preview ${capability} capability could not be verified on the exact bound output frame.`);
+      this.syncAttestationFrame();
+      if (this.attestedFrame !== frame)
+        throw new ExecutionError('STALE_EPOCH', 'Preview iframe changed during capability attestation.');
+      this.attested.add(capability);
+      this.failedAttestation.delete(capability);
+    } catch (error) {
+      this.attested.delete(capability);
+      this.failedAttestation.add(capability);
+      throw error;
+    }
   }
-  availability(): Record<string, { available: boolean; reason?: string }> {
-    const available = (enabled: boolean, reason: string) => enabled ? { available: true } : { available: false, reason };
+  availability(): Record<string, { available: boolean; state: 'available'|'not-yet-attested'|'probe-failed'|'unavailable'; reason?: string }> {
+    this.syncAttestationFrame();
+    const available = (enabled: boolean, reason: string) => enabled
+      ? { available:true, state:'available' as const }
+      : { available:false, state:'unavailable' as const, reason };
+    const capability = (key: 'evaluate'|'refresh', reason: string) => {
+      if (this.options.bridge && (this.options.verified?.[key] || this.attested.has(key)))
+        return available(true, reason);
+      if (!this.options.bridge?.attest || !this.options.frame()) return available(false, reason);
+      return {available:false,
+        state:this.failedAttestation.has(key)?'probe-failed' as const:'not-yet-attested' as const,
+        reason};
+    };
     return {
-      page_eval: available(Boolean(this.options.bridge && (this.options.verified?.evaluate || this.attested.has('evaluate'))), 'Native preview evaluation has not yet passed a live response-correlated capability probe.'),
-      page_refresh: available(Boolean(this.options.bridge && (this.options.verified?.refresh || this.attested.has('refresh'))), 'Native preview refresh has not yet passed a structural capability probe and source-receipt verification.'),
+      page_eval: capability('evaluate', 'Native preview evaluation requires a response-correlated probe on the bound frame.'),
+      page_refresh: capability('refresh', 'Native preview refresh requires structural capability and source-receipt verification.'),
       preview_diagnostics: available(Boolean(this.options.bridge?.diagnostics), 'No verified native diagnostics collector is attached.'),
       set_viewport_size: available(Boolean(this.options.frame()), 'The native output frame is unavailable.'),
       capture_page_image: available(Boolean(this.options.verified?.capture && this.options.bridge?.capture), 'No real-pixel native capture or consented capture adapter is verified.'),
@@ -118,6 +150,7 @@ export class PreviewAdapter {
     const receipt = checkedReceipt(await deadline(this.options.bridge.refresh(preambleJs), 30_000));
     if (receipt.appliedRevision !== expected || await this.options.revision() !== expected) throw new ExecutionError('NATIVE_CONFLICT', 'Source changed during refresh or the native frame did not attest the intended source revision. Refresh again after inspecting manual edits.', 'PARTIAL');
     this.appliedRevision = expected; this.generation = receipt.previewGeneration;
+    this.syncAttestationFrame(); this.attested.add('refresh');
     if (this.viewport) await this.setViewport(this.viewport.width, this.viewport.height);
     return { ...receipt, ...await this.freshness() };
   }
@@ -148,15 +181,15 @@ export class PreviewAdapter {
    * exact-frame native evaluateJs reply measures the actual child innerWidth
    * and innerHeight after layout. We never claim success on a CSS-only change.
    */
-  private async measuredViewport(): Promise<{width:number;height:number}> {
+  private async measuredViewport(timeoutMs: number): Promise<{width:number;height:number}> {
     if (!this.options.bridge)
       throw new ExecutionError('UNSUPPORTED_INTERFACE',
         'Native preview viewport verification is unavailable.', 'PARTIAL');
-    await this.requireCapability('evaluate');
-    const receipt=checkedReceipt(await deadline(
-      this.options.bridge.evaluate(
-        'return ({width: window.innerWidth, height: window.innerHeight});', 5000), 6000));
-    const value=receipt.result;
+    const bridge = this.options.bridge;
+    const value = bridge.measureViewport
+      ? await deadline(bridge.measureViewport(timeoutMs), timeoutMs)
+      : checkedReceipt(await deadline(bridge.evaluate(
+          'return ({width: window.innerWidth, height: window.innerHeight});', timeoutMs), timeoutMs)).result;
     if (!value || typeof value !== 'object' || Array.isArray(value))
       throw new ExecutionError('UNSUPPORTED_INTERFACE',
         'Native preview did not provide viewport dimensions.', 'PARTIAL');
@@ -183,68 +216,105 @@ export class PreviewAdapter {
     });
   }
 
-  async setViewport(width: number, height: number, reset = false): Promise<unknown> {
-    const frame=this.options.frame(),max=this.options.maxViewport??16384;
-    if (!frame) throw new ExecutionError('UNSUPPORTED_INTERFACE','Native output frame is unavailable.');
-    if (reset) {
-      const before=this.nativeBaseline;
-      const owned=this.original;
-      this.restoreViewport();
-      // If native refresh replaced the frame, its inherited styles are not
-      // ours to erase. Report an unverified outcome instead of modifying them.
-      if (owned && owned.frame!==frame)
-        throw new ExecutionError('NATIVE_CONFLICT',
-          'Preview iframe changed during viewport emulation. Reset cannot attest the replacement frame.', 'PARTIAL');
+  /**
+   * CSS updates and child viewport resizing are asynchronous in Firefox.
+   * Measure the exact frame until both dimensions match the current outer
+   * layout for two consecutive samples. A stale or replaced document cannot
+   * satisfy the verification, even if it returns the requested dimensions.
+   */
+  private async verifyViewport(
+    frame: HTMLIFrameElement,
+    expected: () => {width:number;height:number},
+    action: 'set' | 'reset',
+  ): Promise<{width:number;height:number;attempts:number}> {
+    const stop = performance.now() + 5000;
+    let changed = false, attempts = 0, stable = 0;
+    let actual: {width:number;height:number} | undefined;
+    let previousTarget: {width:number;height:number} | undefined;
+    const loaded = () => { changed = true; };
+    frame.addEventListener('load', loaded);
+    const stillBound = () => !changed && this.options.frame() === frame;
+    const conflict = () => new ExecutionError('NATIVE_CONFLICT',
+      `Viewport ${action}: preview iframe changed during layout verification; no stable dimensions verified. Persistent effects: none.`, 'PARTIAL');
+    try {
       await this.settleViewportLayout(frame);
-      const actual=await this.measuredViewport();
-      if(this.options.frame()!==frame)
-        throw new ExecutionError('NATIVE_CONFLICT',
-          'Viewport reset: preview iframe replaced during readback; no claim of native dimensions.', 'PARTIAL');
-      const observedFrameWidth=frame.clientWidth;
-      const parentWidth=frame.parentElement?.clientWidth??0;
-      const baselineComparable=before && before.width>0 &&
-        before.parentWidth>0 && Math.abs(parentWidth-before.parentWidth)<=2;
-      if (baselineComparable && Math.abs(actual.width-before.width)>2)
-        throw new ExecutionError('NATIVE_CONFLICT',
-          `Viewport reset: expected native width ${before.width}px, observed preview innerWidth ${actual.width}px; pane width ${parentWidth}px; CSS restoration attempted. Persistent source and provider effects: none.`, 'PARTIAL');
-      if (observedFrameWidth>0 && Math.abs(actual.width-observedFrameWidth)>2)
-        throw new ExecutionError('NATIVE_CONFLICT',
-          `Viewport reset: observed frame clientWidth ${observedFrameWidth}px differs from child innerWidth ${actual.width}px; native width cannot be verified. Persistent effects: none.`, 'PARTIAL');
-      return {reset:true,emulationActive:false,width:actual.width,height:actual.height,
-        expectedNativeWidth:baselineComparable?before.width:null,
-        verifiedBy:'native-preview-innerWidth',frameClientWidth:observedFrameWidth||null};
-    }
-    if (!Number.isInteger(width)||!Number.isInteger(height)||width<200||height<150||
-        width>Math.min(131072,max)||height>Math.min(131072,max))
-      throw new ExecutionError('LIMIT_EXCEEDED',
-        `Viewport must be 200–${max} by 150–${max}.`);
-    if (!this.original || this.original.frame!==frame) {
-      const previous=this.nativeBaseline;
+      while (performance.now() < stop && attempts < 24) {
+        if (!stillBound()) throw conflict();
+        attempts++;
+        const remaining = Math.max(1, Math.floor(stop - performance.now()));
+        try { actual = await this.measuredViewport(remaining); }
+        catch {
+          if (!stillBound()) throw conflict();
+          throw new ExecutionError('NATIVE_CONFLICT',
+            `Viewport ${action}: native child dimensions could not be measured before the deadline. Persistent effects: none.`, 'PARTIAL');
+        }
+        if (!stillBound()) throw conflict();
+        const target = expected();
+        const comparable = target.width > 0 && target.height > 0;
+        const matches = comparable && Math.abs(actual.width - target.width) <= 2 &&
+          Math.abs(actual.height - target.height) <= 2;
+        stable = matches ? (previousTarget && previousTarget.width === target.width &&
+          previousTarget.height === target.height ? stable + 1 : 1) : 0;
+        previousTarget = target;
+        if (stable >= 2) return {...actual, attempts};
+        const wait = Math.min(250, 25 * 2 ** Math.min(attempts - 1, 4), stop - performance.now());
+        if (wait > 0) await new Promise<void>(resolve => setTimeout(resolve, wait));
+      }
+      const target = expected();
+      throw new ExecutionError('NATIVE_CONFLICT',
+        `Viewport ${action}: expected ${target.width}x${target.height}px, observed ${actual?.width ?? 0}x${actual?.height ?? 0}px after ${attempts} samples; child layout did not converge. Persistent effects: none.`, 'PARTIAL');
+    } finally { frame.removeEventListener('load', loaded); }
+  }
+
+  async setViewport(width: number, height: number, reset = false): Promise<unknown> {
+    const frame = this.options.frame(), max = this.options.maxViewport ?? 16384;
+    if (!frame) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native output frame is unavailable.');
+    if (reset) {
+      const before = this.original?.frame === frame ? this.nativeBaseline : undefined;
       this.restoreViewport();
-      this.nativeBaseline=previous??{
-        width:frame.clientWidth,height:frame.clientHeight,
-        parentWidth:frame.parentElement?.clientWidth??0,
-      };
-      this.original={frame,style:frame.getAttribute('style')};
+      // Restoring our CSS is safe even if the child is frozen; it is not
+      // proof that the iframe has actually processed the resize.
+      try { await this.requireCapability('evaluate'); }
+      catch { throw new ExecutionError('NATIVE_CONFLICT',
+        'Viewport reset: CSS restored but native viewport verification is unavailable. Persistent effects: none.', 'PARTIAL'); }
+      const target = () => ({
+        width: frame.clientWidth || (before && before.parentWidth > 0 &&
+          Math.abs((frame.parentElement?.clientWidth ?? 0) - before.parentWidth) <= 2 ? before.width : 0),
+        height: frame.clientHeight || (before && before.parentHeight > 0 &&
+          Math.abs((frame.parentElement?.clientHeight ?? 0) - before.parentHeight) <= 2 ? before.height : 0),
+      });
+      const actual = await this.verifyViewport(frame, target, 'reset');
+      const expectedNative = target();
+      return {reset:true, emulationActive:false, width:actual.width, height:actual.height,
+        expectedNativeWidth:expectedNative.width, expectedNativeHeight:expectedNative.height,
+        verifiedBy:'native-preview-innerWidth', frameClientWidth:frame.clientWidth||null,
+        frameClientHeight:frame.clientHeight||null, measurementAttempts:actual.attempts};
     }
-    frame.style.width=`${width}px`;
-    frame.style.height=`${height}px`;
-    frame.style.maxWidth='none';frame.style.maxHeight='none';
-    frame.style.transformOrigin='top left';
-    const available=frame.parentElement?.clientWidth??width;
-    const scale=Math.min(1,available>0?available/width:1);
-    frame.style.transform=`scale(${scale})`;
-    this.viewport={width,height};
-    await this.settleViewportLayout(frame);
-    const actual=await this.measuredViewport();
-    if(this.options.frame()!==frame)
-      throw new ExecutionError('NATIVE_CONFLICT',
-        'Viewport set: native iframe changed during measurement; no stable dimensions verified.', 'PARTIAL');
-    if (Math.abs(actual.width-width)>2 || Math.abs(actual.height-height)>2)
-      throw new ExecutionError('NATIVE_CONFLICT',
-        `Viewport set: expected ${width}x${height}px, observed ${actual.width}x${actual.height}px; preview iframe CSS applied but result not verified. Persistent effects: none.`, 'PARTIAL');
-    return {width:actual.width,height:actual.height,scale,
-      emulationActive:true,verifiedBy:'native-preview-innerWidth',measuredBrowserLimit:false};
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 200 || height < 150 ||
+        width > Math.min(131072,max) || height > Math.min(131072,max))
+      throw new ExecutionError('LIMIT_EXCEEDED', `Viewport must be 200–${max} by 150–${max}.`);
+    await this.requireCapability('evaluate');
+    if (this.options.frame() !== frame)
+      throw new ExecutionError('NATIVE_CONFLICT', 'Native iframe changed before viewport mutation.');
+    if (!this.original || this.original.frame !== frame) {
+      this.restoreViewport();
+      this.nativeBaseline = {
+        width:frame.clientWidth, height:frame.clientHeight,
+        parentWidth:frame.parentElement?.clientWidth??0, parentHeight:frame.parentElement?.clientHeight??0,
+      };
+      this.original = {frame,style:frame.getAttribute('style')};
+    }
+    frame.style.width = `${width}px`;
+    frame.style.height = `${height}px`;
+    frame.style.maxWidth = 'none'; frame.style.maxHeight = 'none';
+    frame.style.transformOrigin = 'top left';
+    const available = frame.parentElement?.clientWidth ?? width;
+    const scale = Math.min(1, available > 0 ? available / width : 1);
+    frame.style.transform = `scale(${scale})`;
+    this.viewport = {width,height};
+    const actual = await this.verifyViewport(frame, () => ({width,height}), 'set');
+    return {width:actual.width,height:actual.height,scale,emulationActive:true,
+      verifiedBy:'native-preview-innerWidth',measuredBrowserLimit:false,measurementAttempts:actual.attempts};
   }
 
   restoreViewport(): void {
@@ -399,20 +469,52 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
     if(await this.options.revision()!==sourceBefore)
       throw new ExecutionError('STALE_REVISION',
         'Native editor changed during syntax collection. Diagnostics were not attributed to a stale revision.');
-    if(!Array.isArray(raw)||raw.length>500)
+    const panes: Record<string, 'main.pjs'|'index.html'> = {
+      'main.pjs':'main.pjs', pjs:'main.pjs', model:'main.pjs',
+      modelText:'main.pjs', modelTextErrors:'main.pjs', modelTextEditor:'main.pjs',
+      'index.html':'index.html', html:'index.html', output:'index.html',
+      outputTemplate:'index.html', outputTemplateErrors:'index.html', outputTemplateEditor:'index.html',
+    };
+    let rows: {entry:unknown;pathHint?:'main.pjs'|'index.html'}[] = [];
+    let shape = 'unknown';
+    let partialShape = false;
+    if (Array.isArray(raw) && raw.length <= 500) {
+      rows = raw.map(entry => ({entry})); shape = 'array';
+    } else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const record = raw as Record<string,unknown>;
+      const keys = Object.keys(record);
+      if (keys.length <= 24) {
+        for (const key of keys) {
+          const pathHint = Object.hasOwn(panes,key) ? panes[key] : undefined;
+          if (!pathHint && key !== 'errors' && key !== 'syntaxErrors') { partialShape = true; continue; }
+          const values = record[key];
+          if (!Array.isArray(values) || values.length > 500 || rows.length + values.length > 500) {
+            partialShape = true; continue;
+          }
+          shape = 'grouped-arrays';
+          rows.push(...values.map(entry => ({entry,pathHint})));
+        }
+      }
+    }
+    if (shape === 'unknown')
       return {...receipt,diagnosticsAvailability:availability,
-        diagnosticChannels:{editorSyntax:'unsupported-result',console:'preview-iframe',nativeWarnings:'native-editor'}};
-    let precise=true;
+        diagnosticChannels:{editorSyntax:'unsupported-result',editorSyntaxShape:
+          raw===null?'null':Array.isArray(raw)?'oversized-array':typeof raw,
+          console:'preview-iframe',nativeWarnings:'native-editor'}};
+    let precise=!partialShape;
     const errors:Record<string,unknown>[]=[];
-    for(const entry of raw){
+    for(const {entry,pathHint} of rows){
+      if(typeof entry === 'string') {
+        precise=false; errors.push({category:'editor-syntax',message:entry.slice(0,2000),path:pathHint??null,line:null,column:null,locationVerified:false,locationProvenance:'native-unverified',sourceRevision:sourceBefore}); continue;
+      }
       if(!entry||typeof entry!=='object'||Array.isArray(entry)) {precise=false;continue;}
       const e=entry as Record<string,unknown>;
       const name=typeof e.message==='string'?e.message:typeof e.error==='string'?e.error:null;
       if(name===null){precise=false;continue;}
       const source=e.path??e.file??e.pane??e.type;
-      const path=source==='main.pjs'||source==='model'||source==='pjs'
-        ? 'main.pjs' : source==='index.html'||source==='output'||source==='html'
-          ? 'index.html' : null;
+      const explicitPath=typeof source==='string'&&Object.hasOwn(panes,source)?panes[source]:undefined;
+      const conflict=explicitPath && pathHint && explicitPath!==pathHint;
+      const path=conflict?null:explicitPath??pathHint??null;
       const line=e.line??e.lineNumber;
       const column=e.column??e.col;
       const validLine=Number.isSafeInteger(line) && (line as number)>0 && (line as number)<=1000000;
@@ -428,7 +530,7 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
     // until a deliberately malformed live disposable source is verified.
     availability.syntax=precise&&errors.length>0?'captured':'partial';
     return {...receipt,syntaxErrors:errors,diagnosticsAvailability:availability,
-      diagnosticChannels:{editorSyntax:availability.syntax,console:'preview-iframe',
+      diagnosticChannels:{editorSyntax:availability.syntax,editorSyntaxShape:shape,console:'preview-iframe',
         nativeWarnings:'native-editor',syntaxSourceRevision:sourceBefore}};
   }
 
@@ -476,6 +578,15 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
       if(before.generation!==after.generation||before.receipt?.epoch!==after.receipt?.epoch)throw new ExecutionError('STALE_EPOCH','Native preview changed during evaluation.','UNKNOWN');
       return this.withEditorSyntax(this.receipt(after,result));
     }finally{this.busy=false}
+  }
+  async measureViewport(timeoutMs: number): Promise<unknown> {
+    // A geometry probe needs one fixed native request, not the general eval
+    // pipeline (which performs extra diagnostics and editor syntax calls).
+    const result = await this.request(`return (()=>{const d=document.${NATIVE_DIAGNOSTIC_KEY},r=document.__perchanceInternal?.renderReceipt;return {width:window.innerWidth,height:window.innerHeight,generation:d?.generation&&r?d.generation+':'+r.epoch:null};})();`, timeoutMs);
+    if (this.previousGeneration && (!result || typeof result !== 'object' ||
+        (result as {generation?:unknown}).generation !== this.previousGeneration))
+      throw new ExecutionError('STALE_EPOCH', 'Native preview generation changed during geometry verification.', 'PARTIAL');
+    return result;
   }
   async diagnostics():Promise<PreviewReceipt>{return this.withEditorSyntax(this.receipt(nativeDiagnostics(await this.request(nativeDiagnosticRead,5000))))}
 }
