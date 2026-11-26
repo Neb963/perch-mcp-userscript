@@ -327,6 +327,21 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
     body: new URLSearchParams({ id: approvalId, handle }),
   });
   assert.equal(complete.status, 302, await complete.clone().text());
+  // Server-side audit must survive navigation: OAuth events are not ordinary
+  // MCP Activity records. The event itself must not contain the one-time handle.
+  let oauthAudit: Record<string, unknown> = {};
+  for (let attempt = 0; attempt < 30; attempt++) {
+    oauthAudit = await data("/api/v1/admin/diagnostics");
+    const rows = oauthAudit.events as Record<string, unknown>[];
+    if (rows?.some((row) =>
+      row.route === "authorize_complete" && row.originClass === "null" &&
+      row.status === 302 && row.code === "COMPLETE")) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const auditRows = oauthAudit.events as Record<string, unknown>[];
+  assert.ok(auditRows?.some((row) => row.route === "authorize_complete" && row.originClass === "null" && row.status === 302));
+  assert.ok(auditRows?.some((row) => row.route === "authorize_complete" && row.code === "SCOPE_DENIED" && row.originClass === "other"));
+  assert.ok(!JSON.stringify(oauthAudit).includes(handle), "authorization handles never enter diagnostic history");
   const callback = new URL(complete.headers.get("location")!);
   assert.equal(callback.searchParams.get("state"), "state-fixture");
   assert.equal(callback.searchParams.get("iss"), base);
