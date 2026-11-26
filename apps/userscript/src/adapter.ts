@@ -160,8 +160,19 @@ export class NativeAdapter {
     const status = context.receipt?.status ?? (receipt && typeof receipt === 'object' && 'status' in receipt ? receipt.status : undefined);
     if (status === 'stale') throw new BrowserError('NATIVE_CONFLICT', 'Native Save rejected stale source.');
     if (status === 'captcha-needed' || status === 'challenge') throw new BrowserError('CHALLENGE_REQUIRED', 'Complete native verification, then reconcile.');
-    if (status !== 'saved') return this.unknownSave(intendedRevision);
-    try { const saved = await context.readSavedSnapshot(); if (saved.revision === intendedRevision && equalIdentity(saved.identity, intended.identity)) return { status: 'SUCCEEDED', revision: intendedRevision, committed: Object.keys(intended.files) }; } catch { /* Dispatched effect remains unknown. */ }
+    // The public bytes, not the shape of a private native Save return value,
+    // are the authority. Some native versions return void even after success.
+    // Never claim success from status='saved' alone.
+    try {
+      const saved=await context.readSavedSnapshot();
+      if (saved.revision===intendedRevision &&
+          equalIdentity(saved.identity,intended.identity) &&
+          Object.keys(saved.files).length===Object.keys(intended.files).length &&
+          Object.entries(intended.files).every(([path,bytes]) =>
+            saved.files[path] && equalBytes(bytes,saved.files[path]!)))
+        return {status:'SUCCEEDED',revision:intendedRevision,
+          committed:Object.keys(intended.files)};
+    } catch { /* Dispatched effect remains unknown; never replay Save. */ }
     return this.unknownSave(intendedRevision);
   }
   private unknownSave(revision: string): MutationResult { return { status: 'UNKNOWN', revision, committed: [], error: { code: 'EFFECT_UNKNOWN', message: 'Native Save outcome lacks an independent complete-source receipt.', recovery: 'Read-only reconciliation only; do not repeat Save.' } }; }
