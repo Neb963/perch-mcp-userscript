@@ -286,3 +286,17 @@ test('verified native Save and concurrent manual edits preserve two revisions',a
  assert.notEqual(value.revision,ws.revision);
  assert.notEqual(value.revision,value.savedRevision);
 });
+
+test('HAR native owner and Save-access predicates are page globals; no fork on nonowner',async()=>{
+ const f=fixture();let calls=0;
+ f.page.app.saveGenerator=async()=>{calls++;return{status:'saved'}};
+ const adapter=new NativeAdapter(f.page,{externalWritesVerified:true});
+ const before=await adapter.snapshot();f.manualPjs('candidate Save');
+ const intended=await adapter.snapshot();
+ f.page.userOwnsThisGenerator=false;
+ await assert.rejects(adapter.save(intended.revision,{
+   operationId:'owner-check',permission:true,previousSavedSnapshot:before,
+   readSavedSnapshot:async()=>before,
+ }),rejectsCode('SCOPE_DENIED'));
+ assert.equal(calls,0,'a nonowner must never trigger the native fork/save dialog');
+});
