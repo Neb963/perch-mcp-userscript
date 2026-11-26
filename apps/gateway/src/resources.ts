@@ -32,6 +32,47 @@ export async function loadLibrary(db: SqlRecords): Promise<ResourceLibrary> {
   }
   return library;
 }
+function metadata(
+  r: import("../../../packages/resource-library/src/index.js").Resource,
+): Record<string, unknown> {
+  return {
+    id: r.id,
+    kind: r.kind,
+    title: r.title.slice(0, 200),
+    description: r.description.slice(0, 512),
+    enabled: r.enabled,
+    revision: r.revision,
+    hash: r.hash,
+    customized: r.customized,
+    deleted: r.deleted,
+    upstreamVersion: r.upstreamVersion?.slice(0, 100),
+  };
+}
+function page(
+  items: unknown[],
+  url: URL,
+  revision: number,
+): Record<string, unknown> {
+  const raw = url.searchParams.get("cursor"),
+    parts = raw?.split(":");
+  const offset = parts ? Number(parts[1]) : 0;
+  if (
+    (parts && (parts.length !== 2 || Number(parts[0]) !== revision)) ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0
+  )
+    throw new ApiError(
+      "RESOURCE_CONFLICT",
+      "List changed or cursor is invalid; restart the list.",
+      409,
+    );
+  const end = Math.min(items.length, offset + 100);
+  return {
+    items: items.slice(offset, end),
+    revision,
+    cursor: end < items.length ? revision + ":" + end : null,
+  };
+}
 export async function resourceAdmin(
   request: Request,
   db: SqlRecords,
@@ -46,11 +87,7 @@ export async function resourceAdmin(
     reauthorize();
     if (request.method === "GET") {
       if (path === prefix)
-        return json({
-          items: library.list(),
-          revision: library.revision,
-          cursor: null,
-        });
+        return json(page(library.list().map(metadata), url, library.revision));
       if (path === prefix + "/export")
         return new Response(library.exportZip() as BodyInit, {
           headers: {
@@ -61,22 +98,16 @@ export async function resourceAdmin(
           },
         });
       if (path === prefix + "/assignments")
-        return json({
-          items: library.snapshot().assignments,
-          revision: library.revision,
-          cursor: null,
-        });
+        return json(
+          page(library.snapshot().assignments, url, library.revision),
+        );
       const m = /^\/api\/v1\/admin\/resources\/([a-z0-9-]+)(\/history)?$/.exec(
         path,
       );
       if (m)
         return json(
           m[2]
-            ? {
-                items: library.history(m[1]!),
-                revision: library.revision,
-                cursor: null,
-              }
+            ? page(library.history(m[1]!).map(metadata), url, library.revision)
             : library.get(m[1]!),
         );
       throw new ApiError("NOT_FOUND", "Resource route not found.", 404);
@@ -111,7 +142,12 @@ export async function resourceAdmin(
         throw new ApiError("INVALID_INPUT", "Invalid archive base64.");
       const bytes = Uint8Array.from(atob(base64), (x) => x.charCodeAt(0));
       const preview = await library.previewImport(bytes);
-      if (path.endsWith("/preview")) return json(preview);
+      if (path.endsWith("/preview"))
+        return json({
+          digest: preview.digest,
+          entries: preview.entries,
+          libraryRevision: preview.libraryRevision,
+        });
       result = await library.commitImport(
         preview,
         b.decisions as ImportDecisions,
@@ -213,9 +249,7 @@ export async function resourceTool(
     const path = args.path === undefined ? undefined : String(args.path);
     const body =
       path === undefined
-        ? r.kind === "document"
-          ? r.body
-          : undefined
+        ? r.body
         : Object.hasOwn(r.files, path)
           ? r.files[path]
           : undefined;
@@ -249,8 +283,17 @@ export async function resourceTool(
           ? "instruction"
           : undefined;
   const rows = l.list(context, kind);
-  if (name === "get_instructions")
-    return { items: rows, libraryRevision: l.revision };
+  if (name === "get_instructions") {
+    if (new TextEncoder().encode(JSON.stringify(rows)).byteLength <= 200000)
+      return { items: rows, libraryRevision: l.revision };
+    return {
+      items: rows.map(metadata),
+      libraryRevision: l.revision,
+      bodiesOmitted: true,
+      recovery:
+        "Read every Instruction body with read_documentation id, offset and limit; exact revision is included.",
+    };
+  }
   const offset = args.cursor === undefined ? 0 : Number(args.cursor),
     limit = Math.min(100, Number(args.limit ?? 100));
   if (!Number.isInteger(offset) || offset < 0)
@@ -281,9 +324,7 @@ export async function resourceTool(
       cursor: offset + limit < matches.length ? String(offset + limit) : null,
     };
   }
-  const items = rows
-    .slice(offset, offset + limit)
-    .map(({ body: _, files: __, ...metadata }) => metadata);
+  const items = rows.slice(offset, offset + limit).map(metadata);
   return {
     items,
     libraryRevision: l.revision,

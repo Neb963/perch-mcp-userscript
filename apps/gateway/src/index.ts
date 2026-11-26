@@ -1,3 +1,4 @@
+import { projectMcpImages, type McpImageBlock } from "./mcp-media.js";
 import {
   OAuthAuthorizationServer,
   OAuthResourceServer,
@@ -6,14 +7,14 @@ import {
   authorizationErrorRedirect,
   type AuthRequest,
 } from "@cloudflare/workers-oauth-provider";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
+  Server,
+  WebStandardStreamableHTTPServerTransport,
+  createMcpHandler,
+  isLegacyRequest,
   type Tool,
-} from "@modelcontextprotocol/sdk/types.js";
+} from "@modelcontextprotocol/server";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/server/validators/cf-worker";
 import {
   toolDefinitions,
   validateToolCall,
@@ -73,7 +74,7 @@ function cors(
     headers.set("Vary", "Origin");
     headers.set(
       "Access-Control-Allow-Headers",
-      "Authorization, Content-Type, Idempotency-Key, MCP-Protocol-Version, MCP-Session-Id",
+      "Authorization, Content-Type, Idempotency-Key, MCP-Protocol-Version, MCP-Session-Id, Mcp-Method, Mcp-Name",
     );
     headers.set(
       "Access-Control-Allow-Methods",
@@ -145,7 +146,7 @@ function oauthServer(config: Configuration) {
       } catch (error) {
         throw new OAuthError(
           error instanceof ApiError &&
-          ["REVOKED", "AUTH_REQUIRED", "NOT_FOUND"].includes(error.code)
+            ["REVOKED", "AUTH_REQUIRED", "NOT_FOUND"].includes(error.code)
             ? "invalid_grant"
             : "temporarily_unavailable",
           {
@@ -158,7 +159,13 @@ function oauthServer(config: Configuration) {
     onError: () => undefined,
   });
 }
-function capabilityAvailable(name: string): boolean {
+function capabilityAvailable(name: string, env: Env): boolean {
+  if (name === "generate_music")
+    return (
+      env.PAID_MEDIA_ENABLED === "true" &&
+      !!env.ELEVENLABS_API_KEY &&
+      env.PROVIDER_WRITES_ENABLED === "true"
+    );
   return ![
     "generate_music",
     "download_server_plugin_state",
@@ -183,121 +190,182 @@ async function mcp(
     workspace: WorkspaceRecord;
     agent: AgentRecord;
   }>(registry(env), "/internal/authorize", { props, agentId, permissions: [] });
-  const server = new Server(
-    { name: "perch-mcp", version: VERSION },
-    {
-      capabilities: { tools: {} },
-      instructions:
-        "Call workspace_status then get_instructions and list_skills. Browser tools return durable operation handles; poll operation_status until terminal. Unknown effects must be reconciled, never replayed. Tools marked unavailable remain release blockers.",
-      jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),
-    },
-  );
-  server.setRequestHandler(ListToolsRequestSchema, () => ({
-    tools: toolDefinitions.map(
-      (t) =>
-        ({
-          name: t.name,
-          description:
-            t.description +
-            (capabilityAvailable(t.name)
-              ? ""
-              : " UNAVAILABLE in this candidate: authorized provider interface remains unverified. Do not call expecting success."),
-          inputSchema: t.inputSchema,
-          annotations: t.annotations,
-          _meta: { available: capabilityAvailable(t.name) },
-        }) as unknown as Tool,
-    ),
-  }));
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    let data: unknown;
-    let isError = false;
-    try {
-      const args = validateToolCall(
-          req.params.name,
-          req.params.arguments ?? {},
-        ),
-        definition = toolDefinitions.find((t) => t.name === req.params.name)!;
-      const needed = permissionsForTool(req.params.name, args);
-      const auth = await rpc<{
-        workspace: WorkspaceRecord;
-        grant: { permissions: string[] };
-      }>(registry(env), "/internal/authorize", {
-        props,
-        agentId,
-        permissions: needed,
-        mutating: definition.mutating,
-      });
-      if (
-        req.params.name === "operation_status" ||
-        req.params.name === "cancel_operation"
-      )
-        data = await rpc(
-          workspace(env, auth.workspace.id),
-          req.params.name === "operation_status"
-            ? "/internal/status"
-            : "/internal/cancel",
-          { workspaceId: auth.workspace.id, operationId: args.operationId },
-        );
-      else if (!definition.browser)
-        data = await rpc(registry(env), "/internal/resource-tool", {
+  const factory = () => {
+    const server = new Server(
+      { name: "perch-mcp", version: VERSION },
+      {
+        capabilities: { tools: {} },
+        supportedProtocolVersions: ["2026-07-28", "2025-11-25", "2025-06-18"],
+        instructions:
+          "Call workspace_status then get_instructions and list_skills. Browser tools return durable operation handles; poll operation_status until terminal. Unknown effects must be reconciled, never replayed. Tools marked unavailable remain release blockers.",
+        jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),
+      },
+    );
+    server.setRequestHandler("tools/list", () => ({
+      tools: toolDefinitions.map(
+        (t) =>
+          ({
+            name: t.name,
+            description:
+              t.description +
+              (capabilityAvailable(t.name, env)
+                ? t.browser
+                  ? " Requires a connected matching Workspace and native feature detection; inspect workspace_status. Gateway enablement is not external acceptance evidence."
+                  : ""
+                : " UNAVAILABLE in this candidate: authorized provider interface remains unverified. Do not call expecting success."),
+            inputSchema: t.inputSchema,
+            annotations: t.annotations,
+            _meta: t.browser
+              ? {
+                  gatewayEnabled: capabilityAvailable(t.name, env),
+                  availability: capabilityAvailable(t.name, env)
+                    ? "workspace-probe-required"
+                    : "unavailable",
+                }
+              : { available: true },
+          }) as unknown as Tool,
+      ),
+    }));
+    server.setRequestHandler("tools/call", async (req) => {
+      let data: unknown;
+      let isError = false;
+      let imageContent: McpImageBlock[] = [];
+      try {
+        const args = validateToolCall(
+            req.params.name,
+            req.params.arguments ?? {},
+          ),
+          definition = toolDefinitions.find((t) => t.name === req.params.name)!;
+        const needed = permissionsForTool(req.params.name, args);
+        const auth = await rpc<{
+          workspace: WorkspaceRecord;
+          grant: { permissions: string[] };
+        }>(registry(env), "/internal/authorize", {
           props,
           agentId,
           permissions: needed,
-          tool: req.params.name,
-          args,
-        });
-      else if (!capabilityAvailable(req.params.name))
-        throw new ApiError(
-          "UNSUPPORTED_INTERFACE",
-          "Capability is unavailable pending an authorized verified native/provider implementation.",
-          409,
-          "See the release evidence report; do not substitute a non-equivalent result.",
-        );
-      else
-        data = await rpc(workspace(env, auth.workspace.id), "/internal/admit", {
-          workspace: auth.workspace,
-          props,
-          agentId,
-          tool: req.params.name,
-          args,
-          permissions: auth.grant.permissions.filter((p) =>
-            auth.workspace.permissions.includes(p),
-          ),
-          requiredPermissions: needed,
           mutating: definition.mutating,
         });
-    } catch (error) {
-      isError = true;
-      data = {
-        status: "REJECTED",
-        effectState: "NONE",
-        error: {
-          code:
-            error instanceof ApiError || error instanceof ToolError
-              ? error.code
-              : "INTERNAL_ERROR",
-          message:
-            error instanceof ApiError || error instanceof ToolError
-              ? error.message
-              : "Tool request failed.",
-          retryable: false,
-          recovery:
-            "Inspect workspace_status and operation_status; do not replay an unknown effect.",
-        },
+        if (
+          req.params.name === "operation_status" ||
+          req.params.name === "cancel_operation"
+        )
+          data = await rpc(
+            workspace(env, auth.workspace.id),
+            req.params.name === "operation_status"
+              ? "/internal/status"
+              : "/internal/cancel",
+            {
+              workspaceId: auth.workspace.id,
+              operationId: args.operationId,
+              bindingRevision: auth.workspace.bindingRevision,
+              agentId,
+            },
+          );
+        else if (!definition.browser)
+          data = await rpc(registry(env), "/internal/resource-tool", {
+            props,
+            agentId,
+            permissions: needed,
+            tool: req.params.name,
+            args,
+          });
+        else if (!capabilityAvailable(req.params.name, env))
+          throw new ApiError(
+            "UNSUPPORTED_INTERFACE",
+            "Capability is unavailable pending an authorized verified native/provider implementation.",
+            409,
+            "See the release evidence report; do not substitute a non-equivalent result.",
+          );
+        else
+          data = await rpc(
+            workspace(env, auth.workspace.id),
+            "/internal/admit",
+            {
+              workspace: auth.workspace,
+              props,
+              agentId,
+              tool: req.params.name,
+              args,
+              permissions: auth.grant.permissions.filter((p) =>
+                auth.workspace.permissions.includes(p),
+              ),
+              requiredPermissions: needed,
+              mutating: definition.mutating,
+            },
+          );
+        if (req.params.name === "operation_status") {
+          const projected = projectMcpImages(data);
+          data = projected.data;
+          imageContent = projected.images;
+        }
+      } catch (error) {
+        imageContent = [];
+        isError = true;
+        data = {
+          status: "REJECTED",
+          effectState: "NONE",
+          error: {
+            code:
+              error instanceof ApiError || error instanceof ToolError
+                ? error.code
+                : "INTERNAL_ERROR",
+            message:
+              error instanceof ApiError || error instanceof ToolError
+                ? error.message
+                : "Tool request failed.",
+            retryable: false,
+            recovery:
+              "Inspect workspace_status and operation_status; do not replay an unknown effect.",
+          },
+        };
+      }
+      if (new TextEncoder().encode(JSON.stringify(data)).byteLength > 262144) {
+        isError = true;
+        imageContent = [];
+        data = {
+          status: "REJECTED",
+          effectState: "NONE",
+          error: {
+            code: "LIMIT_EXCEEDED",
+            message:
+              "Result exceeds inline MCP budget; use paged reads or local artifact download.",
+            retryable: false,
+            recovery:
+              "Use read_documentation offset/limit or the manager artifact download.",
+          },
+        };
+      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data) },
+          ...imageContent,
+        ],
+        structuredContent: data as Record<string, unknown>,
+        isError,
       };
-    }
-    return {
-      content: [{ type: "text" as const, text: JSON.stringify(data) }],
-      structuredContent: data as Record<string, unknown>,
-      isError,
-    };
-  });
-  const transport = new WebStandardStreamableHTTPServerTransport({
-    enableJsonResponse: true,
+    });
+    return server;
+  };
+  // The SDK's classifier owns malformed-modern behavior; never guess from one header.
+  if (
+    await isLegacyRequest(request, undefined, { maxRequestBodySize: MAX_BODY })
+  ) {
+    const server = factory();
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      enableJsonResponse: true,
+      maxRequestBodySize: MAX_BODY,
+      supportedProtocolVersions: ["2025-11-25", "2025-06-18"],
+    });
+    await server.connect(transport);
+    return transport.handleRequest(request);
+  }
+  const modern = createMcpHandler(factory, {
+    legacy: "reject",
+    responseMode: "auto",
     maxRequestBodySize: MAX_BODY,
   });
-  await server.connect(transport);
-  return transport.handleRequest(request);
+  return modern.fetch(request);
 }
 async function route(
   request: Request,
@@ -444,7 +512,52 @@ async function route(
         "Authorization form too large.",
         413,
       );
-    const form = await request.formData();
+    if (
+      !request.headers
+        .get("content-type")
+        ?.startsWith("application/x-www-form-urlencoded")
+    )
+      throw new ApiError(
+        "INVALID_INPUT",
+        "URL-encoded authorization form required.",
+        415,
+      );
+    const reader = request.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    if (reader)
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        size += next.value.length;
+        if (size > 4096) {
+          await reader.cancel();
+          throw new ApiError(
+            "LIMIT_EXCEEDED",
+            "Authorization form too large.",
+            413,
+          );
+        }
+        chunks.push(next.value);
+      }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    const form = new URLSearchParams(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    );
+    if (
+      [...form.keys()].some((k) => !["id", "handle"].includes(k)) ||
+      form.getAll("id").length !== 1 ||
+      form.getAll("handle").length !== 1
+    )
+      throw new ApiError(
+        "INVALID_INPUT",
+        "Exact authorization handle required.",
+      );
     const result = await rpc<{
       state: string;
       request?: AuthRequest;
@@ -457,6 +570,11 @@ async function route(
     if (result.state === "pending")
       return html(
         "<h1>Approval pending</h1><p>Approve the exact request in the userscript manager, then use Back and Continue.</p>",
+      );
+    if (result.state === "denied" && result.request)
+      return Response.redirect(
+        authorizationErrorRedirect(result.request, "access_denied"),
+        302,
       );
     if (result.state !== "approved" || !result.request || !result.props)
       return html(
@@ -509,6 +627,8 @@ async function route(
     });
     return host.fetch(request, env, ctx as never);
   }
+  if (path === "/register" && request.method === "POST")
+    await rpc(registry(env), "/internal/registration-budget", {});
   return authorizationServer.fetch(request, env, ctx as never);
 }
 export default {

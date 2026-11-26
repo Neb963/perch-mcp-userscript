@@ -13,6 +13,6 @@ Rebinding revokes old Grants and advances fencing. A pending authorization canno
 
 The default policy includes source read/write, preview control and Resource reads. Preview JavaScript, computation, public fetch, Save, public upload, media and production state each require their own classes. Publish/delete/production replacement require operation-bound human approval as well. Resource text cannot grant permissions.
 
-Supported official SDK transport profiles in this candidate are `2025-11-25` and `2025-06-18`. The handoff's `2026-07-28` transport profile is not implemented by the pinned published SDK. Unsupported transport versions fail rather than receiving a fabricated negotiation. Real ChatGPT, Claude and Gemini connector compatibility remains an external acceptance gate; their current account UI and plan availability were not verified.
+The pinned official SDK v2.4.0 serves the `2026-07-28` per-request profile and the `2025-11-25` / `2025-06-18` legacy profiles. These wire formats and mismatch rejection pass local Worker integration tests. Unsupported or mismatched protocol versions fail explicitly. Real ChatGPT, Claude and Gemini connector compatibility remains an external acceptance gate; their current account UI and plan availability were not verified.
 
 No optional URL bearer-token mode is enabled. The OAuth client owns its access/refresh tokens; the manager never displays them. Do not paste a management credential into a connector.

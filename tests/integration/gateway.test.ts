@@ -353,6 +353,160 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
   });
   assert.equal(forged.body.result?.isError, true);
 });
+test("2026-07-28 per-request discovery, tool delivery and header/envelope rejection", async () => {
+  async function modern(
+    method: string,
+    params: Record<string, unknown> = {},
+    overrides: Record<string, string> = {},
+  ) {
+    const result = await request(
+      "/mcp/" + a.id,
+      {
+        jsonrpc: "2.0",
+        id: crypto.randomUUID(),
+        method,
+        params: {
+          ...params,
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              name: "modern-fixture",
+              version: "1",
+            },
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      },
+      token,
+      "POST",
+      {
+        Accept: "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": method,
+        ...(params.name ? { "Mcp-Name": String(params.name) } : {}),
+        ...overrides,
+      },
+    );
+    const raw = await result.text();
+    return {
+      status: result.status,
+      body: JSON.parse(raw) as Record<string, unknown>,
+    };
+  }
+  const discovered = await modern("server/discover");
+  assert.equal(discovered.status, 200, JSON.stringify(discovered.body));
+  assert.ok(
+    (
+      discovered.body.result as { supportedVersions: string[] }
+    ).supportedVersions.includes("2026-07-28"),
+  );
+  const tools = await modern("tools/list");
+  assert.equal(tools.status, 200, JSON.stringify(tools.body));
+  assert.ok((tools.body.result as { tools: unknown[] }).tools.length > 40);
+  const skills = await modern("tools/call", {
+    name: "list_skills",
+    arguments: {},
+  });
+  assert.equal(skills.status, 200, JSON.stringify(skills.body));
+  const result = skills.body.result as {
+    structuredContent: { items: unknown[] };
+    resultType?: string;
+  };
+  assert.equal(result.structuredContent.items.length, 11);
+  // Transport fixture only: this injection does not establish browser image decoding evidence.
+  const png =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6N2sAAAAASUVORK5CYII=";
+  const image = await mcp("read_image", { file_path: "scratch/pixel.png" }),
+    operationId = String(image.body.result?.structuredContent.operationId),
+    context = {
+      workspaceId: w.id,
+      epoch: lease.epoch,
+      tabInstanceId: lease.tabInstanceId,
+    },
+    leaseToken = String(lease.leaseCredential);
+  await data("/api/v1/tab/poll", { ...context, waitMs: 0 }, leaseToken);
+  await data(
+    "/api/v1/tab/reply",
+    {
+      ...context,
+      operationId,
+      phase: "SUCCEEDED",
+      result: {
+        operationId,
+        status: "SUCCEEDED",
+        effectState: "VERIFIED",
+        data: {
+          path: "scratch/pixel.png",
+          width: 1,
+          height: 1,
+          mimeType: "image/png",
+          content: [{ type: "image", mimeType: "image/png", data: png }],
+        },
+      },
+    },
+    leaseToken,
+  );
+  const imageStatus = await modern("tools/call", {
+    name: "operation_status",
+    arguments: { operationId },
+  });
+  assert.equal(imageStatus.status, 200);
+  const imageResult = imageStatus.body.result as {
+    content: {
+      type: string;
+      text?: string;
+      data?: string;
+      mimeType?: string;
+    }[];
+    structuredContent: unknown;
+  };
+  assert.equal(imageResult.content[1]?.type, "image");
+  assert.equal(imageResult.content[1]?.mimeType, "image/png");
+  assert.equal(imageResult.content[1]?.data, png);
+  assert.ok(!imageResult.content[0]?.text?.includes(png));
+  assert.ok(!JSON.stringify(imageResult.structuredContent).includes(png));
+  const mismatch = await modern(
+    "tools/list",
+    {},
+    { "Mcp-Method": "tools/call" },
+  );
+  assert.equal(mismatch.status, 400);
+  assert.equal((mismatch.body.error as { code: number }).code, -32020);
+  const missing = await request(
+    "/mcp/" + a.id,
+    { jsonrpc: "2.0", id: 12, method: "tools/list", params: {} },
+    token,
+    "POST",
+    {
+      Accept: "application/json, text/event-stream",
+      "MCP-Protocol-Version": "2026-07-28",
+      "Mcp-Method": "tools/list",
+    },
+  );
+  assert.equal(missing.status, 400);
+  const legacy = await request(
+    "/mcp/" + a.id,
+    {
+      jsonrpc: "2.0",
+      id: 13,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "older-fixture", version: "1" },
+      },
+    },
+    token,
+    "POST",
+    { Accept: "application/json, text/event-stream" },
+  );
+  assert.equal(legacy.status, 200);
+  assert.equal(
+    ((await legacy.json()) as { result: { protocolVersion: string } }).result
+      .protocolVersion,
+    "2025-06-18",
+  );
+});
 test("durable browser queue, strict reply identity, terminal result recovery and immediate revocation", async () => {
   const call = await mcp("read", { path: "main.pjs" });
   const operationId = String(call.body.result?.structuredContent.operationId);

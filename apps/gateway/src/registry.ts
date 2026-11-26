@@ -1,3 +1,4 @@
+import { ResourceError } from "../../../packages/resource-library/src/index.js";
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import {
   ApiError,
@@ -6,6 +7,7 @@ import {
   bearer,
   binding,
   canonical,
+  configuredBudget,
   digest,
   errorResponse,
   fields,
@@ -30,6 +32,7 @@ export interface WorkspaceRecord {
   permissions: string[];
   paused: boolean;
   binding: Binding | null;
+  recoveryBinding?: { binding: Binding; bindingRevision: number };
   agentId?: string;
   epoch: number;
 }
@@ -139,6 +142,22 @@ export class Registry {
       )
         this.db.delete(key);
     }
+    for (const key of this.db.keys("terminal-notice/")) {
+      const notice = this.db.get<{
+        expires: number;
+        phase: string;
+        event?: { resolution?: unknown };
+      }>(key);
+      if (
+        notice.expires < now &&
+        (!["UNKNOWN", "PARTIAL"].includes(notice.phase) ||
+          notice.event?.resolution)
+      ) {
+        this.db.delete(key);
+        if (notice.event?.resolution)
+          this.db.delete(key.replace("terminal-notice/", "resolution/"));
+      }
+    }
     for (const key of this.db.keys("idempotency/"))
       if (this.db.get<{ expires: number }>(key).expires < now)
         this.db.delete(key);
@@ -181,12 +200,45 @@ export class Registry {
     try {
       return await this.route(request);
     } catch (error) {
-      return errorResponse(error);
+      return errorResponse(
+        error instanceof ResourceError
+          ? new ApiError(
+              error.code,
+              error.message,
+              error.code === "RESOURCE_NOT_FOUND" ? 404 : 409,
+            )
+          : error,
+      );
     }
   }
   private async route(request: Request): Promise<Response> {
     const url = new URL(request.url),
       path = url.pathname;
+    if (path === "/internal/registration-budget") {
+      return json(
+        this.db.transaction(() => {
+          const limit = configuredBudget(
+              this.env.OAUTH_REGISTRATIONS_PER_HOUR,
+              100,
+              10000,
+            ),
+            window = Math.floor(Date.now() / 3600000),
+            old = this.db.get<{ window: number; count: number }>(
+              "registration-budget",
+              { window, count: 0 },
+            );
+          const count = old.window === window ? old.count : 0;
+          if (count >= limit)
+            throw new ApiError(
+              "QUOTA_EXCEEDED",
+              "OAuth registration budget reached; retry after the current hour.",
+              429,
+            );
+          this.db.put("registration-budget", { window, count: count + 1 });
+          return { remaining: limit - count - 1 };
+        }),
+      );
+    }
     if (path === "/internal/config") {
       const c = this.core();
       return json({
@@ -209,7 +261,7 @@ export class Registry {
         paired: c.paired,
         configured: !!c.issuer,
         providerWritesEnabled: this.env.PROVIDER_WRITES_ENABLED === "true",
-        protocolVersions: ["2025-11-25", "2025-06-18"],
+        protocolVersions: ["2026-07-28", "2025-11-25", "2025-06-18"],
       });
     }
     if (path === "/api/v1/admin/pair") {
@@ -286,6 +338,11 @@ export class Registry {
         c.policyRevision++;
         for (const key of this.db.keys("workspace/")) {
           const w = this.db.get<WorkspaceRecord>(key);
+          if (w.binding)
+            w.recoveryBinding = {
+              binding: w.binding,
+              bindingRevision: w.bindingRevision,
+            };
           w.binding = null;
           w.bindingRevision++;
           w.epoch++;
@@ -400,6 +457,11 @@ export class Registry {
           if (a.expiresAt <= Date.now())
             throw new ApiError("EXPIRED", "Authorization expired.", 410);
           if (a.state === "pending") return { state: a.state };
+          if (a.state === "denied") {
+            a.state = "consumed";
+            this.db.put("approval/" + a.id, a);
+            return { state: "denied", request: a.request };
+          }
           if (a.state !== "approved") return { state: a.state };
           const w = this.getWorkspace(a.workspaceId),
             agent = this.getAgent(a.agentId);
@@ -420,7 +482,10 @@ export class Registry {
           a.state = "consumed";
           this.db.put("approval/" + a.id, a);
           this.cleanup();
-          if (this.db.keys("grant/").length >= 1000)
+          if (
+            this.db.keys("grant/").length >=
+            configuredBudget(this.env.REGISTRY_GRANT_BUDGET, 1000)
+          )
             throw new ApiError(
               "QUOTA_EXCEEDED",
               "Grant budget reached; revoke and wait for expired grants to retire.",
@@ -587,29 +652,77 @@ export class Registry {
     if (path === "/internal/terminal") {
       const b = await parseBody(request);
       this.db.transaction(() => {
-        const w = this.getWorkspace(id(b.workspaceId));
-        if (w.binding && !["UNKNOWN", "PARTIAL"].includes(String(b.status))) {
-          const key = "reservation/" + w.binding.generatorId,
-            existing = this.db.get<{ operationId: string }>(key);
-          if (existing?.operationId === b.operationId) this.db.delete(key);
+        const w = this.getWorkspace(id(b.workspaceId)),
+          operationId = id(b.operationId);
+        if (
+          ![
+            "SUCCEEDED",
+            "REJECTED",
+            "UNKNOWN",
+            "PARTIAL",
+            "CANCELLED",
+          ].includes(String(b.status))
+        )
+          throw new ApiError(
+            "INVALID_INPUT",
+            "Terminal notice status required.",
+          );
+        const key = "terminal-notice/" + w.id + "/" + operationId,
+          prior = this.db.get<{ phase: string }>(key);
+        if (prior) {
+          if (prior.phase !== b.status)
+            throw new ApiError(
+              "CONFLICT",
+              "Terminal notice cannot rewrite the original outcome.",
+              409,
+            );
+          return;
         }
-        this.db.put("permit/" + String(b.operationId), {
+        const terminalBinding = w.binding ?? w.recoveryBinding?.binding;
+        if (
+          terminalBinding &&
+          !["UNKNOWN", "PARTIAL"].includes(String(b.status))
+        ) {
+          const reservedKey = "reservation/" + terminalBinding.generatorId,
+            existing = this.db.get<{ operationId: string }>(reservedKey);
+          if (existing?.operationId === operationId)
+            this.db.delete(reservedKey);
+        }
+        this.db.put("permit/" + operationId, {
           workspaceId: w.id,
           epoch: b.epoch,
           createdAt: Date.now(),
           state: "terminal",
         });
-        const events = this.db.get<unknown[]>("activity", []);
-        events.push({
-          operationId: b.operationId,
+        const event = {
+          operationId,
           workspaceId: w.id,
           tool: b.tool,
           phase: b.status,
           epoch: b.epoch,
           bindingRevision: b.bindingRevision,
-          timestamp: Date.now(),
+          traceId: b.traceId,
+          timestamp: b.timestamp ?? Date.now(),
+          durationMs: b.durationMs ?? 0,
+          ...(b.errorCode ? { errorCode: b.errorCode } : {}),
+          ...((this.db.get("resolution/" + w.id + "/" + operationId) ??
+          b.resolution)
+            ? {
+                resolution:
+                  this.db.get("resolution/" + w.id + "/" + operationId) ??
+                  b.resolution,
+              }
+            : {}),
+        };
+        this.db.put(key, {
+          phase: b.status,
+          event,
+          expires: Date.now() + 7 * 86400000,
         });
+        const events = this.db.get<unknown[]>("activity", []);
+        events.push(event);
         this.db.put("activity", events.slice(-1000));
+        this.bump(this.core());
       });
       return json({ ok: true });
     }
@@ -746,12 +859,37 @@ export class Registry {
         paired: c.paired,
         version: VERSION,
         schemaVersion: 1,
+        limits: {
+          workspaces: configuredBudget(
+            this.env.REGISTRY_WORKSPACE_BUDGET,
+            1000,
+          ),
+          grants: configuredBudget(this.env.REGISTRY_GRANT_BUDGET, 1000),
+          oauthRegistrationsPerHour: configuredBudget(
+            this.env.OAUTH_REGISTRATIONS_PER_HOUR,
+            100,
+            10000,
+          ),
+          workspaceQueue: 8,
+          leaseMs: 180000,
+          pollMs: 25000,
+          inlineMcpBytes: 262144,
+          workspaceTransientBytes: 8 * 1024 * 1024,
+        },
         libraryRevision: this.db.get<{ revision: number }>("library", {
           revision: 0,
         }).revision,
         workspaces: this.db.keys("workspace/").length,
         agents: this.db.keys("agent/").length,
       });
+    const entity =
+      /^\/api\/v1\/admin\/(workspaces|agents)\/([a-zA-Z0-9_-]+)$/.exec(path);
+    if (entity)
+      return json(
+        entity[1] === "workspaces"
+          ? this.getWorkspace(entity[2]!)
+          : this.getAgent(entity[2]!),
+      );
     const lists: Record<string, string> = {
       workspaces: "workspace/",
       agents: "agent/",
@@ -778,12 +916,81 @@ export class Registry {
         cursor: items.length === 100 ? String(offset + 100) : null,
       });
     }
-    if (path === prefix + "activity")
+    if (path === prefix + "activity") {
+      const current = this.core(),
+        raw = url.searchParams.get("cursor"),
+        parts = raw?.split(":"),
+        offset = parts ? Number(parts[1]) : 0;
+      if (
+        (parts &&
+          (parts.length !== 2 || Number(parts[0]) !== current.revision)) ||
+        !Number.isSafeInteger(offset) ||
+        offset < 0
+      )
+        throw new ApiError(
+          "STALE_REVISION",
+          "Activity changed; restart the list.",
+          409,
+        );
+      const events = new Map<string, Record<string, unknown>>();
+      for (const event of this.db.get<Record<string, unknown>[]>(
+        "activity",
+        [],
+      ))
+        events.set(
+          String(event.workspaceId) + "/" + String(event.operationId),
+          event,
+        );
+      for (const key of this.db.keys("terminal-notice/")) {
+        const row = this.db.get<{
+          phase: string;
+          event?: Record<string, unknown>;
+        }>(key);
+        if (["UNKNOWN", "PARTIAL"].includes(row.phase) && row.event)
+          events.set(
+            String(row.event.workspaceId) + "/" + String(row.event.operationId),
+            row.event,
+          );
+      }
+      const status = url.searchParams.get("status"),
+        workspaceId = url.searchParams.get("workspaceId");
+      const all = [...events.values()]
+        .filter(
+          (e) =>
+            (!status || e.phase === status) &&
+            (!workspaceId || e.workspaceId === workspaceId),
+        )
+        .sort(
+          (a, b) =>
+            Number(
+              ["UNKNOWN", "PARTIAL"].includes(String(b.phase)) && !b.resolution,
+            ) -
+              Number(
+                ["UNKNOWN", "PARTIAL"].includes(String(a.phase)) &&
+                  !a.resolution,
+              ) ||
+            Math.max(
+              Number(b.timestamp),
+              Number(
+                (b.resolution as { timestamp?: number } | undefined)
+                  ?.timestamp ?? 0,
+              ),
+            ) -
+              Math.max(
+                Number(a.timestamp),
+                Number(
+                  (a.resolution as { timestamp?: number } | undefined)
+                    ?.timestamp ?? 0,
+                ),
+              ),
+        );
+      const end = Math.min(all.length, offset + 100);
       return json({
-        items: this.db.get<unknown[]>("activity", []).slice(-100).reverse(),
-        revision: c.revision,
-        cursor: null,
+        items: all.slice(offset, end),
+        revision: current.revision,
+        cursor: end < all.length ? current.revision + ":" + end : null,
       });
+    }
     throw new ApiError("NOT_FOUND", "Route not found.", 404);
   }
   private writeAdmin(
@@ -794,7 +1001,10 @@ export class Registry {
     const prefix = "/api/v1/admin/";
     if (path === prefix + "workspaces") {
       fields(b, ["label", "permissions"]);
-      if (this.db.keys("workspace/").length >= 1000)
+      if (
+        this.db.keys("workspace/").length >=
+        configuredBudget(this.env.REGISTRY_WORKSPACE_BUDGET, 1000)
+      )
         throw new ApiError(
           "QUOTA_EXCEEDED",
           "Workspace count exceeds installation budget.",
@@ -853,7 +1063,8 @@ export class Registry {
       revision(b.expectedRevision, w.revision);
       if (
         b.acknowledgeUncertainty !== true ||
-        b.bindingRevision !== w.bindingRevision ||
+        (b.bindingRevision !== w.bindingRevision &&
+          b.bindingRevision !== w.recoveryBinding?.bindingRevision) ||
         !Number.isSafeInteger(b.epoch)
       )
         throw new ApiError(
@@ -880,10 +1091,32 @@ export class Registry {
       w.epoch++;
       w.revision++;
       this.db.put("workspace/" + w.id, w);
-      if (w.binding) {
-        const key = "reservation/" + w.binding.generatorId;
+      const resolutionBinding =
+        w.recoveryBinding &&
+        b.bindingRevision === w.recoveryBinding.bindingRevision
+          ? w.recoveryBinding.binding
+          : w.binding;
+      if (resolutionBinding) {
+        const key = "reservation/" + resolutionBinding.generatorId;
         const reserved = this.db.get<{ operationId: string }>(key);
         if (reserved?.operationId === operationId) this.db.delete(key);
+      }
+      this.db.put("resolution/" + w.id + "/" + operationId, resolution);
+      const activity = this.db.get<Record<string, unknown>[]>("activity", []);
+      for (const event of activity)
+        if (event.workspaceId === w.id && event.operationId === operationId)
+          event.resolution = resolution;
+      this.db.put("activity", activity);
+      const noticeKey = "terminal-notice/" + w.id + "/" + operationId,
+        notice = this.db.get<{
+          phase: string;
+          event?: Record<string, unknown>;
+          expires: number;
+        }>(noticeKey);
+      if (notice?.event) {
+        notice.event.resolution = resolution;
+        notice.expires = Date.now() + 7 * 86400000;
+        this.db.put(noticeKey, notice);
       }
       return {
         workspaceId: w.id,
@@ -920,6 +1153,27 @@ export class Registry {
           "Wait for or reconcile the generator writer before changing its binding.",
           409,
         );
+      if (
+        m[2] &&
+        (this.db.keys("permit/").some((key) => {
+          const p = this.db.get<{ workspaceId: string; state: string }>(key);
+          return p.workspaceId === w.id && p.state === "consumed";
+        }) ||
+          this.db.keys("terminal-notice/" + w.id + "/").some((key) => {
+            const n = this.db.get<{
+              phase: string;
+              event?: { resolution?: unknown };
+            }>(key);
+            return (
+              ["UNKNOWN", "PARTIAL"].includes(n.phase) && !n.event?.resolution
+            );
+          }))
+      )
+        throw new ApiError(
+          "EFFECT_UNKNOWN",
+          "Settle or resolve every dispatched operation before changing the binding.",
+          409,
+        );
       if (m[2] === "bind") {
         fields(b, ["expectedRevision", "binding", "replace"]);
         const proposed = binding(b.binding);
@@ -945,6 +1199,7 @@ export class Registry {
             409,
           );
         w.binding = proposed;
+        delete w.recoveryBinding;
         w.bindingRevision++;
         w.epoch++;
         this.revokeWorkspace(w.id);

@@ -1,3 +1,5 @@
+import { ImageTransferHandler } from "./image-transfer.js";
+import { MusicHandler } from "./media/handler.js";
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import {
   ApiError,
@@ -8,6 +10,7 @@ import {
   id,
   json,
   parseBody,
+  operationTimeoutMs,
   randomSecret,
   registry,
   rpc,
@@ -53,11 +56,15 @@ interface Operation {
   result?: unknown;
   createdAt: number;
   terminalAt?: number;
+  terminalNotified?: boolean;
+  terminalErrorCode?: string;
   resolution?: unknown;
   lateObservation?: unknown;
 }
 export class Workspace {
   private db: SqlRecords;
+  private music: MusicHandler;
+  private images: ImageTransferHandler<Operation>;
   private wake: (() => void) | undefined;
   constructor(
     private state: DurableObjectState,
@@ -72,24 +79,173 @@ export class Workspace {
         409,
       );
     this.db.put("schema", 1);
+    this.images = new ImageTransferHandler(this.db, {
+      getLease: () => this.db.get<Lease>("lease"),
+      getOperation: (operationId) =>
+        this.db.get<Operation>("operation/" + operationId),
+      authorize: async (op) => {
+        const fresh = await rpc<{ workspace: WorkspaceRecord }>(
+          registry(this.env),
+          "/internal/authorize",
+          {
+            props: op.props,
+            agentId: op.agentId,
+            permissions: op.requiredPermissions,
+            mutating: false,
+          },
+        );
+        if (
+          fresh.workspace.epoch !== op.epoch ||
+          fresh.workspace.bindingRevision !== op.bindingRevision
+        )
+          throw new ApiError(
+            "STALE_EPOCH",
+            "Image operation binding changed.",
+            409,
+          );
+      },
+    });
+    this.music = new MusicHandler(this.db, this.env, {
+      getLease: () => this.db.get<Lease>("lease"),
+      authorize: async (op, action) => {
+        const result = await rpc<{ workspace: WorkspaceRecord }>(
+          registry(this.env),
+          action === "start" ? "/internal/dispatch" : "/internal/authorize",
+          {
+            props: op.props,
+            agentId: op.agentId,
+            permissions: ["MEDIA", "WRITE_SOURCE"],
+            mutating: action === "start",
+            workspaceId: op.workspaceId,
+            bindingRevision: op.bindingRevision,
+            epoch: op.epoch,
+            operationId: op.operationId,
+          },
+        );
+        if (
+          result.workspace.epoch !== op.epoch ||
+          result.workspace.bindingRevision !== op.bindingRevision
+        )
+          throw new ApiError(
+            "STALE_EPOCH",
+            "Music operation binding changed.",
+            409,
+          );
+      },
+    });
   }
   async fetch(request: Request): Promise<Response> {
+    let response: Response;
     try {
-      return await this.route(request);
+      response = await this.route(request);
     } catch (error) {
-      return errorResponse(error);
+      response = errorResponse(error);
+    }
+    await this.drainTerminalOutbox();
+    return response;
+  }
+  async alarm(): Promise<void> {
+    this.expire();
+    await this.drainTerminalOutbox();
+  }
+  private async scheduleAlarm(retryMs?: number): Promise<void> {
+    const rows = this.operations(),
+      deadlines = rows.filter((o) => !o.terminalAt).map((o) => o.deadlineMs);
+    for (const row of rows)
+      if (row.terminalAt && row.result !== undefined)
+        deadlines.push(row.terminalAt + 600000);
+    for (const expiry of [this.images.nextExpiry(), this.music.nextExpiry()])
+      if (expiry !== undefined) deadlines.push(expiry);
+    if (rows.some((o) => o.terminalAt && !o.terminalNotified))
+      deadlines.push(Date.now() + (retryMs ?? 1000));
+    if (!deadlines.length) {
+      await this.state.storage.deleteAlarm();
+      return;
+    }
+    const next = Math.max(Date.now() + 10, Math.min(...deadlines)),
+      existing = await this.state.storage.getAlarm();
+    if (existing === null || existing <= Date.now() || next < existing)
+      await this.state.storage.setAlarm(next);
+  }
+  private async drainTerminalOutbox(): Promise<void> {
+    let failed = false;
+    for (const op of this.operations().filter(
+      (row) => row.terminalAt && !row.terminalNotified,
+    )) {
+      const error = (op.result as { error?: { code?: unknown } } | undefined)
+        ?.error;
+      const errorCode =
+        op.terminalErrorCode ??
+        (typeof error?.code === "string" &&
+        /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+          ? error.code
+          : op.phase === "UNKNOWN"
+            ? "EFFECT_UNKNOWN"
+            : op.phase === "PARTIAL"
+              ? "PARTIAL_EFFECT"
+              : op.phase === "CANCELLED"
+                ? "CANCELLED"
+                : undefined);
+      try {
+        await rpc(registry(this.env), "/internal/terminal", {
+          workspaceId: op.workspaceId,
+          operationId: op.operationId,
+          tool: op.tool,
+          status: op.phase,
+          epoch: op.epoch,
+          bindingRevision: op.bindingRevision,
+          traceId: op.traceId,
+          timestamp: op.terminalAt,
+          durationMs: Math.max(0, op.terminalAt! - op.createdAt),
+          ...(errorCode ? { errorCode } : {}),
+          ...(op.resolution ? { resolution: op.resolution } : {}),
+        });
+        this.db.transaction(() => {
+          const current = this.db.get<Operation>("operation/" + op.operationId);
+          if (current && current.phase === op.phase) {
+            current.terminalNotified = true;
+            this.db.put("operation/" + current.operationId, current);
+          }
+        });
+      } catch {
+        failed = true;
+        break;
+      }
+    }
+    const delay = failed
+      ? Math.min(60000, this.db.get<number>("outbox-backoff", 500) * 2)
+      : 1000;
+    this.db.put("outbox-backoff", delay);
+    try {
+      await this.scheduleAlarm(failed ? delay : undefined);
+    } catch {
+      /* Persistent terminal rows remain the outbox for the next request/alarm. */
     }
   }
   private operations(): Operation[] {
     return this.db.keys("operation/").map((k) => this.db.get<Operation>(k));
   }
   private expire(): void {
+    this.images.expire();
+    this.music.expire();
     this.db.transaction(() => {
       const now = Date.now();
       for (const key of this.db.keys("retired/"))
         if (this.db.get<Lease>(key).expiresAt + 86400000 < now)
           this.db.delete(key);
       for (const op of this.operations()) {
+        const terminalCode = (
+          op.result as { error?: { code?: unknown } } | undefined
+        )?.error?.code;
+        if (
+          op.terminalAt &&
+          !op.terminalErrorCode &&
+          typeof terminalCode === "string" &&
+          /^[A-Z][A-Z0-9_]{0,63}$/.test(terminalCode)
+        ) {
+          op.terminalErrorCode = terminalCode;
+          this.db.put("operation/" + op.operationId, op);
+        }
         if (
           ![
             "SUCCEEDED",
@@ -102,7 +258,15 @@ export class Workspace {
         ) {
           op.phase = op.phase === "ADMITTED" ? "REJECTED" : "UNKNOWN";
           op.result = {
+            operationId: op.operationId,
+            status: op.phase,
+            effectState: op.phase === "UNKNOWN" ? "POSSIBLE" : "NONE",
             error: {
+              retryable: false,
+              recovery:
+                op.phase === "UNKNOWN"
+                  ? "Inspect native source and reconcile the exact operation; do not replay."
+                  : "No dispatch occurred; inspect current status before retry.",
               code: op.phase === "UNKNOWN" ? "EFFECT_UNKNOWN" : "TIMEOUT",
               message:
                 op.phase === "UNKNOWN"
@@ -115,7 +279,7 @@ export class Workspace {
           this.db.put("operation/" + op.operationId, op);
         } else if (
           op.terminalAt &&
-          op.terminalAt + 600000 < now &&
+          op.terminalAt + 600000 <= now &&
           op.result !== undefined
         ) {
           delete op.result;
@@ -124,14 +288,16 @@ export class Workspace {
       }
       const terminal = this.operations()
         .filter(
-          (o) => o.terminalAt && o.phase !== "UNKNOWN" && o.phase !== "PARTIAL",
+          (o) =>
+            o.terminalAt &&
+            o.terminalNotified &&
+            ((o.phase !== "UNKNOWN" && o.phase !== "PARTIAL") || o.resolution),
         )
         .sort((a, b) => a.createdAt - b.createdAt);
-      for (const op of terminal)
-        if (terminal.length > 1000 || op.createdAt + 7 * 86400000 < now) {
+      const excess = Math.max(0, terminal.length - 1000);
+      for (const [index, op] of terminal.entries())
+        if (index < excess || op.createdAt + 7 * 86400000 <= now)
           this.db.delete("operation/" + op.operationId);
-          terminal.shift();
-        }
     });
   }
   private async lease(
@@ -209,9 +375,7 @@ export class Workspace {
         epoch: l.epoch,
         bindingRevision: w.bindingRevision,
         tabInstanceId: l.tabInstanceId,
-        deadlineMs:
-          Date.now() +
-          Math.min(3600000, Math.max(30000, Number(args.timeoutMs ?? 30000))),
+        deadlineMs: Date.now() + operationTimeoutMs(tool, args),
         tool,
         args,
         permissions: b.permissions as string[],
@@ -225,6 +389,14 @@ export class Workspace {
       };
       this.db.transaction(() => {
         const all = this.operations();
+        if (
+          all.filter((o) => o.terminalAt && !o.terminalNotified).length >= 128
+        )
+          throw new ApiError(
+            "QUOTA_EXCEEDED",
+            "Terminal notice outbox is full; restore Registry communication before new work.",
+            429,
+          );
         if (
           all.filter(
             (o) => ["UNKNOWN", "PARTIAL"].includes(o.phase) && !o.resolution,
@@ -273,7 +445,13 @@ export class Workspace {
     }
     if (path === "/internal/status" || path === "/internal/cancel") {
       const op = this.db.get<Operation>("operation/" + id(b.operationId));
-      if (!op || op.workspaceId !== b.workspaceId)
+      if (
+        !op ||
+        op.workspaceId !== b.workspaceId ||
+        (b.bindingRevision !== undefined &&
+          op.bindingRevision !== b.bindingRevision) ||
+        (b.agentId !== undefined && op.agentId !== b.agentId)
+      )
         throw new ApiError(
           "NOT_FOUND",
           "Operation not found in this Workspace.",
@@ -282,6 +460,18 @@ export class Workspace {
       if (path === "/internal/cancel") {
         if (op.phase === "ADMITTED") {
           op.phase = "CANCELLED";
+          op.result = {
+            operationId: op.operationId,
+            status: "CANCELLED",
+            effectState: "NONE",
+            error: {
+              code: "CANCELLED",
+              message: "Queued operation cancelled before dispatch.",
+              retryable: false,
+              recovery:
+                "No effect occurred. Inspect current source before starting new work.",
+            },
+          };
           op.terminalAt = Date.now();
           delete op.args;
           this.db.put("operation/" + op.operationId, op);
@@ -292,7 +482,19 @@ export class Workspace {
             409,
           );
       }
-      return json(this.summary(op));
+      const summary = this.summary(op);
+      return json(
+        path === "/internal/status" &&
+          typeof b.agentId === "string" &&
+          typeof b.bindingRevision === "number"
+          ? await this.images.hydrate(summary, {
+              workspaceId: op.workspaceId,
+              operationId: op.operationId,
+              agentId: b.agentId,
+              bindingRevision: b.bindingRevision,
+            })
+          : summary,
+      );
     }
     if (path === "/api/v1/tab/claim") {
       const workspaceId = id(b.workspaceId),
@@ -411,6 +613,10 @@ export class Workspace {
       b,
       path === "/api/v1/tab/reply" && b.phase !== "RUNNING",
     );
+    if (path === "/api/v1/tab/image")
+      return json(await this.images.handle(b, l));
+    if (path === "/api/v1/tab/music" || path === "/api/v1/tab/music-result")
+      return json(await this.music.handle(path, b, l));
     if (path === "/api/v1/tab/release") {
       this.db.put("retired/" + l.epoch + "/" + l.tabInstanceId, l);
       this.db.delete("lease");
@@ -642,7 +848,6 @@ export class Workspace {
             "Terminal result must match operation and phase.",
           );
       }
-      let notify: Operation | undefined;
       this.db.transaction(() => {
         const op = this.db.get<Operation>("operation/" + operationId);
         if (!op || op.epoch !== l.epoch || op.tabInstanceId !== l.tabInstanceId)
@@ -688,19 +893,9 @@ export class Workspace {
               : undefined;
           op.terminalAt = Date.now();
           delete op.args;
-          notify = op;
         }
         this.db.put("operation/" + operationId, op);
       });
-      if (notify)
-        await rpc(registry(this.env), "/internal/terminal", {
-          workspaceId: l.workspaceId,
-          operationId,
-          tool: notify.tool,
-          status: phase,
-          epoch: notify.epoch,
-          bindingRevision: notify.bindingRevision,
-        });
       return json({ ok: true });
     }
     throw new ApiError("NOT_FOUND", "Route not found.", 404);

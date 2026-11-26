@@ -4,18 +4,25 @@ import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, digest, equa
 export interface WorkspaceSnapshot extends NativeSnapshot { nativeRevision: string; generation: number }
 interface StoredSource { version: 1; identity: NativeIdentity; files: Record<string, string>; revision: string; createdAt: number; label: string; pinned: boolean }
 interface LocalState { version: 1; files: Record<string, string>; lastHash: string; generation: number }
-interface Journal { id: string; state: 'INTENT' | 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN' | 'REJECTED'; paths: string[]; baseRevision: string; checkpointId: string; createdAt: number }
+interface Journal { id: string; state: 'INTENT' | 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN' | 'REJECTED'; paths: string[]; baseRevision: string; checkpointId?: string; kind?: 'SOURCE'|'IMPORT'; createdAt: number; resolvedByOperator?: boolean; inspectedRevision?: string; resolvedAt?: number }
 /** Serialized per active lease. Durable generation pointer stores scratch without page-origin storage. */
 export class VirtualFileSystem {
-  private chunks: ChunkStore; private tail: Promise<unknown> = Promise.resolve(); readonly prefix: string;
+  private chunks: ChunkStore; private tail: Promise<unknown> = Promise.resolve(); private observationTail: Promise<unknown> = Promise.resolve(); readonly prefix: string;
   constructor(readonly adapter: NativeAdapter, readonly store: KeyValueStore, readonly workspaceId: string, readonly maxBytes = 64 * 1024 * 1024) {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId)) throw new BrowserError('INVALID_INPUT', 'Invalid local Workspace ID.'); this.prefix = `perch:workspace:${workspaceId}`; this.chunks = new ChunkStore(store, this.prefix, maxBytes);
   }
   private async local(): Promise<LocalState> { const raw = await this.chunks.get('local'); if (!raw) return { version: 1, files: {}, lastHash: '', generation: 0 }; try { const data = JSON.parse(new TextDecoder().decode(raw)) as LocalState; if (data.version !== 1 || !data.files || !Number.isSafeInteger(data.generation) || data.generation < 0) throw new Error(); for (const path of Object.keys(data.files)) if (!canonicalPath(path).startsWith('scratch/') && !path.startsWith('imports/')) throw new Error(); return data; } catch { throw new BrowserError('STORAGE_CORRUPT', 'Local filesystem manifest is invalid; export and recover it before writing.'); } }
   async snapshot(): Promise<WorkspaceSnapshot> {
-    const native = await this.adapter.snapshot(); const local = await this.local(); const files = { ...native.files }; for (const [path, value] of Object.entries(local.files)) files[path] = base64ToBytes(value);
-    const hash = await snapshotRevision(native.identity, files); if (hash !== local.lastHash) { local.generation++; local.lastHash = hash; await this.chunks.put('local', utf8.encode(JSON.stringify(local))); }
-    return { ...native, files, nativeRevision: native.revision, revision: `${local.generation}:${hash}`, generation: local.generation };
+    const observe = async (): Promise<WorkspaceSnapshot> => {
+      const native = await this.adapter.snapshot(); const local = await this.local(); const files = { ...native.files }; for (const [path, value] of Object.entries(local.files)) files[path] = base64ToBytes(value);
+      const hash = await snapshotRevision(native.identity, files);
+      const key = `${this.prefix}:observation`; const persisted = await this.store.get<{generation:number;hash:string}>(key);
+      const observed = persisted ?? {generation:local.generation,hash:local.lastHash};
+      if (!Number.isSafeInteger(observed.generation) || observed.generation < 0 || typeof observed.hash !== 'string') throw new BrowserError('STORAGE_CORRUPT','Invalid local revision observation.');
+      if (hash !== observed.hash) { observed.generation++; observed.hash=hash; await this.store.set(key,observed); }
+      return { ...native, files, nativeRevision: native.revision, revision: `${observed.generation}:${hash}`, generation: observed.generation };
+    };
+    const next = this.observationTail.then(observe,observe); this.observationTail=next.catch(()=>undefined); return next;
   }
   getSnapshot(): Promise<WorkspaceSnapshot> { return this.snapshot(); }
   async list(path = ''): Promise<string[]> { if (path && !['src', 'scratch', 'imports'].includes(path)) canonicalPath(path); const files = Object.keys((await this.snapshot()).files).sort(); return path ? files.filter(name => name === path || name.startsWith(`${path.replace(/\/$/, '')}/`)) : files; }
@@ -59,6 +66,7 @@ export class VirtualFileSystem {
   async importSnapshot(id: string, files: Record<string, Uint8Array>, expectedRevision?: string): Promise<{ revision: string; paths: string[]; sha256: string }> {
     return this.serial(async () => {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) || id === '.' || id === '..') throw new BrowserError('PATH_DENIED', 'Invalid import snapshot ID.');
+      if ((await this.unresolved()).length) throw new BrowserError('EFFECT_UNKNOWN','Unresolved native effects block new import publication.');
       const before = await this.snapshot(); if (expectedRevision && before.revision !== expectedRevision) throw new BrowserError('STALE_REVISION', 'Workspace changed before import publication.');
       const sourcePaths = Object.keys(files).sort(); if (sourcePaths.length > 1000 || !sourcePaths.length) throw new BrowserError('LIMIT_EXCEEDED', 'Import requires 1–1000 files.');
       const staged: Record<string,string> = {}; const seen = new Set<string>();
@@ -68,12 +76,24 @@ export class VirtualFileSystem {
       const nativeBytes = Object.entries(before.files).filter(([path]) => !path.startsWith('scratch/') && !path.startsWith('imports/')).reduce((n, [, b]) => n + b.length, 0);
       if (total + nativeBytes > this.maxBytes) throw new BrowserError('QUOTA_EXCEEDED', 'Imported snapshot exceeds Workspace budget.');
       if ((await this.snapshot()).revision !== before.revision) throw new BrowserError('STALE_REVISION', 'Workspace changed during import preflight.');
-      await this.chunks.put('local', utf8.encode(JSON.stringify(local))); const after = await this.snapshot(); return {revision:after.revision, paths:Object.keys(staged), sha256:await digest(JSON.stringify(staged))};
+      const journal:Journal={id:crypto.randomUUID(),state:'INTENT',kind:'IMPORT',paths:Object.keys(staged),baseRevision:before.revision,createdAt:Date.now()}; const journalKey=`${this.prefix}:journal:${journal.id}`;
+      await this.store.set(journalKey,journal); // Durable intent precedes the cache manifest pointer.
+      try { await this.chunks.put('local',utf8.encode(JSON.stringify(local))); }
+      catch(error) {
+        journal.state=error instanceof BrowserError&&error.code==='QUOTA_EXCEEDED'?'REJECTED':'UNKNOWN';
+        try { await this.store.set(journalKey,journal); } catch { throw new BrowserError('EFFECT_UNKNOWN','Import publication failed and its terminal journal could not be persisted.','Inspect the retained intent and current imports without replaying publication.'); }
+        throw error;
+      }
+      try {
+        const after=await this.snapshot(); const expectedFiles={...before.files}; for(const path of Object.keys(expectedFiles))if(path.startsWith(`imports/${id}/`))delete expectedFiles[path]; for(const [path,value]of Object.entries(staged))expectedFiles[path]=base64ToBytes(value);
+        if(after.revision.split(':')[1]!==await snapshotRevision(before.identity,expectedFiles))throw new BrowserError('EFFECT_UNKNOWN','Imported cache publication completed but complete Workspace readback differs.');
+        journal.state='SUCCEEDED';await this.store.set(journalKey,journal);return{revision:after.revision,paths:Object.keys(staged),sha256:await digest(JSON.stringify(staged))};
+      }catch{journal.state='UNKNOWN';try{await this.store.set(journalKey,journal);}catch{/* The durable INTENT remains held. */}throw new BrowserError('EFFECT_UNKNOWN','Imported cache may be published; its complete readback or terminal record is unavailable.','Inspect the retained import intent and current cache; do not replay publication.');}
     });
   }
-  async unresolved(): Promise<Journal[]> { const result: Journal[] = []; for (const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:journal:`))) { const row = await this.store.get<Journal>(key); if (row && ['INTENT', 'PARTIAL', 'UNKNOWN'].includes(row.state)) result.push(row); } return result; }
+  async unresolved(): Promise<Journal[]> { const result: Journal[] = []; for (const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:journal:`))) { const row = await this.store.get<Journal>(key); if (row && ['INTENT', 'PARTIAL', 'UNKNOWN'].includes(row.state) && row.resolvedByOperator !== true) result.push(row); } return result; }
   /** Operator-only acknowledgement: never exposed as an agent tool or automatic retry. */
-  async acknowledgeReconciliation(id: string, inspectedRevision: string): Promise<void> { if ((await this.snapshot()).revision !== inspectedRevision) throw new BrowserError('STALE_REVISION', 'Source changed during reconciliation.'); const key = `${this.prefix}:journal:${id}`; const row = await this.store.get<Journal>(key); if (!row) throw new BrowserError('FILE_NOT_FOUND', 'Journal entry missing.'); row.state = 'REJECTED'; await this.store.set(key, row); }
+  async acknowledgeReconciliation(id: string, inspectedRevision: string): Promise<void> { if ((await this.snapshot()).revision !== inspectedRevision) throw new BrowserError('STALE_REVISION', 'Source changed during reconciliation.'); const key = `${this.prefix}:journal:${id}`; const row = await this.store.get<Journal>(key); if (!row) throw new BrowserError('FILE_NOT_FOUND', 'Journal entry missing.'); row.resolvedByOperator = true; row.inspectedRevision = inspectedRevision; row.resolvedAt = Date.now(); await this.store.set(key, row); }
   async exportBackup(): Promise<{ version: 1; identity: NativeIdentity; files: Record<string, string>; revision: string; sha256: string }> { const source = await this.snapshot(); const files = Object.fromEntries(Object.entries(source.files).map(([path, bytes]) => [path, bytesToBase64(bytes)])); return { version: 1, identity: source.identity, files, revision: source.revision, sha256: await digest(JSON.stringify(files)) }; }
-  private async trim(): Promise<void> { const list = await this.checkpointList(); for (const item of list.filter(c => !c.pinned).slice(5)) { await this.chunks.delete(`checkpoint:${item.id}`); await this.store.delete(`${this.prefix}:checkpoint:${item.id}`); } const journals: {key: string; row: Journal}[] = []; for (const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:journal:`))) { const row = await this.store.get<Journal>(key); if (row) journals.push({key,row}); } for (const {key} of journals.filter(x => ['SUCCEEDED','REJECTED'].includes(x.row.state)).sort((a,b) => b.row.createdAt-a.row.createdAt).slice(1000)) await this.store.delete(key); await this.chunks.collectOrphans(); }
+  private async trim(): Promise<void> { const list = await this.checkpointList(); for (const item of list.filter(c => !c.pinned).slice(5)) { await this.chunks.delete(`checkpoint:${item.id}`); await this.store.delete(`${this.prefix}:checkpoint:${item.id}`); } const journals: {key: string; row: Journal}[] = []; for (const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:journal:`))) { const row = await this.store.get<Journal>(key); if (row) journals.push({key,row}); } for (const {key} of journals.filter(x => (['SUCCEEDED','REJECTED'].includes(x.row.state) || x.row.resolvedByOperator === true)).sort((a,b) => b.row.createdAt-a.row.createdAt).slice(1000)) await this.store.delete(key); await this.chunks.collectOrphans(); }
 }

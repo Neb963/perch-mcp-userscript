@@ -124,6 +124,33 @@ test('dynamic permission intersection covers child writes, POST, preview seeds a
   assert.equal(approvalRequiredForTool('upload_server_plugin_state', { path: 'scratch/backup' }), true);
 });
 
+test('compute imports require explicit integrity-pinned module mappings and READ_SOURCE', () => {
+  const module = { specifier: 'fixture-math@1.2.3', path: 'scratch/modules/math.js', sha256: 'a'.repeat(64) };
+  const args = validateToolCall('execute_js', { js: 'return (await import("fixture-math@1.2.3")).twice(2)', modules: [module] });
+  assert.deepEqual(args.modules, [module]);
+  assert(permissionsForTool('execute_js', args).includes('READ_SOURCE'));
+  assert(!permissionsForTool('execute_js', validateToolCall('execute_js', { js: 'return 1' })).includes('READ_SOURCE'));
+  assert(!permissionsForTool('execute_js', validateToolCall('execute_js', { js: 'return 1', modules: [] })).includes('READ_SOURCE'));
+  assert.doesNotThrow(() => validateToolCall('execute_js', { js: 'return 1', modules: [{ ...module, specifier: '@fixture/math@1.0.0', path: 'imports/approved/math.js' }] }));
+  for (const specifier of ['fixture-math@latest', 'fixture-math@^1.2.3', 'fixture-math@~1.2.3', 'fixture-math@1.2', 'fixture-math@01.2.3', 'fixture-math@1.2.3-beta', '../fixture@1.2.3', 'https://example.com/module@1.2.3', 'fixture/name@1.2.3']) rejects('execute_js', { js: 'return 1', modules: [{ ...module, specifier }] });
+  for (const pin of ['a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), 'z'.repeat(64), 'sha256:' + 'a'.repeat(64)]) rejects('execute_js', { js: 'return 1', modules: [{ ...module, sha256: pin }] });
+  for (const path of ['/tmp/math.js', 'scratch/../math.js', 'scratch//math.js', '../math.js']) rejects('execute_js', { js: 'return 1', modules: [{ ...module, path }] });
+  rejects('execute_js', { js: 'return 1', modules: [{ ...module, url: 'https://example.com/math.js' }] });
+  rejects('execute_js', { js: 'return 1', modules: [{ ...module, workspaceId: 'another-workspace' }] });
+  rejects('execute_js', { js: 'return 1', modules: [{ specifier: module.specifier, path: module.path }] });
+  rejects('execute_js', { js: 'return 1', modules: 'fixture-math@1.2.3' });
+});
+
+test('compute imports bound count and reject duplicate specifiers or case-aliased file identities', () => {
+  const module = { specifier: 'fixture-math@1.2.3', path: 'scratch/modules/math.js', sha256: 'a'.repeat(64) };
+  rejects('execute_js', { js: 'return 1', modules: [module, { ...module, path: 'scratch/modules/other.js' }] });
+  rejects('execute_js', { js: 'return 1', modules: [module, { ...module, specifier: 'other@1.0.0' }] });
+  rejects('execute_js', { js: 'return 1', modules: [module, { ...module, specifier: 'other@1.0.0', path: 'scratch/modules/Math.js' }] });
+  const sixteen = Array.from({ length: 16 }, (_, index) => ({ ...module, specifier: `module-${index}@1.0.0`, path: `scratch/modules/module-${index}.js` }));
+  assert.doesNotThrow(() => validateToolCall('execute_js', { js: 'return 1', modules: sixteen }));
+  rejects('execute_js', { js: 'return 1', modules: [...sixteen, { ...module, specifier: 'extra@1.0.0' }] });
+});
+
 test('envelope validates routing identity, freshness, version, deadline and nested tool input', () => {
   const now = 10000;
   const envelope = { version: 1, operationId: 'op', workspaceId: 'workspace', epoch: 1, bindingRevision: 1, tabInstanceId: 'tab', deadlineMs: now + 30000, tool: 'read', args: { path: 'main.pjs' }, permissions: ['READ_SOURCE'], traceId: 'trace' };

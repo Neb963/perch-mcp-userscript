@@ -8,7 +8,7 @@ Implementation date: 2026-11-26. This document records T0/T1 evidence, not live 
 
 | Area | Behavior |
 |---|---|
-| Setup | Exact HTTPS-origin validation; health/version check; one-time pairing; bootstrap field cleared before request; native identity probe; offline Settings remains available |
+| Setup | Exact HTTPS-origin validation; health/version check; one-time pairing through an isolated native credential prompt; no credential DOM inputs; native identity probe; offline Settings remains available |
 | Workspaces | Create with explicit default/development permissions; attach/rebind current editor; pause/resume; reconnect; detach; rename; exact permission editor; copy assigned endpoint |
 | Agents | Create named assignment; exact encoded endpoint and connector instructions; rename; suspend/resume; pending OAuth/effect request digest, client, scope, redirect, expiry and approve/deny; separate Grant revocation |
 | Library | List/filter/sort; new Resource; duplicate; enable/disable; delete; local draft persistence; editable main text/reference files/metadata; explicit revision publish; body/reference diff; inert text preview; history and restore as new revision; global/Workspace/Agent enable/disable assignment |
@@ -17,13 +17,13 @@ Implementation date: 2026-11-26. This document records T0/T1 evidence, not live 
 | Settings | Secret-free settings export/import; separate source backup/restore adapter; local disconnect; global pause/resume; immediate document stop; execution limit/recovery explanation |
 | Accessibility/layout | Scoped ShadowRoot; dialog focus trap, Escape/close and focus return; arrow/Home/End section navigation; labelled inputs and status; dialog overflow hidden with one main scroll area; textarea grows with content; no native editor changes |
 
-The ShadowRoot is open for deterministic inspection. It is a style boundary, not an authentication or credential boundary. Manager DOM never stores long-lived credentials. Resource preview constructs text DOM nodes; it does not parse HTML, load remote images or create active links. Connector URLs derive from the operator-configured origin and encoded Agent ID, ignoring untrusted endpoint values returned in records.
+The production ShadowRoot is closed and every actionable DOM listener requires a trusted browser event. Explicit `synthetic: true` fixtures open the ShadowRoot and accept synthetic events for deterministic testing; the production entry point never supplies that option. A closed ShadowRoot is not claimed as an authentication boundary by itself. Manager DOM never stores credentials, including bootstrap/recovery secrets. Resource preview constructs text DOM nodes; it does not parse HTML, load remote images or create active links. Connector URLs derive from the operator-configured origin and encoded Agent ID, ignoring untrusted endpoint values returned in records.
 
 ## Verification
 
 Command: `node --import tsx --test tests/unit/manager.test.ts`.
 
-Eight deterministic jsdom tests passed: close/native editor preservation, literal hostile labels/exact endpoint copy, rejected origin/cleared bootstrap input, failed publish/local draft retention, canonical history/restore and provenance preservation, offline Settings/local stop semantics, settings export allowlist, inert Resource preview/bounded diff.
+Eight deterministic jsdom tests passed: close/native editor preservation, literal hostile labels/exact endpoint copy, rejected origin/isolated bootstrap prompt, failed publish/local draft retention, canonical history/restore and provenance preservation, offline Settings/local stop semantics, settings export allowlist, inert Resource preview/bounded diff.
 
 Standalone strict TypeScript command passed:
 
@@ -53,6 +53,28 @@ A focused behavioral test verifies invalid lists preserve the previous policy an
 
 ## Credential recovery control
 
-Settings exposes `ManagerClient.recover(origin, secret)` when the controller supports it, for both paired and unpaired installations. The section tells the Operator to rotate `RECOVERY_SECRET` in Cloudflare first, states that recovery revokes old credentials/Grants/leases while preserving the Resource library, and explains that Workspaces remain paused until explicit rebinding and connector authorization. A specific inline revocation checkbox is required. The password field clears before local pause or the recovery request; the checkbox resets for every attempted recovery. A failed request cannot leave the entered recovery secret in the field, markup or exports.
+Settings exposes `ManagerClient.recover(origin, secret)` when the controller supports it, for both paired and unpaired installations. The section tells the Operator to rotate `RECOVERY_SECRET` in Cloudflare first, states that recovery revokes old credentials/Grants/leases while preserving the Resource library, and explains that Workspaces remain paused until explicit rebinding and connector authorization. A specific inline revocation checkbox is required and resets for every attempt.
 
-A focused behavioral test confirms no request without explicit revocation approval and verifies the password field is empty when the failing controller call receives the secret. Thirteen manager unit tests pass; live dashboard secret rotation/recovery remains a T4 acceptance item.
+Credential entry uses `ManagerClient.promptSecret('bootstrap' | 'recovery')`, implemented by the controller with an isolated native browser prompt. The manager creates no password or credential text inputs. Returned secrets stay in callback-local variables until pairing/recovery completes, never enter Resource drafts or exports, and cancellation submits no request. The trusted native prompt and userscript content-world isolation still require Firefox/Violentmonkey T3 evidence; page DOM/closed-shadow secrecy is not substituted for that proof.
+
+A focused behavioral test confirms no recovery request or prompt without explicit revocation approval, no credential input exists, and a failing controller call does not expose its secret in manager DOM. Prompt cancellation tests cover both pairing and recovery. Live dashboard secret rotation/recovery remains a T4 acceptance item.
+
+## Rendered geometry and keyboard checkpoint
+
+A later task-environment browser fallback made an isolated Chromium 158.0.8127.0 executable available. The checked-in harness was executed with this renderer at 1024×768 and 1920×1080; all five manager sections passed. This supersedes the earlier missing-executable limitation for Chromium T2 only. Firefox/Violentmonkey T3 and deployed/operator T4 remain unverified.
+
+The first actual run found a Resource textarea with `scrollHeight=897`, `clientHeight=895`, `offsetHeight=897`: automatic height calculation omitted the two border pixels under `box-sizing:border-box`. The correction adds measured border widths to scrollHeight, wraps long text, prevents manual shrinking into another scroll area, and recalculates on viewport resize and details expansion. This fixes the cause without relaxing the geometry assertions. Opening a Resource also focuses its text and scrolls the manager to the editor, preserving the native page's scroll position. Screenshot inspection found and corrected a detached checkbox/label alignment in recovery controls.
+
+The expanded harness checks original and edited 50–60-line text, an 800-character unbroken line, resizing between both target viewports, a 64-host Settings textarea, section shortcuts, focus trapping, Escape, focus return, reopen/close and native fixture editing after close. Dialog scrollHeight exactly equals clientHeight (746 px at 1024×768 and 1058 px at 1920×1080); only the main manager body scrolls. Body scrollWidth stays within its clientWidth. Both Resource and Settings textareas fit their complete content vertically and horizontally. Synthetic screenshots of Workspaces, Agents, Library editor, Activity and expanded Settings were inspected locally and are not release/provider evidence.
+
+Reproduction uses the command in `tests/e2e/README.md`; `SCREENSHOT_DIR` is optional. The passing run reports its browser version and measured geometry as JSON. No provider site, account, production data or network mutation is involved. Focused manager verification still passes 13 unit tests plus the local Worker journey (14 tests), and strict TypeScript checking passes.
+
+## Privileged UI admission checkpoint
+
+A security integration review removed bootstrap/recovery DOM fields entirely and closed the production ShadowRoot. A shared listener wrapper rejects untrusted click, submit, key, input and change events before any gateway request or local draft persistence. Trusted form submission invokes a private action map instead of manufacturing a synthetic button click. A unit test captures the closed root through test instrumentation, then proves page-created events cannot open the manager, prompt for a credential, pair or navigate sections into management reads. Fixtures explicitly opt into `synthetic: true`; production does not.
+
+Fifteen manager unit tests plus the genuine local Worker journey pass (16 total). Strict TypeScript and the complete Chromium 158 two-viewport layout/keyboard harness pass after this change. Firefox content-world/Xray native prototype isolation and the isolated prompt remain required T3 gates.
+
+## Concurrent unpublished drafts
+
+The controller's optional `localDrafts()` callback exposes retained per-document Resource drafts as a separate operator export in Settings. `perch-mcp-resource-drafts.json` contains unpublished Resource work and is not mixed with settings, source backups or the canonical Library ZIP. Recovery messaging identifies this export so older concurrent drafts remain recoverable without overwriting the active revision. A behavioral test verifies distinct document drafts are preserved in the output and no canonical mutation occurs. Per-document storage isolation and recovery ordering are verified by the controller's own tests.

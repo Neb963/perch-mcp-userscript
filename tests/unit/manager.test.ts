@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { mountManager, exportSafeSettings, renderResourcePreview, lineDiff, type ManagerClient } from '../../apps/userscript/src/manager';
 import { managerStyles } from '../../apps/userscript/src/manager.css';
-function fixture(overrides: Partial<ManagerClient> = {}) {
+function fixture(overrides: Partial<ManagerClient> = {}, synthetic = true) {
     const dom = new JSDOM('<!doctype html><html><body><input id="native-editor" value="untouched"></body></html>', { url: 'https://perchance.org/synthetic#edit', pretendToBeVisual: true });
     const requests: {
         method: string;
@@ -39,8 +39,11 @@ function fixture(overrides: Partial<ManagerClient> = {}) {
         health: async () => ({ version: '0.1.0', compatible: true }), pair: async () => { }, currentIdentity: async () => ({ generatorId: 'generator-1', slug: 'synthetic', draftId: '', browserInstallationId: 'installation-1' }),
         copy: async (text) => { copies.push(text); }, download: (name, data, mime) => { downloads.push({ name, data, mime }); }, drafts: { get: async (key) => drafts.get(key), set: async (key, v) => { drafts.set(key, v); }, delete: async (key) => { drafts.delete(key); } }, ...overrides,
     };
-    const handle = mountManager({ document: dom.window.document, version: '0.1.0', client });
-    const root = dom.window.document.querySelector('[data-perch-mcp-manager]')!.shadowRoot!;
+    let captured: ShadowRoot | undefined;
+    const attachShadow = dom.window.Element.prototype.attachShadow;
+    dom.window.Element.prototype.attachShadow = function (options) { const shadow = attachShadow.call(this, options); captured = shadow; return shadow; };
+    const handle = mountManager({ document: dom.window.document, version: '0.1.0', client, ...(synthetic ? { synthetic: true as const } : {}) });
+    const root = dom.window.document.querySelector('[data-perch-mcp-manager]')!.shadowRoot ?? captured!;
     return { dom, handle, client, root, requests, copies, downloads, drafts, resource };
 }
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -76,26 +79,18 @@ test('hostile labels stay text and connector copies use configured origin and en
     assert.doesNotMatch(f.root.textContent ?? '', /should-not-be-used/);
     assert.match(f.root.textContent ?? '', /<script>bad\(\)<\/script>/);
 });
-test('setup validates origin and clears bootstrap secret before failed pairing', async () => {
-    let attempted = 0;
-    const f = fixture({ configuration: () => ({ origin: '', paired: false }), pair: async () => { attempted++; throw new Error('Pair failed'); } });
+test('setup validates origin before isolated credential prompt and never renders a bootstrap secret', async () => {
+    let attempted = 0, prompts = 0;
+    const f = fixture({ configuration: () => ({ origin: '', paired: false }), promptSecret: async purpose => { assert.equal(purpose, 'bootstrap'); prompts++; return 'x'.repeat(44); }, pair: async (_origin, secret) => { assert.equal(secret, 'x'.repeat(44)); assert.equal(f.root.querySelector('input[type=password]'), null); attempted++; throw new Error('Pair failed'); } });
     await f.handle.open('Settings');
     const origin = f.root.querySelector<HTMLInputElement>('[aria-label="Gateway HTTPS origin"]')!;
-    const secret = f.root.querySelector<HTMLInputElement>('[aria-label="One-time bootstrap secret"]')!;
+    assert.equal(f.root.querySelector('input[type=password]'), null);
     origin.value = 'https://gateway.example.workers.dev/path';
-    secret.value = 'x'.repeat(44);
-    click(f.root, 'Pair installation');
-    await tick();
-    assert.equal(secret.value, '');
-    assert.equal(attempted, 0);
-    assert.match(f.root.textContent ?? '', /without a path/);
+    click(f.root, 'Pair installation'); await tick();
+    assert.equal(attempted, 0); assert.equal(prompts, 0); assert.match(f.root.textContent ?? '', /without a path/);
     origin.value = 'https://gateway.example.workers.dev';
-    secret.value = 'x'.repeat(44);
-    click(f.root, 'Pair installation');
-    await tick();
-    assert.equal(attempted, 1);
-    assert.equal(secret.value, '');
-    assert.doesNotMatch(f.root.innerHTML, /x{44}/);
+    click(f.root, 'Pair installation'); await until(() => attempted === 1);
+    assert.equal(prompts, 1); assert.doesNotMatch(f.root.innerHTML, /x{44}/);
 });
 test('failed Resource publish preserves edited text and durable local draft', async () => {
     const f = fixture();
@@ -234,26 +229,58 @@ test('Operator host editor preserves prior allowlist on invalid input and saves 
     assert.match(f.root.textContent ?? '', /Existing permissions still apply/);
 });
 
-test('credential recovery requires specific revocation approval and clears secret before failed request', async () => {
-    let attempts = 0;
-    let fieldWasClearedAtRequest = false;
-    const f = fixture({ configuration: () => ({ origin: 'https://gateway.example.workers.dev', paired: false }), recover: async (_origin, secret) => { attempts++; fieldWasClearedAtRequest = f.root.querySelector<HTMLInputElement>('[aria-label="Rotated recovery secret"]')!.value === ''; assert.equal(secret, 'R'.repeat(43)); throw new Error('Recovery rejected'); } });
+test('credential recovery requires specific revocation approval and keeps prompted secret outside DOM', async () => {
+    let attempts = 0, prompts = 0;
+    const f = fixture({ configuration: () => ({ origin: 'https://gateway.example.workers.dev', paired: false }), promptSecret: async purpose => { assert.equal(purpose, 'recovery'); prompts++; return 'R'.repeat(43); }, recover: async (_origin, secret) => { attempts++; assert.equal(f.root.querySelector('input[type=password]'), null); assert.doesNotMatch(f.root.innerHTML, /R{43}/); assert.equal(secret, 'R'.repeat(43)); throw new Error('Recovery rejected'); } });
     await f.handle.open('Settings');
-    const secret = f.root.querySelector<HTMLInputElement>('[aria-label="Rotated recovery secret"]')!;
     const approval = f.root.querySelector<HTMLInputElement>('[aria-label="Approve recovery revocation"]')!;
     assert.match(f.root.textContent ?? '', /First rotate RECOVERY_SECRET/);
-    secret.value = 'R'.repeat(43);
-    click(f.root, 'Confirm credential recovery');
+    assert.equal(f.root.querySelector('input[type=password]'), null);
+    click(f.root, 'Confirm credential recovery'); await tick();
+    assert.equal(attempts, 0); assert.equal(prompts, 0);
+    approval.checked = true; click(f.root, 'Confirm credential recovery'); await until(() => attempts === 1);
+    assert.equal(prompts, 1); assert.equal(approval.checked, false);
+    assert.match(f.root.textContent ?? '', /Recovery rejected/); assert.doesNotMatch(f.root.innerHTML, /R{43}/);
+});
+test('cancelled isolated credential prompts never call pairing or recovery', async () => {
+    let pairs = 0, recoveries = 0;
+    const f = fixture({ configuration: () => ({ origin: 'https://gateway.example.workers.dev', paired: false }), promptSecret: async () => null, pair: async () => { pairs++; }, recover: async () => { recoveries++; } });
+    await f.handle.open('Settings');
+    click(f.root, 'Pair installation'); await tick();
+    assert.equal(pairs, 0); assert.match(f.root.textContent ?? '', /Pairing cancelled/);
+    f.root.querySelector<HTMLInputElement>('[aria-label="Approve recovery revocation"]')!.checked = true;
+    click(f.root, 'Confirm credential recovery'); await tick();
+    assert.equal(recoveries, 0); assert.match(f.root.textContent ?? '', /Recovery cancelled/);
+    assert.equal(f.root.querySelector('input[type=password]'), null);
+});
+
+test('production manager closes its ShadowRoot and refuses page-created UI events', async () => {
+    let prompts = 0, pairs = 0;
+    const f = fixture({ configuration: () => ({ origin: 'https://gateway.example.workers.dev', paired: false }), promptSecret: async () => { prompts++; return 'x'.repeat(43); }, pair: async () => { pairs++; } }, false);
+    assert.equal(f.dom.window.document.querySelector('[data-perch-mcp-manager]')!.shadowRoot, null);
+    // Test instrumentation captured the closed root; page-created events still have no authority.
+    click(f.root, 'Perch MCP · unpaired');
     await tick();
-    assert.equal(attempts, 0);
-    assert.equal(secret.value, '');
-    approval.checked = true;
-    secret.value = 'R'.repeat(43);
-    click(f.root, 'Confirm credential recovery');
-    await until(() => attempts === 1);
-    assert.equal(fieldWasClearedAtRequest, true);
-    assert.equal(secret.value, '');
-    assert.equal(approval.checked, false);
-    assert.match(f.root.textContent ?? '', /Recovery rejected/);
-    assert.doesNotMatch(f.root.innerHTML, /R{43}/);
+    assert.equal(f.root.querySelector('dialog')!.hasAttribute('open'), false);
+    assert.equal(f.requests.length, 0);
+    await f.handle.open('Settings'); // Only an internal controller/menu invocation may open programmatically.
+    click(f.root, 'Pair installation');
+    f.root.querySelector('nav')!.dispatchEvent(new f.dom.window.KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+    await tick();
+    assert.equal(prompts, 0); assert.equal(pairs, 0); assert.equal(f.requests.length, 0);
+    assert.equal(f.root.querySelector('[aria-selected=true]')!.textContent, 'Settings');
+    assert.equal(f.root.querySelector('input[type=password]'), null);
+});
+
+test('unpublished Resource drafts export separately without replacing settings or canonical Library', async () => {
+    const retained = { schemaVersion: 1, documents: [{ documentId: 'document-one', resourceId: 'skill-one', revision: 2, body: 'First unpublished operator text' }, { documentId: 'document-two', resourceId: 'skill-one', revision: 2, body: 'Concurrent unpublished operator text' }] };
+    const f = fixture({ localDrafts: async () => retained });
+    await f.handle.open('Settings');
+    click(f.root, 'Export unpublished Resource drafts');
+    await until(() => f.downloads.length === 1);
+    assert.equal(f.downloads[0]!.name, 'perch-mcp-resource-drafts.json');
+    assert.equal(f.downloads[0]!.mime, 'application/json');
+    assert.deepEqual(JSON.parse(String(f.downloads[0]!.data)), retained);
+    assert.equal(f.requests.some(r => r.method !== 'GET'), false);
+    assert.match(f.root.textContent ?? '', /Published Resources and settings are unchanged/);
 });

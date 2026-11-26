@@ -69,6 +69,12 @@ export class MusicHandler {
       }
     });
   }
+  expire(): void { this.prune() }
+  nextExpiry(): number | undefined {
+    const expiries = this.db.keys('music/journal/').map(key => this.db.get<Journal>(key))
+      .filter(row => row.bytes > 0 && row.expiresAt !== undefined).map(row => row.expiresAt!);
+    return expiries.length ? Math.min(...expiries) : undefined;
+  }
   private manifest(journal: Journal): Record<string, unknown> {
     return { status: journal.phase, operationId: journal.operationId, bytes: journal.bytes, sha256: journal.sha256, chunkBytes: MUSIC_CHUNK_BYTES, expiresAt: journal.expiresAt, contentType: 'audio/mpeg', metadata: journal.metadata };
   }

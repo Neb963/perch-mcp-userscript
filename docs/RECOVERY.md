@@ -9,7 +9,7 @@
 | Missing result | Use `operation_status`, paged source reads or local attachment download. Results expire after bounded retention. | Expiry never authorizes re-executing a mutation. |
 | Bootstrap response lost | Check `/health` setup state and use credential recovery. | The bootstrap secret is not reusable. |
 | Credentials lost | Rotate `RECOVERY_SECRET` in Cloudflare to a new high-entropy value, then use Settings → Credential recovery. | Changing a secret alone does not reset stored authority. |
-| Recovery completed | Credentials/leases/Grants are invalidated, Workspaces are paused/unbound, Resources persist. Rebind and authorize fresh connectors explicitly. | Old tokens or copied settings do not restore access. |
+| Recovery completed | Credentials/leases/Grants are invalidated, Workspaces are paused/unbound, Resources persist. An inert prior Binding tuple is retained only to inspect/resolve old held operations; it cannot claim execution. Rebind and authorize fresh connectors explicitly. | Old tokens or copied settings do not restore access. |
 | Paid music interrupted | Inspect provider usage and retained artifact metadata. Retrieve existing bytes under the authorized operation; do not regenerate for recovery. | A timeout did not prove that billing or generation did not occur. |
 | Library conflict | Keep the recovered local draft, refresh canonical revision, inspect diff, then publish explicitly. | The latest asynchronous response cannot replace a newer editor selection. |
 | Quota exhausted | Export retained data, clean up explicitly or adjust a measured budget. | Pinned checkpoints and unresolved intent must not be evicted automatically. |

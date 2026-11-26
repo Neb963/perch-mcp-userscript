@@ -4,7 +4,7 @@ Generated from `packages/contracts/src/tools.ts`. Schema presence describes a co
 
 Common result: `{operationId,status,revision?,effectState,data?,error?:{code,message,retryable,recovery}}`. `status` is `SUCCEEDED`, `REJECTED`, `PARTIAL`, `UNKNOWN` or `CANCELLED`; unknown effects require read-only reconciliation and must never be automatically replayed. Source writes modify unsaved drafts unless the explicit `save_generator` tool succeeds.
 
-Exact input schemas and metadata: [TOOL_SCHEMAS.json](TOOL_SCHEMAS.json). Runtime limits may reject a request before execution; a lower supported provider limit is disclosed, never reported as successful truncation.
+Exact input schemas and metadata: [TOOL_SCHEMAS.json](TOOL_SCHEMAS.json). Runtime limits may reject a request before execution; a lower supported provider limit is disclosed, never reported as successful truncation. Controlled compute imports follow [TOOL_PARITY_DETAILS.md](TOOL_PARITY_DETAILS.md#controlled-compute-imports--additive-implementation-decision-2026-11-26).
 
 | Tool | Permissions | Effects | Approval | Capability gate |
 |---|---|---|---|---|
@@ -493,7 +493,7 @@ Apply current unsaved source through native preview refresh and wait for the mat
 
 ## execute_js
 
-Run fresh isolated computation with bounded fs and allowlisted tools brokers. No DOM, ambient network, GM APIs, privileged eval, arbitrary imports or recursive execute_js. Child calls inherit permissions and deadlines. Timeouts terminate execution; report staged and committed effects. Permissions: COMPUTE. May change the assigned Workspace or produce an external effect; never implies Save. Output: JSON result, bounded console, filesWritten, child-operation effects and revision. Failure: INVALID_INPUT, SCOPE_DENIED, TAB_OFFLINE, STALE_REVISION, UNSUPPORTED_INTERFACE. Recovery: Inspect workspace_status. On a revision conflict reread affected files; for an unknown effect inspect operation_status and reconcile without replay. Example: execute_js({"js":"const text = await fs.readTextFile(\"main.pjs\"); await fs.writeTextFile(\"scratch/count.txt\", String(text.length)); return text.length;"}). Capability gate: F06 vetted isolated engine, bounded memory and permission-preserving broker; an unavailable implementation must return UNSUPPORTED_INTERFACE, never fabricated success.
+Run fresh isolated computation with bounded fs and allowlisted tools brokers. No DOM, ambient network, GM APIs, privileged eval, arbitrary imports or recursive execute_js. Optional modules maps at most 16 explicit version-pinned specifiers to readable Workspace JavaScript paths and lowercase SHA-256 integrity pins. The host authorizes each read, verifies exact UTF-8 bytes, and prefetches at most 512 KiB total before executing guest code; each module is at most 256 KiB. Duplicate/case-colliding paths and duplicate specifiers reject. Nonempty modules additionally requires READ_SOURCE. Imports use exact declared specifiers only; no ambient network, ranges, tags or undeclared transitive dependencies. Child calls inherit permissions and deadlines. Timeouts terminate execution; report staged and committed effects. Permissions: COMPUTE. May change the assigned Workspace or produce an external effect; never implies Save. Output: JSON result, bounded console, filesWritten, child-operation effects and revision. Failure: INVALID_INPUT, SCOPE_DENIED, TAB_OFFLINE, STALE_REVISION, UNSUPPORTED_INTERFACE. Recovery: Inspect workspace_status. On a revision conflict reread affected files; for an unknown effect inspect operation_status and reconcile without replay. Example: execute_js({"js":"const text = await fs.readTextFile(\"main.pjs\"); await fs.writeTextFile(\"scratch/count.txt\", String(text.length)); return text.length;"}). Capability gate: F06 vetted isolated engine, bounded memory and permission-preserving broker; an unavailable implementation must return UNSUPPORTED_INTERFACE, never fabricated success.
 
 ```json
 {
@@ -509,6 +509,41 @@ Run fresh isolated computation with bounded fs and allowlisted tools brokers. No
       "minimum": 1,
       "maximum": 3600000,
       "default": 120000
+    },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "specifier": {
+            "type": "string",
+            "maxLength": 200,
+            "pattern": "^(?:@[a-z0-9][a-z0-9._-]*\\/)?[a-z0-9][a-z0-9._-]*@(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+            "description": "Exact module name and core semver, e.g. math@1.2.3 or @scope/math@1.2.3. Ranges, tags, URLs and undeclared transitive imports are denied."
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "Readable canonical virtual path; main.pjs, index.html, src/, scratch/, imports/. No traversal, absolute paths, aliases or case collisions."
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "minLength": 64,
+            "maxLength": 64,
+            "description": "Lowercase SHA-256 of the exact UTF-8 module source bytes; verified before guest execution."
+          }
+        },
+        "required": [
+          "specifier",
+          "path",
+          "sha256"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 16
     }
   },
   "required": [

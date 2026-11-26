@@ -256,6 +256,11 @@ export interface Env {
   ISSUER_URL?: string;
   ALLOWED_ORIGINS?: string;
   PROVIDER_WRITES_ENABLED?: string;
+  ELEVENLABS_API_KEY?: string;
+  PAID_MEDIA_ENABLED?: string;
+  REGISTRY_WORKSPACE_BUDGET?: string;
+  REGISTRY_GRANT_BUDGET?: string;
+  OAUTH_REGISTRATIONS_PER_HOUR?: string;
 }
 export async function rpc<T = Record<string, unknown>>(
   stub: DurableObjectStub,
@@ -287,4 +292,57 @@ export function registry(env: Env): DurableObjectStub {
 }
 export function workspace(env: Env, workspaceId: string): DurableObjectStub {
   return env.WORKSPACES.get(env.WORKSPACES.idFromName(workspaceId));
+}
+
+export function configuredBudget(
+  value: string | undefined,
+  fallback: number,
+  maximum = 100000,
+): number {
+  if (value === undefined) return fallback;
+  if (!/^[1-9][0-9]*$/.test(value))
+    throw new ApiError(
+      "INVALID_INPUT",
+      "Operational budget must be a positive integer.",
+    );
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n > maximum)
+    throw new ApiError(
+      "INVALID_INPUT",
+      "Operational budget exceeds supported safety range.",
+    );
+  return n;
+}
+
+/** Operation-handle lifetime preserves tool execution defaults instead of imposing an HTTP deadline. */
+export function operationTimeoutMs(
+  tool: string,
+  args: Record<string, unknown>,
+): number {
+  const fallback =
+    tool === "generate_music"
+      ? 600000
+      : [
+            "page_eval",
+            "execute_js",
+            "fetch_url",
+            "generate_image",
+            "upload_file",
+          ].includes(tool)
+        ? 120000
+        : 30000;
+  if (args.timeoutMs === undefined) return fallback;
+  const value = args.timeoutMs,
+    maximum = tool === "page_eval" ? 500000 : 3600000;
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > maximum
+  )
+    throw new ApiError(
+      "INVALID_INPUT",
+      "Tool timeout exceeds its supported execution bound.",
+    );
+  return value;
 }

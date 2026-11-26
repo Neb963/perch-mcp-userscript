@@ -3,13 +3,13 @@ export interface NativeIdentity { generatorId: string; slug: string; publicId?: 
 export interface NativeSnapshot { identity: NativeIdentity; files: Record<string, Uint8Array>; revision: string; dirty: boolean; saveState: string }
 export interface FileWrite { path: string; bytes: Uint8Array | null }
 export interface MutationResult { status: 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN'; revision: string; committed: string[]; error?: { code: string; message: string; recovery: string } }
-export interface CapabilityReport { adapterVersion: 1; ready: boolean; identity?: NativeIdentity; sourceRead: boolean; sourceWrite: boolean; nativeSave: boolean; preview: boolean; dirty: boolean; blocked: string[]; liveExternalWritesEnabled: boolean }
+export interface CapabilityReport { adapterVersion: 1; ready: boolean; identity?: NativeIdentity; sourceRead: boolean; sourceWrite: boolean; sourceWriteBlocked: string[]; nativeSave: boolean; preview: boolean; dirty: boolean; blocked: string[]; liveExternalWritesEnabled: boolean }
 export interface KeyValueStore { get<T>(key: string): Promise<T | undefined>; set<T>(key: string, value: T): Promise<void>; delete(key: string): Promise<void>; list(): Promise<string[]> }
 export class BrowserError extends Error {
   constructor(public readonly code: string, message: string, public readonly recovery = 'Inspect workspace_status and reconcile before retrying.') { super(message); this.name = 'BrowserError'; }
 }
 export const utf8 = new TextEncoder();
-export function decodeText(bytes: Uint8Array): string { try { const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); if (text.includes('\0')) throw new Error(); return text; } catch { throw new BrowserError('BINARY_FILE', 'File is not UTF-8 text; use read_b64_file.'); } }
+export function decodeText(bytes: Uint8Array): string { try { const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); if (text.includes('\0')) throw new Error(); return text; } catch { throw new BrowserError('BINARY_FILE', 'File is not UTF-8 text; use read_b64_file.'); } }
 export async function digest(bytes: Uint8Array | string): Promise<string> { const value = typeof bytes === 'string' ? utf8.encode(bytes) : bytes; return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', value as BufferSource)), b => b.toString(16).padStart(2, '0')).join(''); }
 export function equalBytes(a: Uint8Array, b: Uint8Array): boolean { return a.length === b.length && a.every((v, i) => b[i] === v); }
 export function equalIdentity(a: NativeIdentity, b: NativeIdentity): boolean { return a.generatorId === b.generatorId && a.slug === b.slug && a.draftId === b.draftId; }

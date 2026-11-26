@@ -1,7 +1,7 @@
 import { BrowserError, canonicalPath, equalBytes, equalIdentity, snapshotRevision, utf8, type CapabilityReport, type FileWrite, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
-interface TextEditor { getValue(): unknown; setValue(value: string): unknown; isClean?(): unknown }
+interface TextEditor { state?: {readOnly?:unknown}; getValue(): unknown; setValue(value: string): unknown; isClean?(): unknown }
 interface SrcState { ready(): unknown; idle?(): unknown; list(): unknown; readFile(path: string): unknown; writeFile(path: string, bytes: unknown): unknown; deleteFile(path: string): unknown; getDraftId(): unknown; isDirty?(): unknown; hasPending?(): unknown }
-interface NativePage { app?: { data?: { generator?: { id?: unknown; name?: unknown; publicId?: unknown } }; saveGenerator?: () => unknown; userOwnsThisGenerator?: unknown; userCanSaveThisGenerator?: () => unknown }; modelTextEditor?: TextEditor; outputTemplateEditor?: TextEditor; srcState?: SrcState; currentInterfaceMode?: unknown; __editorReady?: unknown; __draftChoiceSettled?: unknown; perchanceSaveState?: unknown; nativeHelperBusy?: unknown; collaborationUnsynced?: unknown; editor?: { handleReloadButtonClick?: () => unknown }; editorUndoManagers?: Record<string, { undo?: () => unknown; redo?: () => unknown }> }
+interface NativePage { app?: { data?: { generator?: { id?: unknown; name?: unknown; publicId?: unknown } }; saveGenerator?: () => unknown; userOwnsThisGenerator?: unknown; userCanSaveThisGenerator?: () => unknown }; modelTextEditor?: TextEditor; outputTemplateEditor?: TextEditor; srcState?: SrcState; currentInterfaceMode?: unknown; __editorReady?: unknown; __draftChoiceSettled?: unknown; perchanceSaveState?: unknown; __generatorIdentityTransition?: unknown; __draftHandoffClosed?:unknown; editorCollabInitialSyncIsPending?:unknown; __collabRoomFailed?:unknown; yjsProvider?:unknown; aiAgentActivityState?:()=>unknown; __aiGeneratorGuard?:{blocked?:()=>unknown}; editor?: { handleReloadButtonClick?: () => unknown }; editorUndoManagers?: Record<string, { undo?: () => unknown; redo?: () => unknown }> }
 export interface AdapterOptions { cloneInto?: (value: unknown) => unknown; externalWritesVerified?: boolean; maxSnapshotBytes?: number }
 export interface SaveContext { operationId: string; permission: boolean; previousSavedSnapshot: NativeSnapshot; readSavedSnapshot(): Promise<NativeSnapshot>; receipt?: { status: string } }
 function identityString(value: unknown, field: string): string { if (typeof value === 'string' && value.length <= 512) return value; if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value); throw new BrowserError('UNSUPPORTED_INTERFACE', `Native ${field} is not a losslessly serializable identifier.`); }
@@ -33,15 +33,36 @@ export class NativeAdapter {
     const blocked: string[] = []; let identity: NativeIdentity | undefined;
     try { identity = await this.identity(); } catch { blocked.push('Native generator/draft identity unavailable.'); }
     const sourceRead = !!this.page.modelTextEditor?.getValue && !!this.page.outputTemplateEditor?.getValue && !!this.page.srcState?.ready && !!this.page.srcState?.list && !!this.page.srcState?.readFile;
-    const sourceWrite = sourceRead && !!this.page.modelTextEditor?.setValue && !!this.page.outputTemplateEditor?.setValue && !!this.page.srcState?.writeFile && !!this.page.srcState?.deleteFile;
+    const sourceWriteBlocked = this.mutationBlocks();
+    const sourceWrite = sourceRead && sourceWriteBlocked.length === 0 && !!this.page.modelTextEditor?.setValue && !!this.page.outputTemplateEditor?.setValue && !!this.page.srcState?.writeFile && !!this.page.srcState?.deleteFile;
     if (!sourceRead) blocked.push('Required editor or srcState read interfaces unavailable.');
     if (this.page.__editorReady === false || this.page.__draftChoiceSettled === false) blocked.push('Native editor/draft choice has not settled.');
     if (this.page.currentInterfaceMode !== undefined && this.page.currentInterfaceMode !== 'edit') blocked.push('Open the native editor before attaching.');
-    if (this.page.nativeHelperBusy === true || this.page.collaborationUnsynced === true) blocked.push('Native Helper busy or collaboration unsynchronized.');
     if (this.page.perchanceSaveState === 'saving') blocked.push('Native Save is in progress.');
-    const report: CapabilityReport = { adapterVersion: 1, ready: sourceRead && blocked.length === 0, sourceRead, sourceWrite, nativeSave: typeof this.page.app?.saveGenerator === 'function', preview: !!this.page.editor?.handleReloadButtonClick, dirty: this.dirty(), blocked, liveExternalWritesEnabled: this.options.externalWritesVerified === true };
+    const report: CapabilityReport = { adapterVersion: 1, ready: sourceRead && blocked.length === 0, sourceRead, sourceWrite, sourceWriteBlocked, nativeSave: typeof this.page.app?.saveGenerator === 'function', preview: !!this.page.editor?.handleReloadButtonClick, dirty: this.dirty(), blocked, liveExternalWritesEnabled: this.options.externalWritesVerified === true };
     if (identity) report.identity = identity; return report;
   }
+  /** Pure native status reads only. Never wakes, resumes or controls a native Helper session. */
+  private mutationBlocks(): string[] {
+    const reasons: string[] = [];
+    if (this.page.currentInterfaceMode !== 'edit' || this.page.__editorReady !== true || this.page.__draftChoiceSettled !== true) reasons.push('Native editor/draft readiness is not positively established.');
+    if (this.page.__generatorIdentityTransition || this.page.__draftHandoffClosed) reasons.push('Native identity or draft handoff is in progress.');
+    if (this.page.editorCollabInitialSyncIsPending === true || this.page.__collabRoomFailed === true || this.page.yjsProvider) reasons.push('Native collaboration is pending, failed, or active; collaborative remote writes are unsupported.');
+    for (const editor of [this.page.modelTextEditor, this.page.outputTemplateEditor]) {
+      if (typeof editor?.state?.readOnly !== 'boolean') reasons.push('Native editor read-only status interface unavailable.');
+      else if (editor.state.readOnly) reasons.push('Native editor is read-only.');
+    }
+    if (typeof this.page.aiAgentActivityState !== 'function' || typeof this.page.__aiGeneratorGuard?.blocked !== 'function') reasons.push('Verified native Helper/cross-tab status interface unavailable.');
+    else try {
+      const raw = this.page.aiAgentActivityState(); const activity = raw && typeof raw === 'object' ? raw as Record<string,unknown> : undefined;
+      const crossTabBlocked = this.page.__aiGeneratorGuard.blocked();
+      if (!activity || typeof activity.active !== 'boolean' || typeof activity.unknown !== 'boolean' || typeof activity.reason !== 'string' || typeof crossTabBlocked !== 'boolean') reasons.push('Native Helper/cross-tab status returned an unsupported shape.');
+      else if (activity.active || activity.unknown || activity.reason !== '' || crossTabBlocked) reasons.push('Native Helper or cross-tab mutation state is active, unresolved, or read-only.');
+    } catch { reasons.push('Native mutation status could not be read safely.'); }
+    if (this.page.perchanceSaveState === 'saving') reasons.push('Native Save is in progress.');
+    return [...new Set(reasons)];
+  }
+  assertMutationReady(): void { const reasons = this.mutationBlocks(); if (reasons.length) throw new BrowserError(reasons.some(reason=>/unavailable|unsupported shape|could not be read|positively established/.test(reason)) ? 'UNSUPPORTED_INTERFACE' : 'TAB_BUSY', reasons.join(' '), 'Wait for native activity/draft choice to settle or inspect the read-only probe; normal editor use remains available.'); }
   private dirty(): boolean { return this.page.perchanceSaveState === 'unsaved' || this.page.srcState?.isDirty?.() === true || this.page.modelTextEditor?.isClean?.() === false || this.page.outputTemplateEditor?.isClean?.() === false; }
   async snapshot(): Promise<NativeSnapshot> {
     const report = await this.probe(); if (!report.ready || !report.identity) throw new BrowserError('TAB_BUSY', report.blocked.join(' ') || 'Native editor not ready.');
@@ -64,14 +85,17 @@ export class NativeAdapter {
   }
   getSnapshot(): Promise<NativeSnapshot> { return this.snapshot(); }
   async applyFiles(writes: FileWrite[], expectedRevision: string): Promise<MutationResult> {
-    const report = await this.probe(); if (!report.sourceWrite || !report.ready) throw new BrowserError('TAB_BUSY', 'Native source write interfaces not ready.');
+    const report = await this.probe(); if (!report.ready) throw new BrowserError('TAB_BUSY', 'Native source write interfaces not ready.'); this.assertMutationReady(); if (!report.sourceWrite) throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native source setter interfaces unavailable.');
     let expected = await this.snapshot(); if (expected.revision !== expectedRevision) throw new BrowserError('STALE_REVISION', 'Source changed before native mutation.');
     const names = new Set<string>(); for (const write of writes) { canonicalPath(write.path); if (write.path.startsWith('scratch/') || write.path.startsWith('imports/')) throw new BrowserError('PATH_DENIED', 'Not a native source path.'); if (names.has(write.path.toLowerCase())) throw new BrowserError('PATH_DENIED', 'Duplicate/colliding write path.'); names.add(write.path.toLowerCase()); if ((write.path === 'main.pjs' || write.path === 'index.html') && write.bytes === null) throw new BrowserError('PATH_DENIED', 'Native panels cannot be deleted.'); }
-    const committed: string[] = [];
+    const committed: string[] = []; let dispatched = false;
+    try {
     for (const write of writes) {
       const now = await this.snapshot(); if (now.revision !== expected.revision) return { status: committed.length ? 'PARTIAL' : 'UNKNOWN', revision: now.revision, committed, error: { code: 'STALE_REVISION', message: 'Manual/native change interrupted batch; preserved both versions.', recovery: 'Inspect checkpoint and current source. Do not replay the batch.' } };
+      this.assertMutationReady();
       try {
-        if (write.path === 'main.pjs' || write.path === 'index.html') { const text = new TextDecoder('utf-8', { fatal: true }).decode(write.bytes!); const editor = write.path === 'main.pjs' ? this.page.modelTextEditor! : this.page.outputTemplateEditor!; await editor.setValue(text); }
+        dispatched = true;
+        if (write.path === 'main.pjs' || write.path === 'index.html') { const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(write.bytes!); const editor = write.path === 'main.pjs' ? this.page.modelTextEditor! : this.page.outputTemplateEditor!; await editor.setValue(text); }
         else if (write.bytes === null) await this.page.srcState!.deleteFile(write.path.slice(4));
         else { const copied = this.options.cloneInto ? this.options.cloneInto(write.bytes) : write.bytes.slice(); await this.page.srcState!.writeFile(write.path.slice(4), copied); }
         if (this.page.srcState!.idle) await this.page.srcState!.idle!();
@@ -82,11 +106,16 @@ export class NativeAdapter {
       committed.push(write.path); expected = after;
     }
     return { status: 'SUCCEEDED', revision: expected.revision, committed };
+    } catch (error) {
+      if (!dispatched) throw error;
+      return {status:committed.length?'PARTIAL':'UNKNOWN',revision:expected.revision,committed,error:{code:'EFFECT_UNKNOWN',message:'Native mutation was dispatched before readiness/readback failed.',recovery:'Inspect the retained checkpoint and operation; do not replay.'}};
+    }
   }
-  async undoRedo(panel: 'pjs' | 'html', direction: 'undo' | 'redo', expectedRevision?: string): Promise<NativeSnapshot> { const before = await this.snapshot(); if (expectedRevision && before.revision !== expectedRevision) throw new BrowserError('STALE_REVISION', 'Source changed before undo/redo.'); const manager = this.page.editorUndoManagers?.[panel]; if (!manager || typeof manager[direction] !== 'function') throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native panel undo manager unavailable.'); await manager[direction]!(); return this.snapshot(); }
+  async undoRedo(panel: 'pjs' | 'html', direction: 'undo' | 'redo', expectedRevision?: string): Promise<NativeSnapshot> { this.assertMutationReady(); const before = await this.snapshot(); if (expectedRevision && before.revision !== expectedRevision) throw new BrowserError('STALE_REVISION', 'Source changed before undo/redo.'); const manager = this.page.editorUndoManagers?.[panel]; if (!manager || typeof manager[direction] !== 'function') throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native panel undo manager unavailable.'); try { await manager[direction]!(); return await this.snapshot(); } catch { throw new BrowserError('EFFECT_UNKNOWN','Native undo/redo was dispatched; complete readback is unavailable.','Reconcile current native source before any repeat.'); } }
   async save(intendedRevision: string, context: SaveContext): Promise<MutationResult> {
     if (!context.permission) throw new BrowserError('SCOPE_DENIED', 'Save permission is disabled.');
     if (!this.options.externalWritesVerified) throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native Save requires the recorded live Firefox/disposable verification gate.');
+    this.assertMutationReady();
     const intended = await this.snapshot(); if (intended.revision !== intendedRevision) throw new BrowserError('STALE_REVISION', 'Intended revision no longer matches current draft.');
     if (!equalIdentity(context.previousSavedSnapshot.identity, intended.identity)) throw new BrowserError('BINDING_MISMATCH', 'Saved base identity differs.');
     if (this.page.app?.userOwnsThisGenerator !== true && this.page.app?.userCanSaveThisGenerator?.() !== true) throw new BrowserError('SCOPE_DENIED', 'Native Save authorization is unavailable.');
@@ -95,6 +124,7 @@ export class NativeAdapter {
     if ((await this.snapshot()).revision !== intendedRevision) throw new BrowserError('STALE_REVISION', 'Draft changed during Save preflight.');
     if (currentSaved.revision === intendedRevision) return { status: 'SUCCEEDED', revision: intendedRevision, committed: [] };
     if (typeof this.page.app?.saveGenerator !== 'function') throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native Save method unavailable.');
+    this.assertMutationReady();
     let receipt: unknown;
     try { receipt = await this.page.app.saveGenerator(); } catch { return this.unknownSave(intendedRevision); }
     const status = context.receipt?.status ?? (receipt && typeof receipt === 'object' && 'status' in receipt ? receipt.status : undefined);

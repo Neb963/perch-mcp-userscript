@@ -1,0 +1,78 @@
+{
+  "date": "2026-11-26",
+  "classification": "verification-candidate",
+  "tiers": [
+    "T0",
+    "T1",
+    "T2"
+  ],
+  "unitAndIntegration": {
+    "command": "npm run check",
+    "tests": 263,
+    "passed": 263,
+    "failed": 0,
+    "skipped": 0,
+    "includes": [
+      "real local workerd/SQLite gateway",
+      "current and legacy official MCP wire profiles",
+      "OAuth S256/resource isolation and revocation",
+      "controller through local gateway",
+      "separate-thread QuickJS isolation",
+      "768 KiB authenticated image transfer",
+      "binding/recovery/terminal outbox regressions"
+    ]
+  },
+  "renderedManager": {
+    "command": "BROWSER_EXECUTABLE=<installed-browser> PLAYWRIGHT_MODULE=<playwright-module> node tests/e2e/manager-layout.mjs",
+    "browser": "Chromium 158.0.8127.0",
+    "viewports": [
+      [
+        1024,
+        768
+      ],
+      [
+        1920,
+        1080
+      ]
+    ],
+    "tabs": 5,
+    "result": "PASS",
+    "record": "manager-layout-20261126.json"
+  },
+  "imagePixels": {
+    "command": "BROWSER_EXECUTABLE=<installed-browser> PLAYWRIGHT_MODULE=<playwright-module> node tests/e2e/image-normalization.mjs",
+    "result": "PASS",
+    "record": "image-normalization-20261126.json",
+    "scope": "locally generated PNG pixels and corruption rejection; no native/provider claim"
+  },
+  "workerDryRun": {
+    "command": "npx wrangler deploy --dry-run --config dist/cloudflare/wrangler.json",
+    "result": "PASS",
+    "wrangler": "4.168.0",
+    "rawKiB": 1574.26,
+    "gzipKiB": 332.54,
+    "deployed": false
+  },
+  "archives": {
+    "command": "npm run verify:artifacts",
+    "result": "PASS",
+    "checks": [
+      "all manifest paths/digests and no unlisted entries",
+      "identical userscript/TXT",
+      "identical nested deployment archive",
+      "actual extracted Worker health with current MCP version",
+      "default provider writes disabled"
+    ]
+  },
+  "externalEvidence": {
+    "firefoxViolentmonkey": "NOT_EXECUTED",
+    "cloudflareDeployment": "NOT_EXECUTED",
+    "realWebClientOAuth": "NOT_EXECUTED",
+    "providerMutationOrInference": "NOT_EXECUTED",
+    "fullFunctionalParity": "BLOCKED"
+  },
+  "soak": {
+    "record": "soak-20261126.json",
+    "note": "Historical 30-minute/20-Workspace T2 component run; started before final hardening and lacks exact bundle hash. It does not qualify the final commit."
+  }
+}

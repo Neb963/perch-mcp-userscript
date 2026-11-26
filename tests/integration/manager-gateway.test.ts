@@ -31,6 +31,7 @@ test('manager journeys execute against real local Worker: pair, attach, Agent, R
         request: async (method, path, body) => { const response = await mf.dispatchFetch(issuer + path, { method, headers: { Authorization: `Bearer ${admin}`, 'Content-Type': 'application/json', ...(method === 'GET' ? {} : { 'Idempotency-Key': crypto.randomUUID() }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); const data = await response.json() as Record<string, unknown>; if (!response.ok)
             throw Object.assign(new Error(String(data.message)), data); return data; },
         health: async () => { const r = await mf.dispatchFetch(issuer + '/health'); return r.json(); },
+        promptSecret: async purpose => purpose === 'bootstrap' ? bootstrap : null,
         pair: async (_origin, secret) => { const r = await mf.dispatchFetch(issuer + '/api/v1/admin/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bootstrapSecret: secret, browserInstallationId: 'synthetic-installation', issuer }) }); const data = await r.json() as {
             adminCredential?: string;
             message?: string;
@@ -38,12 +39,12 @@ test('manager journeys execute against real local Worker: pair, attach, Agent, R
             throw new Error(data.message); admin = data.adminCredential!; paired = true; },
         currentIdentity: async () => ({ generatorId: 'synthetic-generator', slug: 'synthetic', draftId: '', browserInstallationId: 'synthetic-installation' }), attach: async () => { attached++; }, copy: async () => { }, download: () => { }, drafts: { get: async (k) => drafts.get(k), set: async (k, v) => { drafts.set(k, v); }, delete: async (k) => { drafts.delete(k); } },
     };
-    const manager = mountManager({ document: dom.window.document, version: '0.1.0', client });
+    const manager = mountManager({ document: dom.window.document, version: '0.1.0', client, synthetic: true });
     const root = dom.window.document.querySelector('[data-perch-mcp-manager]')!.shadowRoot!;
     try {
         await manager.open('Settings');
         input(root, 'Gateway HTTPS origin').value = issuer;
-        input(root, 'One-time bootstrap secret').value = bootstrap;
+        assert.equal(root.querySelector('input[type=password]'), null);
         click(root, 'Pair installation');
         await until(() => paired && !!root.querySelector('[aria-label="Workspace name"]'));
         assert.doesNotMatch(root.innerHTML, new RegExp(admin));

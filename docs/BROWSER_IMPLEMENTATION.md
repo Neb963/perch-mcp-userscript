@@ -66,3 +66,9 @@ The settings `duplicateGenerator`/`deleteGenerator` method names and optional du
 `VirtualFileSystem.importSnapshot` atomically publishes byte-exact public source under `imports/<snapshot-id>/` after full path/case/size preflight. Agent write/edit/delete tools cannot modify these files. Root-directory reads accept the shared read-schema limit, root definition extraction includes top-level panels, and Workspace snapshots include actual small panel text plus src manifests (large panels explicitly direct the caller to paged `read`).
 
 Reproduce all browser candidate evidence with `node --import tsx --test tests/unit/browser-core.test.ts tests/unit/browser-lifecycle.test.ts`: 32 passing T1 tests. No external provider call or production mutation occurred.
+
+## Native safety and cache audit
+
+See `BROWSER_NATIVE_AUDIT.md` for current public script URLs/hashes, actual native status interfaces, and the distinction between T0 inspection and unexecuted T3 acceptance. Native source writes now require positively established editor/draft readiness, native read-only status and the pure native Helper/cross-tab status interfaces. Missing or changed interfaces disable native mutation with explicit probe reasons. Source reads and the ordinary editor remain available. The adapter avoids the native mutation-block convenience function because current boot-check branches can wake Helper checks.
+
+Read-only Workspace observations no longer write local payload manifests. Observation generation is stored separately, preventing concurrent status reads from erasing a newly published immutable imports cache. Source decoders preserve initial UTF-8 BOM bytes. Orphan collection protects in-flight staged chunks. Operator reconciliation preserves the original uncertain outcome and appends resolution metadata instead of claiming no effect occurred. Browser test suite at this checkpoint: 40 passing T1 cases.

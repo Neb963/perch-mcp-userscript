@@ -17,6 +17,9 @@ export const LIMITS = Object.freeze({
   checkpointBytes: 64 * 1024 * 1024,
   resourceArchiveBytes: 16 * 1024 * 1024,
   resourceArchiveFiles: 500,
+  computeModules: 16,
+  computeModuleBytes: 256 * 1024,
+  computeModuleTotalBytes: 512 * 1024,
 });
 const opaqueId = z.string().min(1).max(128);
 const sourceRevision = z.string().min(1).max(256);

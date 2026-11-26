@@ -9,7 +9,10 @@ export interface CapacityFixture {
   props: Record<string, unknown>;
   permissions: string[];
 }
-export async function createCapacityHarness(count: number) {
+export async function createCapacityHarness(
+  count: number,
+  budgetOverrides: Record<string, string> = {},
+) {
   const bundle = await build({
     entryPoints: ["apps/gateway/src/index.ts"],
     bundle: true,
@@ -36,6 +39,7 @@ export async function createCapacityHarness(count: number) {
       BOOTSTRAP_SECRET: bootstrap,
       ISSUER_URL: base,
       PROVIDER_WRITES_ENABLED: "false",
+      ...budgetOverrides,
     },
   });
   await mf.ready;

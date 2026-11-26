@@ -124,3 +124,19 @@ test('pre-dispatch provider input rejection does not falsely make the durable pa
   assert.equal(s.db.get<MusicOperation>('operation/op-a').phase, 'RUNNING');
   assert.equal(s.db.get<{ phase: string }>('music/journal/op-a').phase, 'REJECTED');
 });
+
+
+test('idle music expiry physically removes chunks while retaining operation evidence', async () => {
+  const s = setup();
+  const result = await s.handler.handle('/api/v1/tab/music', s.body, s.deps.getLease()!);
+  assert.equal(s.handler.nextExpiry(), result.expiresAt);
+  const previous = Date.now;
+  try {
+    Date.now = () => Number(result.expiresAt);
+    s.handler.expire();
+    assert.equal(s.db.keys('music/chunk/').length, 0);
+    assert.equal(s.handler.nextExpiry(), undefined);
+    assert.equal(s.db.get<{phase:string}>('music/journal/op-a').phase, 'EXPIRED');
+    assert.equal(s.db.get<MusicOperation>('operation/op-a').operationId, 'op-a');
+  } finally { Date.now = previous; }
+});

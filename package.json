@@ -7,7 +7,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/unit/*.test.ts tests/integration/*.test.ts",
     "build": "node --import tsx scripts/build.ts",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test && npm run build && npm run verify:artifacts",
+    "verify:artifacts": "node --import tsx scripts/verify-artifacts.ts"
   },
   "engines": {
     "node": ">=22"
@@ -17,7 +18,7 @@
     "@cfworker/json-schema": "4.1.1",
     "@cloudflare/workers-oauth-provider": "1.4.0",
     "@jitl/quickjs-singlefile-browser-release-sync": "0.32.0",
-    "@modelcontextprotocol/sdk": "1.32.2",
+    "@modelcontextprotocol/server": "2.4.0",
     "fflate": "0.8.2",
     "quickjs-emscripten-core": "0.32.0",
     "re2js": "2.10.0",
