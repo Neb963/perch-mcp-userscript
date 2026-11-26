@@ -43,14 +43,24 @@ interface Configuration {
   paired: boolean;
   resources: string[];
 }
-function allowedOrigin(
+/**
+ * Privileged installation routes remain Perchance-origin-only.
+ *
+ * OAuth discovery, registration, authorization and token exchange (and MCP
+ * resource requests) are intentionally cross-origin protocols. ChatGPT web
+ * clients can send Origin: https://chatgpt.com. That origin is not an
+ * authorization credential: OAuth PKCE, Grant checks and bearer validation
+ * remain authoritative. Allow the known client origins on public endpoints
+ * only, not on admin/tab/approval management routes.
+ */
+export function allowedOrigin(
   request: Request,
   env: Env,
   issuer?: string | null,
 ): boolean {
   const o = request.headers.get("origin");
   if (!o) return true;
-  return (
+  if (
     o === "https://perchance.org" ||
     o === issuer ||
     o === new URL(request.url).origin ||
@@ -59,7 +69,17 @@ function allowedOrigin(
       .map((s) => s.trim())
       .filter(Boolean)
       .includes(o)
-  );
+  ) return true;
+  const pathname = new URL(request.url).pathname;
+  const publicProtocolPath =
+    pathname === "/authorize" ||
+    pathname === "/register" ||
+    pathname === "/token" ||
+    pathname === "/revoke" ||
+    pathname.startsWith("/.well-known/") ||
+    /^\/mcp\/[a-zA-Z0-9_-]+$/.test(pathname);
+  return publicProtocolPath &&
+    (o === "https://chatgpt.com" || o === "https://chat.openai.com");
 }
 function cors(
   response: Response,
