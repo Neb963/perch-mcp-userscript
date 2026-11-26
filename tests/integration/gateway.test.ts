@@ -287,7 +287,7 @@ test("OAuth S256 approval, exact resource audience and MCP tool-only library", a
   const earlyHtml = await early.text();
   assert.match(earlyHtml, /Check approval again/);
   assert.match(earlyHtml, /name="handle"/);
-  assert.ok(!earlyHtml.includes(approval.digest), "pending form does not expose the approval digest");
+  assert.ok(!earlyHtml.includes(String(approval.digest)), "pending form does not expose the approval digest");
   await data("/api/v1/admin/approvals/" + approvalId + "/decision", {
     expectedRevision: approval.revision,
     digest: approval.digest,
