@@ -17,6 +17,33 @@ export function canonicalPath(path: string): string {
   if (typeof path !== 'string' || path.length > 512 || !/^(main\.pjs|index\.html|(?:src|scratch|imports)\/[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*)$/.test(path) || path.split('/').some(p => p === '.' || p === '..')) throw new BrowserError('PATH_DENIED', 'Use main.pjs, index.html, src/, scratch/ or imports/ with canonical ASCII segments.');
   return path;
 }
-export function bytesToBase64(bytes: Uint8Array): string { let text = ''; for (let i = 0; i < bytes.length; i += 16384) text += String.fromCharCode(...bytes.subarray(i, i + 16384)); return btoa(text); }
-export function base64ToBytes(text: string): Uint8Array { if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(text)) throw new BrowserError('INVALID_INPUT', 'Invalid canonical base64.'); const decoded = atob(text); return Uint8Array.from(decoded, c => c.charCodeAt(0)); }
+/** Typed-array brand, not realm-local instanceof (Firefox content globals may differ). */
+const typedArrayTag = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag)?.get;
+export function isUint8Array(value: unknown): value is Uint8Array {
+  return ArrayBuffer.isView(value) && typedArrayTag?.call(value) === 'Uint8Array';
+}
+export function bytesToBase64(bytes: Uint8Array): string {
+  // Divisible by three: independently encoded blocks concatenate without
+  // intermediate padding or one enormous binary string.
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += 24576)
+    parts.push(btoa(String.fromCharCode(...bytes.subarray(i, i + 24576))));
+  return parts.join('');
+}
+export function base64ToBytes(text: string): Uint8Array {
+  const invalid = () => new BrowserError('INVALID_INPUT', 'Invalid canonical base64.');
+  if (typeof text !== 'string' || text.length % 4 !== 0) throw invalid();
+  const padding = text.endsWith('==') ? 2 : text.endsWith('=') ? 1 : 0;
+  const bodyLength = text.length - padding;
+  // The old repeated-four-character group can overflow the regexp stack
+  // on otherwise valid multi-megabyte files. A character-class scan is linear.
+  if (/[^A-Za-z0-9+/]/.test(text.slice(0, bodyLength))) throw invalid();
+  const bytes = new Uint8Array(text.length / 4 * 3 - padding);
+  let offset = 0;
+  for (let i = 0; i < text.length; i += 32768) {
+    const decoded = atob(text.slice(i, i + 32768));
+    for (let j = 0; j < decoded.length; j++) bytes[offset++] = decoded.charCodeAt(j);
+  }
+  return bytes;
+}
 export async function snapshotRevision(identity: NativeIdentity, files: Record<string, Uint8Array>): Promise<string> { const manifest = await Promise.all(Object.keys(files).sort().map(async path => [path, files[path]!.length, await digest(files[path]!) ])); return digest(JSON.stringify([identity, manifest])); }
