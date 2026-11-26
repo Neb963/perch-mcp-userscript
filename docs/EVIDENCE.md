@@ -23,7 +23,7 @@ Exclude research on PCMS account routing, native AI sessions/queue/history trans
 - Workers pricing/limits: https://developers.cloudflare.com/workers/platform/pricing/ ; https://developers.cloudflare.com/workers/platform/limits/ — current Free Workers 100k requests/day, 10ms CPU/invocation; measure DO quotas separately.
 - OAuth library: https://github.com/cloudflare/workers-oauth-provider ; https://github.com/cloudflare/workers-oauth-provider/blob/main/docs/authorization-server.md — supports resource audiences, PKCE, DCR/CIMD profiles; library version and exact route behavior require prototype.
 - MCP current protocol: https://blog.modelcontextprotocol.io/posts/2026-07-28/ ; https://ts.sdk.modelcontextprotocol.io/v2/migration/support-2026-07-28 — stateless current protocol, required headers; legacy handshake compatibility needed. Do not bind Workspace to MCP transport session.
-- Firefox userscript: https://www.tampermonkey.net/documentation.php?q=GM_xmlhttpRequest ; https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/connect-src — privileged GM requests and page CSP distinction; WSS path not proven.
+- Firefox userscript: https://violentmonkey.github.io/api/gm/ ; https://violentmonkey.github.io/api/metadata-block/ ; https://violentmonkey.github.io/posts/inject-into-context/ ; https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/connect-src — privileged GM requests and page CSP distinction; WSS path not proven.
 - Worker version rollback: https://developers.cloudflare.com/workers/versions-and-deployments/ — data storage not included.
 
 ## Feasibility gates (unresolved)
@@ -39,4 +39,6 @@ Exclude research on PCMS account routing, native AI sessions/queue/history trans
 | F08 | Web client attachments, binary result, long operation handle, resource retrieval | Standard text/image/artifact fallback; disclose limits |
 | F09 | 5–10 concurrent real tabs, free-tier CPU/quotas and operational budget | Tune transport/limits; paid option explicit, no auto-upgrade |
 
-Decisions without direct owner instruction: Tampermonkey first, Registry+Workspace DO split, OAuth library/KV, per-Agent resource URL, 1 writer per Generator ID, permission presets, local storage budgets, declarative workflow, no public redistribution, phase-first rollout. Reversible except externally published source, production restore and credential leaks. All limits provisional until measured. No live Perchance/Firefox/Cloudflare tests performed in this design task.
+Operator explicitly selected Violentmonkey first. Decisions without direct owner instruction: Registry+Workspace DO split, OAuth library/KV, per-Agent resource URL, 1 writer per Generator ID, permission presets, local storage budgets, declarative workflow, no public redistribution, phase-first rollout. Reversible except externally published source, production restore and credential leaks. All limits provisional until measured. No live Perchance/Firefox/Cloudflare tests performed in this design task.
+
+Self-contained handoff amendment: original attachments are historical provenance only. See PERCHANCE_ADAPTER.md and TOOL_PARITY_DETAILS.md for extracted implementation facts, and packages/resources for independently written default skills. Do not infer verification from their presence.

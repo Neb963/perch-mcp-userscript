@@ -5,13 +5,13 @@ Status: design baseline prepared; no runtime code, no live deployment, no live v
 | Phase | Dependency | Deliverable / exit criteria | Status |
 |---|---|---|---|
 | P00 | — | Client spec, architecture, tool parity, evidence, setup, verification and governance | Complete (design documents only) |
-| P01 | P00 | Firefox disposable diagnostic userscript; feature-detect editor/src/draft/preview/native Save and frame boundaries; F01/F02/F04/F05 evidence; read-only first then authorized disposable tests | Pending |
+| P01 | P00 | Firefox/Violentmonkey disposable diagnostic userscript; feature-detect editor/src/draft/preview/native Save and frame boundaries; F01/F02/F04/F05 evidence; read-only first then authorized disposable tests | Pending |
 | P02 | P00 | Minimal deployable Worker OAuth/Registry/Workspace transport; clean dashboard setup; two named web connectors isolated; current/legacy MCP; F03/F08 | Pending |
 | P03 | P01/P02 | Shared contracts + strict schemas + typed adapters; state machines, fencing, authorization, error mapping, local emulator, deterministic tests | Pending |
 | P04 | P03 | Core VFS, source tools, scratch/imports, revision checks, checkpoint/restore; native draft preserving | Pending |
 | P05 | P04 | Preview/eval/refresh/diagnostics/viewport/capture; isolated compute, bounded fetch; F05/F06 | Pending |
 | P06 | P04 | Native save, generator lifecycle, upload, independent verification, unknown effect reconciliation; disposable tests | Pending |
-| P07 | P03 | Resource registry/editor/import/export/version/diff/assignment; default provider-neutral skills/workflows, tool-only delivery | Pending |
+| P07 | P03 | Resource registry/editor/import/export/version/diff/assignment; bundled eleven domain skills and provider-neutral workflows; synthetic optional import fixtures, tool-only delivery | Pending |
 | P08 | P05/P06 | Image/music, authorized production state backup/restore/emulator, artifacts; F07/F08, record unresolved parity | Pending |
 | P09 | P04/P07 | Full manager UI setup wizard, OAuth management, diagnostics, backup/restore, pause/rebind/kill, accessibility | Pending |
 | P10 | P05–P09 | Security, concurrency, fault injection, interoperability, upgrades, quotas and real end-to-end acceptance; F09 | Pending |
@@ -23,7 +23,7 @@ P01 and P02 may proceed independently. No production feature activation before r
 - Need real Firefox manager and disposable generator tests (F01/F02/F04/F05).
 - Need deployment/connector interoperability proof (F03/F08).
 - Need authorized equivalent music and production server-state interfaces (F07).
-- Original skills and raw evidence supplied privately; import during testing, do not publish third-party assets until rights verified.
+- Historical exports remain private; the original authored skill library, adapter reference and synthetic fixtures are checked in. No external attachment dependency.
 - No actual executable source or deployable release yet.
 
 ## Intended repository layout
@@ -33,3 +33,6 @@ apps/gateway (Worker + DO + OAuth), apps/userscript (top controller, frame execu
 - Initial repository was empty. Initialized main and committed the design baseline and protocol supplement.
 - Archive integrity and SHA-256 checked locally; relevant platform documents, original tool schemas, skill export manifest and selected captured frontend source inspected. Public primary-source MCP and Cloudflare docs consulted.
 - No CI triggered, no production code, no live provider mutation, no deploy performed. P01/P02 are the next eligible feasibility phases.
+
+## P00 handoff amendment
+Operator selected Violentmonkey, and requested a standalone coding handoff. Read docs/HANDOFF.md and the checked-in implementation references. All phases may be planned from repository alone. P01/P02 still require real environments for final proof; implement test harnesses and other independently eligible work without waiting for owner attachments. Unresolved authorized media/state integrations are parity blockers, not missing input files.

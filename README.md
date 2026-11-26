@@ -17,7 +17,7 @@ Perch MCP connects external AI web clients to independent Perchance editor tabs 
 - [Implementation phases](todo.md) — current execution ledger.
 - [Agent governance](AGENTS.md).
 
-The owner supplies the Perchance discovery and skills archives separately. This public repository does not redistribute raw provider captures or original third-party skills without established redistribution permission. Import is a first-class product feature.
+The repository is the complete coding handoff. Start with [HANDOFF.md](docs/HANDOFF.md), [Perchance adapter reference](docs/PERCHANCE_ADAPTER.md), and [Violentmonkey contract](docs/VIOLENTMONKEY.md). The 11 independently authored [default skills](packages/resources/skills/) ship with the product and require no owner-supplied archive. Optional imports remain supported. Historical raw captures and original third-party skill texts are not redistributed.
 
 ## Intended installation
 Deploy a released gateway using the Cloudflare dashboard/Deploy to Cloudflare workflow; install the single released userscript in Firefox; pair using the gateway URL and one-time bootstrap secret; attach a workspace; copy its MCP URL into the AI client's connector configuration; approve OAuth from the manager. See the setup contract for exact intended behavior. These steps are not yet executable.

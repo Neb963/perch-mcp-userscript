@@ -1,0 +1,4 @@
+animal
+  otter
+  raven ^2
+output = A [animal.selectOne]

@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "packageId": "perch-mcp-defaults",
+  "version": "0.1.0",
+  "provenance": "Independently authored factual reference seeds, reviewed against historical discovery and public documentation; not copies of original skills.",
+  "resources": [
+    {
+      "id": "perchance-platform",
+      "kind": "skill",
+      "path": "skills/perchance-platform/SKILL.md",
+      "revision": 1
+    },
+    {
+      "id": "ai-text-plugin",
+      "kind": "skill",
+      "path": "skills/ai-text-plugin/SKILL.md",
+      "revision": 1
+    },
+    {
+      "id": "text-to-image-plugin",
+      "kind": "skill",
+      "path": "skills/text-to-image-plugin/SKILL.md",
+      "revision": 1
+    },
+    {
+      "id": "server-plugin",
+      "kind": "skill",
+      "path": "skills/server-plugin/SKILL.md",
+      "revision": 1
+    },
+    {
+      "id": "comments-plugin",
+      "kind": "skill",
+      "path": "skills/comments-plugin/SKILL.md",
+      "revision": 1
+    },
+    {
+      "id": "dynamic-metadata",
+      "kind": "skill",
+      "path": "skills/dynamic-metadata/SKILL.md",
+      "revision": 1
+    },
+    {
+      "id": "kv-plugin",
+      "kind": "skill",
+      "path": "skills/kv-plugin/SKILL.md",
+      "revision": 1
+    },
+    {
+      "id": "secret-plugin",
+      "kind": "skill",
+      "path": "skills/secret-plugin/SKILL.md",
+      "revision": 1
+    },
+    {
+      "id": "super-fetch-plugin",
+      "kind": "skill",
+      "path": "skills/super-fetch-plugin/SKILL.md",
+      "revision": 1
+    },
+    {
+      "id": "upload-plugin",
+      "kind": "skill",
+      "path": "skills/upload-plugin/SKILL.md",
+      "revision": 1
+    },
+    {
+      "id": "music-generation",
+      "kind": "skill",
+      "path": "skills/music-generation/SKILL.md",
+      "revision": 1
+    },
+    {
+      "id": "generator-development",
+      "kind": "workflow",
+      "path": "workflows/generator-development.md",
+      "revision": 1
+    },
+    {
+      "id": "engineering",
+      "kind": "instruction",
+      "path": "instructions/engineering.md",
+      "revision": 1
+    }
+  ]
+}
