@@ -18,6 +18,14 @@ declare const __COMPUTE_WORKER_SOURCE__: string;
 export class RuntimeTools implements AdditionalTools {
   private previews = new Map<string, PreviewAdapter>();
   private compute: ReturnType<typeof createComputeWorkerClient>;
+  private readonly previewOutcomes: { at: number; tool: string; durationMs: number; code: string; outcome: 'ok' | 'error' }[] = [];
+  diagnostics() {
+    return { previewEvents: this.previewOutcomes.map((event) => ({ ...event })) };
+  }
+  private recordPreview(event: { at: number; tool: string; durationMs: number; code: string; outcome: 'ok' | 'error' }) {
+    this.previewOutcomes.push(event);
+    if (this.previewOutcomes.length > 50) this.previewOutcomes.splice(0, this.previewOutcomes.length - 50);
+  }
   constructor(
     private page: unknown,
     private store: KeyValueStore,
@@ -487,8 +495,22 @@ export class RuntimeTools implements AdditionalTools {
         await context.vfs.read(String(args.file_path)),
         String(args.file_path),
       );
-    await context.adapter.assertMutationReady();
-    return this.preview(context).call(name, args);
+    // Diagnostics must still work when the editor is read-only or native
+    // mutation guards are busy. Every preview operation verifies the current
+    // Generator/Draft Binding before touching its frame.
+    await context.adapter.assertIdentity();
+    if (name !== 'preview_diagnostics') context.adapter.assertMutationReady();
+    const started = Date.now();
+    try {
+      const result = await this.preview(context).call(name, args);
+      this.recordPreview({ at: started, tool: name, durationMs: Date.now() - started, code: 'OK', outcome: 'ok' });
+      return result;
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+        && /^[A-Z][A-Z0-9_]{0,47}$/.test(error.code) ? error.code : 'PREVIEW_FAILED';
+      this.recordPreview({ at: started, tool: name, durationMs: Date.now() - started, code, outcome: 'error' });
+      throw error;
+    }
   }
 }
 function dimensions(bytes: Uint8Array): {

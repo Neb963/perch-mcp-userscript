@@ -73,3 +73,32 @@ test("offline diagnostic export stays useful and projects only stable failure co
   assert.match(serialized, /GATEWAY_UNAVAILABLE/);
   assert.doesNotMatch(serialized, /LEAK-ME/);
 });
+
+test('preview diagnostics export exact failure codes and timing but never user JavaScript, console or private identifiers',async()=>{
+ const client=fixture(async(method,path)=>{
+  if(path.endsWith('/state'))return {version:'0.1.4',revision:1,policyRevision:1};
+  return {events:[]};
+ });
+ const previous=client.diagnostics!;
+ client.diagnostics=()=>({
+  ...(previous() as Record<string, unknown>),
+  preview:{previewEvents:[
+    {at:1795715000000,tool:'page_eval',durationMs:4100,outcome:'error',code:'UNSUPPORTED_INTERFACE',
+     js:'LEAK-ME-js-body',privateConsole:'LEAK-ME-console'},
+    {at:1795715001000,tool:'page_refresh',durationMs:320,outcome:'ok',code:'OK',
+     source:'LEAK-ME-generator-source'},
+    {at:1795715002000,tool:'exfiltrate_credentials',durationMs:12,outcome:'error',
+     code:'LEAK-ME_UNSAFE',secret:'LEAK-ME-header'}
+  ]},
+ });
+ const result=await buildDiagnosticReport(client,'0.1.6',{connection:'connected'});
+ const serialized=JSON.stringify(result);
+ assert.match(serialized,/page_eval/);
+ assert.match(serialized,/UNSUPPORTED_INTERFACE/);
+ assert.match(serialized,/page_refresh/);
+ assert.doesNotMatch(serialized,/LEAK-ME|exfiltrate_credentials/);
+ const events=(result.preview as {events:{tool:string;code:string}[]}).events;
+ assert.equal(events.length,3);
+ assert.equal(events[2]?.tool,'other');
+ assert.equal(events[2]?.code,'UNKNOWN');
+});

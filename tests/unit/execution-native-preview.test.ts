@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {JSDOM} from 'jsdom';
-import {createNativePreviewBridge,NativeProtocolPreviewBridge,type PreviewReceipt} from '../../apps/userscript/src/preview.js';
+import {createNativePreviewBridge,NativeProtocolPreviewBridge,PreviewAdapter,type PreviewReceipt} from '../../apps/userscript/src/preview.js';
 import {type ExecutionError} from '../../apps/userscript/src/compute.js';
 
 const publicId='b95e4473dace29730b4433ad33b4c64c';
@@ -64,4 +64,56 @@ test('a trusted DOM frame reload fences a pending native evaluation',async()=>{
 test('native frame Public ID mismatch denies requests before dispatch',async()=>{
  const f=await fixture();f.page.generatorPublicId='0'.repeat(32);
  await assert.rejects(f.bridge.evaluate('return 42;',1000),(e:ExecutionError)=>e.code==='BINDING_MISMATCH');assert.equal(f.requests.length,0);
+});
+
+test('PreviewAdapter attests native evaluateJs with exact source/origin/caller ID before enabling page_eval',async()=>{
+ const f=await fixture();
+ const adapter=new PreviewAdapter({
+  frame:()=>f.frame,revision:async()=> 'r1',bridge:f.bridge,verified:{},
+ });
+ assert.equal(adapter.availability().page_eval?.available,false);
+ const evaluated=await adapter.call('page_eval',{js:'return 6 * 7;',timeoutMs:2000}) as
+  {result:number;pageFreshnessUnknown:boolean;diagnosticsAvailability:Record<string,string>};
+ assert.equal(evaluated.result,42);
+ assert.equal(evaluated.pageFreshnessUnknown,true,'evaluation without native refresh must not claim current source');
+ assert.equal(adapter.availability().page_eval?.available,true);
+ assert.equal(f.requests.filter(r=>r.js==='return 6 * 7;').length,2,'inert handshake and user evaluation both use exact native protocol');
+ const original=f.page.generatorPublicId;
+ f.page.generatorPublicId='0'.repeat(32);
+ await assert.rejects(adapter.call('page_eval',{js:'return 42;',timeoutMs:2000}),
+   (e:ExecutionError)=>e.code==='BINDING_MISMATCH');
+ f.page.generatorPublicId=original;
+});
+test('PreviewAdapter native refresh attests panel/manifest receipts and makes console/error scope explicit',async()=>{
+ const f=await fixture();
+ const adapter=new PreviewAdapter({
+  frame:()=>f.frame,revision:async()=> 'r1',bridge:f.bridge,verified:{},
+ });
+ const refreshed=await adapter.call('page_refresh',{}) as
+  {previewRevision:string;pageFreshnessUnknown:boolean;diagnosticsAvailability:Record<string,string>};
+ assert.equal(refreshed.previewRevision,'r1');
+ assert.equal(refreshed.pageFreshnessUnknown,false);
+ const receipt=await adapter.call('preview_diagnostics',{}) as {
+  previewRevision:string;diagnosticScope:Record<string,boolean>;
+  diagnosticsAvailability:Record<string,string>;
+ };
+ assert.equal(receipt.previewRevision,'r1');
+ assert.equal(receipt.diagnosticScope.syntaxErrorsUnavailable,true);
+ const readiness=(receipt as unknown as {nativeReadiness:Record<string,boolean>}).nativeReadiness;
+ assert.equal(readiness.exactFrameOrigin,true);
+ assert.equal(readiness.nativeManifestAvailable,true);
+ assert.equal(readiness.nativeHardReloadAvailable,true);
+ assert.ok(Object.values(readiness).every(value=>typeof value==='boolean'));
+ assert.ok(!JSON.stringify(readiness).includes(publicId));
+ assert.equal(receipt.diagnosticScope.consoleCaptureRequiresInstrumentedRefresh,false);
+ assert.equal(receipt.diagnosticsAvailability.console,'captured');
+});
+test('preview does not enable runtime evaluation without an attested native frame',async()=>{
+ const adapter=new PreviewAdapter({
+  frame:()=>null, revision:async()=> 'r1',
+  verified:{},bridge:undefined,
+ });
+ await assert.rejects(adapter.call('page_eval',{js:'return 42;',timeoutMs:1000}),
+  (e:ExecutionError)=>e.code==='UNSUPPORTED_INTERFACE');
+ assert.equal(adapter.availability().page_eval?.available,false);
 });

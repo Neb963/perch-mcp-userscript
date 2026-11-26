@@ -10,6 +10,13 @@ function patternRegex(pattern: string): RE2JS { if (pattern.length > 1024 || pat
 function page<T>(all: T[], cursor: unknown, limit: number): { items: T[]; cursor?: string } { let offset = 0; if (cursor !== undefined) { if (typeof cursor !== 'string' || !/^\d{1,10}$/.test(cursor)) throw new BrowserError('INVALID_INPUT', 'Invalid pagination cursor.'); offset = Number(cursor); } const items = all.slice(offset, offset+limit); return offset+items.length < all.length ? {items,cursor:String(offset+items.length)} : {items}; }
 function file(snapshot: WorkspaceSnapshot, path: string): Uint8Array { canonicalPath(path); const value = snapshot.files[path]; if (!value) throw new BrowserError('FILE_NOT_FOUND', 'File does not exist.'); return value; }
 function bytesFor(snapshot: WorkspaceSnapshot, path: string): string { return decodeText(file(snapshot, path)); }
+/** UTF-8 text is positively detected; no MIME inference from filenames. */
+function fileType(bytes: Uint8Array): 'text' | 'binary' | 'empty' {
+  if (bytes.length === 0) return 'empty';
+  if (bytes.includes(0)) return 'binary';
+  try { decodeText(bytes); return 'text'; }
+  catch { return 'binary'; }
+}
 /** Preflight exact patch. No fuzzy matching, shell paths, or partially validated effects. */
 export function parsePatch(patch: string, snapshot: WorkspaceSnapshot): FileWrite[] {
   if (patch.length > 1024 * 1024) throw new BrowserError('LIMIT_EXCEEDED', 'Patch exceeds 1 MiB.');
@@ -61,9 +68,27 @@ export class SourceTools {
     if (name === 'checkpoint_restore') return this.vfs.restore(string(args,'id'),string(args,'expectedRevision'));
     const snapshot = await this.vfs.snapshot();
     if (expected && expected !== snapshot.revision) throw new BrowserError('STALE_REVISION','Workspace changed; read current source before applying edits.');
-    if (name === 'workspace_status' || name === 'generator_info') return { identity:snapshot.identity,revision:snapshot.revision,dirty:snapshot.dirty,saveState:snapshot.saveState,capabilities:await this.adapter.probe(),unresolved:await this.vfs.unresolved() };
+    if (name === 'workspace_status' || name === 'generator_info') {
+      const base = { identity:snapshot.identity,revision:snapshot.revision,
+        dirty:snapshot.dirty,saveState:snapshot.saveState,
+        capabilities:await this.adapter.probe(),unresolved:await this.vfs.unresolved() };
+      return name === 'generator_info'
+        ? { ...base, ...this.adapter.generatorMetadata(),
+            metadataAvailability: {
+              listing: 'Only an explicit native listing value is reported; otherwise unknown.',
+              ownership: 'Only an explicit native ownership boolean is reported; otherwise unknown.',
+              editAccess: 'Only an explicit native Save-access predicate is reported; otherwise unknown.',
+            } }
+        : base;
+    }
     if (name === 'workspace_snapshot') { const entries = Object.entries(snapshot.files).sort(([a],[b])=>a.localeCompare(b)); const items = await Promise.all(entries.map(async ([path,bytes])=>({path,bytes:bytes.length,sha256:await digest(bytes)}))); const result = page(items,args.cursor,integer(args.limit,100,1,100)); const panels = Object.fromEntries(['main.pjs','index.html'].map(path => { const bytes = snapshot.files[path]!; return [path, {path,bytes:bytes.length,...(bytes.length <= 131072 ? {text:decodeText(bytes)} : {contentOmitted:true,recovery:'Use read with offset/limit for this panel.'})}]; })); return {revision:snapshot.revision,identity:snapshot.identity,panels,files:result.items,cursor:result.cursor}; }
-    if (name === 'list_files' || name === 'glob') { const prefix = typeof args.path === 'string' ? args.path.replace(/\/$/,'') : ''; if (prefix && !['src','scratch','imports'].includes(prefix)) canonicalPath(prefix); const pattern = patternRegex(name === 'glob' ? string(args,'pattern') : '**'); const paths = Object.keys(snapshot.files).sort().filter(path=>(!prefix||path===prefix||path.startsWith(prefix+'/'))&&pattern.test(path)); const result=page(paths,args.cursor,integer(args.limit,100,1,100)); return {paths:result.items,cursor:result.cursor,revision:snapshot.revision}; }
+    if (name === 'list_files' || name === 'glob') { const prefix = typeof args.path === 'string' ? args.path.replace(/\/$/,'') : ''; if (prefix && !['src','scratch','imports'].includes(prefix)) canonicalPath(prefix); const pattern = patternRegex(name === 'glob' ? string(args,'pattern') : '**'); const paths = Object.keys(snapshot.files).sort().filter(path=>(!prefix||path===prefix||path.startsWith(prefix+'/'))&&pattern.test(path)); const result=page(paths,args.cursor,integer(args.limit,100,1,100)); return name === 'list_files' ? {
+      paths:result.items,
+      entries:result.items.map(path => ({
+        path, bytes:snapshot.files[path]!.length, type:fileType(snapshot.files[path]!),
+      })),
+      cursor:result.cursor,revision:snapshot.revision
+    } : {paths:result.items,cursor:result.cursor,revision:snapshot.revision}; }
     if (name === 'read') { const path=string(args,'path'); const allPaths=Object.keys(snapshot.files).sort(); if (!snapshot.files[path] && (path===''||allPaths.some(p=>p.startsWith(path.replace(/\/$/,'')+'/')))) { const result=page(allPaths.filter(p=>!path||p.startsWith(path.replace(/\/$/,'')+'/')),args.cursor,integer(args.limit,2000,1,2000)); return {paths:result.items,cursor:result.cursor,revision:snapshot.revision}; } const text=bytesFor(snapshot,path); const lines=text.split('\n'); const offset=integer(args.offset,1,1,Number.MAX_SAFE_INTEGER); const limit=integer(args.limit,2000,1,2000); return {path,revision:snapshot.revision,content:lines.slice(offset-1,offset-1+limit).map((line,i)=>`${offset+i}: ${line}`).join('\n'),offset,totalLines:lines.length,truncated:offset-1+limit<lines.length}; }
     if (name === 'read_b64_file') { const path=string(args,'path'); const bytes=file(snapshot,path); const offset=integer(args.offset,0,0,Number.MAX_SAFE_INTEGER); const limit=integer(args.limit,262144,1,262144); return {path,data:bytesToBase64(bytes.subarray(offset,offset+limit)),bytes:bytes.length,offset,sha256:await digest(bytes),truncated:offset+limit<bytes.length,revision:snapshot.revision}; }
     if (name === 'write' || name === 'save_b64_file') { const path=string(args,'path'); const bytes=name==='write'?utf8.encode(string(args,'content')):base64ToBytes(string(args,'data')); return this.vfs.writeBatch([{path,bytes}],expected??snapshot.revision); }

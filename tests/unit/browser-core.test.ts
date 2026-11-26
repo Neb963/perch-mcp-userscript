@@ -39,3 +39,49 @@ test('unreadable pointer after failed publication is UNKNOWN and retains old and
 test('failed publication never rolls back or overwrites a concurrently replaced pointer',async()=>{const store=new MemoryStore();const chunks=new ChunkStore(store,'competing');await chunks.put('x',new Uint8Array([1]));await chunks.put('peer',new Uint8Array([9]));const peer=await store.get('competing:manifest:peer');const set=store.set.bind(store);store.set=async(key,value)=>{if(key==='competing:manifest:x'){await set(key,peer);throw new Error('concurrent pointer');}await set(key,value);};await assert.rejects(chunks.put('x',new Uint8Array([2])),rejectsCode('EFFECT_UNKNOWN'));assert.deepEqual(await store.get('competing:manifest:x'),peer);});
 test('import publication lost acknowledgement is verified once; unavailable readback holds writes',async()=>{const f=fixture();await f.vfs.importSnapshot('public',{'main.pjs':utf8.encode('old')});const set=f.store.set.bind(f.store);f.store.set=async(key,value)=>{await set(key,value);if(key===`${f.vfs.prefix}:manifest:local`)throw new Error('commit then lost ack');};await f.vfs.importSnapshot('public',{'main.pjs':utf8.encode('new')},(await f.vfs.snapshot()).revision);assert.equal(decodeText(await f.vfs.read('imports/public/main.pjs')),'new');assert.equal((await f.vfs.unresolved()).length,0);const get=f.store.get.bind(f.store);let failed=false;f.store.set=async(key,value)=>{await set(key,value);if(key===`${f.vfs.prefix}:manifest:local`){failed=true;throw new Error('lost ack');}};f.store.get=async<T>(key:string)=>{if(failed&&key===`${f.vfs.prefix}:manifest:local`)throw new Error('unavailable pointer');return get<T>(key);};await assert.rejects(f.vfs.importSnapshot('public',{'main.pjs':utf8.encode('possible')},(await f.vfs.snapshot()).revision),rejectsCode('EFFECT_UNKNOWN'));f.store.get=get;f.store.set=set;const held=await f.vfs.unresolved();assert.equal(held.length,1);assert.equal(held[0]?.kind,'IMPORT');assert.equal(held[0]?.state,'UNKNOWN');await assert.rejects(f.vfs.writeBatch([{path:'scratch/later',bytes:utf8.encode('no replay')}]),rejectsCode('EFFECT_UNKNOWN'));assert.equal(decodeText(await f.vfs.read('imports/public/main.pjs')),'possible');});
 test('invalid pointer after failed publication is UNKNOWN and prevents destructive cleanup',async()=>{const store=new MemoryStore();const chunks=new ChunkStore(store,'invalid-publication');await chunks.put('x',new Uint8Array([1]));const set=store.set.bind(store);store.set=async(key,value)=>{if(key==='invalid-publication:manifest:x'){await set(key,null);throw new Error('corrupt pointer');}await set(key,value);};await assert.rejects(chunks.put('x',new Uint8Array([2])),rejectsCode('EFFECT_UNKNOWN'));await assert.rejects(chunks.get('x'),rejectsCode('STORAGE_CORRUPT'));await assert.rejects(chunks.collectOrphans(),rejectsCode('STORAGE_CORRUPT'));assert.equal((await store.list()).filter(key=>key.startsWith('invalid-publication:blob:')).length,2);});
+
+test('list_files returns stable paths plus byte-accurate text/binary/empty entries without changing source',async()=>{
+ const f=fixture();
+ const before=await f.vfs.snapshot();
+ const result=await f.tools.call('list_files',{limit:3}) as {
+  paths:string[];entries:{path:string;bytes:number;type:string}[];cursor?:string;revision:string;
+ };
+ assert.deepEqual(result.entries.map(x=>x.path),result.paths);
+ assert.equal(result.revision,before.revision);
+ assert.deepEqual(result.entries.find(x=>x.path==='index.html'),{
+  path:'index.html',bytes:new TextEncoder().encode('<h1>Fixture</h1>\n').length,type:'text'
+ });
+ assert.deepEqual(result.entries.find(x=>x.path==='main.pjs'),{
+  path:'main.pjs',bytes:new TextEncoder().encode('animal\n  otter\n').length,type:'text'
+ });
+ const next=await f.tools.call('list_files',{cursor:result.cursor,limit:10}) as
+  {paths:string[];entries:{path:string;bytes:number;type:string}[];revision:string};
+ const entries=[...result.entries,...next.entries];
+ assert.equal(entries.find(x=>x.path==='src/empty.bin')?.type,'empty');
+ assert.equal(entries.find(x=>x.path==='src/empty.bin')?.bytes,0);
+ assert.equal(entries.find(x=>x.path==='src/bytes.bin')?.type,'binary');
+ assert.equal(entries.find(x=>x.path==='src/bytes.bin')?.bytes,5);
+ assert.equal((await f.vfs.snapshot()).revision,before.revision);
+});
+test('generator_info distinguishes known ownership from unknown Save and listing status',async()=>{
+ const f=fixture();
+ const first=await f.tools.call('generator_info') as Record<string,unknown>;
+ assert.deepEqual(first.ownership,{known:true,owned:true});
+ assert.deepEqual(first.editAccess,{known:false,allowed:null});
+ assert.deepEqual(first.listing,{known:false,value:null});
+ const app=f.page.app as typeof f.page.app & {
+  userCanSaveThisGenerator?:()=>unknown;
+  data:{generator:typeof f.page.app.data.generator & {listing?:string}};
+ };
+ app.userCanSaveThisGenerator=()=>true;
+ app.data.generator.listing='unlisted';
+ const second=await f.tools.call('generator_info') as Record<string,unknown>;
+ assert.deepEqual(second.editAccess,{known:true,allowed:true});
+ assert.deepEqual(second.listing,{known:true,value:'unlisted'});
+ app.userCanSaveThisGenerator=()=>{throw new Error('private token LEAK-ME')};
+ app.data.generator.listing='unrecognized';
+ const third=await f.tools.call('generator_info') as Record<string,unknown>;
+ assert.deepEqual(third.editAccess,{known:false,allowed:null});
+ assert.deepEqual(third.listing,{known:false,value:null});
+ assert.doesNotMatch(JSON.stringify(third),/LEAK-ME/);
+});
