@@ -1264,12 +1264,22 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
                       // authoritative state. Never replay an uncertain write.
                       uncertain = error;
                     }
-                    const grants = await loadList(`${ADMIN}/grants`);
-                    const current = grants.items.find((item) => item.id === g.id);
-                    if (current?.state !== "revoked")
+                    let current: Row | undefined;
+                    try {
+                      const grants = await loadList(`${ADMIN}/grants`);
+                      current = grants.items.find((item) => item.id === g.id);
+                    } catch {
+                      panel.replaceChildren();
+                      p("Revocation outcome unknown: server readback failed. Refresh Grants to reconcile; do not submit the POST again.", panel);
+                      throw new Error("Grant revocation unverified. Refresh Grants; do not retry the uncertain write.");
+                    }
+                    if (current?.state !== "revoked") {
+                      panel.replaceChildren();
+                      p("Grant still appears active or has changed. Refresh Grants and inspect its revision before attempting another action.", panel);
                       throw uncertain ?? new Error(
-                        "Grant revocation is not reflected in the Registry. Do not retry automatically.",
+                        "Grant revocation not verified. Do not repeat an uncertain write.",
                       );
+                    }
                     await refresh();
                     announce("Grant revoked and verified in the Registry. Reauthorize the connector to regain access.");
                   }, "danger");
