@@ -109,3 +109,12 @@ test('reject provider identity change, revision drift and malformed public asset
   :new Response(new Uint8Array([1,2]))) as typeof fetch;
  await assert.rejects(readPublicGenerator('fixture',corrupted),(e)=>(e as {code:string}).code==='NATIVE_CONFLICT');
 });
+
+test('explicit zero-byte public asset with absent Response.body is complete',async()=>{
+ const fetcher=(async(url:string|URL|Request)=>String(url).includes('getGeneratorPageData')
+   ? Response.json({generator:{...generator,srcManifest:{'empty.bin':{key:'zero',size:0}}}})
+   : new Response(null,{status:204})) as typeof fetch;
+ const result=await readPublicGenerator('fixture',fetcher);
+ assert.equal(result.completeness,'complete');
+ assert.equal(result.files['src/empty.bin']!.length,0);
+});

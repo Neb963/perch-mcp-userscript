@@ -180,3 +180,16 @@ Plan: harden byte validation against cross-realm typed arrays and large Base64; 
 - Native syntax accepts bounded flat/grouped arrays and retains partial coverage and source provenance. Unknown shapes are reported without leaking native payloads. Preview capabilities distinguish not-yet-attested, failed probe and unavailable.
 - Regression fixtures added for cross-realm bytes, multi-megabyte files, case collision, delayed geometry, replaced iframe, syntax result variants, and boolean predicates.
 - No production provider mutations dispatched; active epoch-7 draft remains dirty. Save policy and adapter acceptance remain separate, deliberately closed pending live authorized verification. Capture, media, lifecycle and production state are not certified by these patches. CI required before installation; no deployment performed.
+
+### Epoch 8 / v0.1.10 — failure safety and metadata refinement
+
+Evidence: operator-supplied Epoch-8 live regression appendix and redacted v0.1.9 diagnostics. Live positives: public imports (plugin/minimal), native viewport reset, source writes, checkpoints, preview execution and transport. Do not regress them. The assigned aleph-alpha generator is dirty at source revision 12; do not mutate or Save it. Gateway v0.1.5 is connected with providerWritesEnabled=false.
+
+Implementation:
+- Preserve both Save authorization gates. Add durable pre-dispatch journaling (DISPATCHED), no-blind-replay UNKNOWN handling, and a readback-only bounded settlement probe. Distinguish verified stored-source revision from a concurrently changed draft revision.
+- Interpret native ownership and edit-access predicates only when they return exact booleans, including bounded async predicates. Conflicting listing fields remain unknown, not false.
+- Copy cross-realm native ArrayBuffers through intrinsic brand validation. Preserve explicit zero-byte public manifest assets with no response body.
+- Preserve accurate MCP UNSUPPORTED_INTERFACE structured errors; host-side outer INVALID_ARGUMENT wrapping is not proven fixable by this userscript. Do not weaken MCP isError semantics.
+- No capability toggles, Worker deployment, native pixel-capture claims, invalid-source injection, paid media calls, or production provider writes.
+
+Verification: strict TypeScript, unit/integration tests with intercepted Save and failure injection, package integrity and Worker dry-run in PR Actions. Live T3/T4 acceptance remains open for Save, actual-pixel capture, syntax, and lifecycle/provider tools. See docs/verification/epoch8-regression-v0110.md.
