@@ -60,12 +60,15 @@ export class PreviewAdapter {
   constructor(private readonly options: PreviewOptions) {}
   private async requireCapability(capability: 'refresh' | 'evaluate' | 'preamble'): Promise<void> {
     this.syncAttestationFrame();
+    const frame = this.attestedFrame;
     if (this.options.verified?.[capability]) return;
     try {
       if (!this.options.bridge?.attest || !(await this.options.bridge.attest(capability)))
         throw new ExecutionError('UNSUPPORTED_INTERFACE',
           `Native preview ${capability} capability could not be verified on the exact bound output frame.`);
       this.syncAttestationFrame();
+      if (this.attestedFrame !== frame)
+        throw new ExecutionError('STALE_EPOCH', 'Preview iframe changed during capability attestation.');
       this.attested.add(capability);
       this.failedAttestation.delete(capability);
     } catch (error) {
