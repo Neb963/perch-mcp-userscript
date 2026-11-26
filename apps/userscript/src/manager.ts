@@ -75,7 +75,7 @@ export interface ManagerOptions {
   synthetic?: true;
 }
 export interface ManagerStatus {
-  connection: "unpaired" | "connected" | "paused" | "offline" | "blocked";
+  connection: "unpaired" | "connected" | "degraded" | "paused" | "offline" | "blocked";
   workspace?: string;
   agent?: string;
   dirty?: boolean;
@@ -351,6 +351,19 @@ export async function buildDiagnosticReport(
       evidenceLimit: "Server events do not identify the client or confirm navigation. Absence of a token exchange is not proof of a blocked client.",
     },
     transport: { events: localEvents },
+    browser: (() => {
+      const b = record(local.browser);
+      const connection = str(b.connection);
+      return {
+        connection: ["unpaired", "connected", "degraded", "paused", "offline", "blocked"].includes(connection) ? connection : "unknown",
+        leasePresent: b.leasePresent === true,
+        leaseRemainingMs: num(b.leaseRemainingMs),
+        stopped: b.stopped === true,
+        consecutivePollFailures: num(b.consecutivePollFailures),
+        lastPollSuccessAt: typeof b.lastPollSuccessAt === "number" ? b.lastPollSuccessAt : null,
+        reasonCode: /^[A-Z][A-Z0-9_]{0,47}$/.test(str(b.reasonCode)) ? b.reasonCode : null,
+      };
+    })(),
     note: "OAuth events do not appear in MCP operation Activity; inspect oauthAudit and transport.",
   };
 }
@@ -759,6 +772,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   }
   function renderWorkspaces() {
     heading("Workspaces");
+    p(`Local browser connection: ${status.connection}${status.reason ? ` · ${status.reason}` : ""}. Remote Workspace Active is not proof of a live browser lease.`, body, "muted");
     p(
       "Attach the current editor to one Workspace. Rebinding revokes previous Grants and fences the previous document.",
       body,
