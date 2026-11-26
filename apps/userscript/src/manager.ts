@@ -351,6 +351,20 @@ export async function buildDiagnosticReport(
       evidenceLimit: "Server events do not identify the client or confirm navigation. Absence of a token exchange is not proof of a blocked client.",
     },
     transport: { events: localEvents },
+    preview: {
+      events: (() => {
+        const events = record(local.preview).previewEvents;
+        return Array.isArray(events) ? events.slice(-50).filter(isRecord).map((event) => ({
+          at: num(event.at),
+          tool: ['page_eval', 'page_refresh', 'preview_diagnostics', 'set_viewport_size', 'capture_page_image']
+            .includes(str(event.tool)) ? event.tool : 'other',
+          durationMs: num(event.durationMs),
+          outcome: event.outcome === 'ok' ? 'ok' : 'error',
+          code: /^[A-Z][A-Z0-9_]{0,47}$/.test(str(event.code)) ? event.code : 'UNKNOWN',
+        })) : [];
+      })(),
+      scope: 'Local preview operation outcomes only. Never contains generator JavaScript, console text or OAuth credentials.',
+    },
     browser: (() => {
       const b = record(local.browser);
       const connection = str(b.connection);
