@@ -1092,6 +1092,29 @@ export class BrowserController {
         },
       };
     }
+    if (name === 'generator_info' && this.source) {
+      const base = await this.source.call(name, args) as Record<string, unknown>;
+      const identity = await this.adapter.assertIdentity();
+      const revision = (await context.vfs.snapshot()).revision;
+      let savedBaseRevision: Record<string, unknown>;
+      try {
+        const saved = await new SavedSourceReader().read(identity.slug, identity);
+        await this.adapter.assertIdentity();
+        savedBaseRevision = {known:true, value:saved.revision,
+          provenance:'independent-complete-public-source-readback'};
+      } catch (error) {
+        const code = (error as {code?:unknown})?.code;
+        savedBaseRevision = {known:false, value:null,
+          reason: code === 'UNSUPPORTED_INTERFACE'
+            ? 'Public source response did not attest a complete saved manifest.'
+            : 'Independent saved-source readback was not verified.'};
+      }
+      if (this.stopped || this.lease !== lease || Date.now() >= lease.expiresAt)
+        throw Object.assign(new Error('Lease lost during metadata verification.'), {code:'TAB_OFFLINE'});
+      if (base.revision !== revision || (await context.vfs.snapshot()).revision !== revision)
+        throw Object.assign(new Error('Source changed during metadata verification.'), {code:'STALE_REVISION'});
+      return {...base,savedBaseRevision};
+    }
     if (name === 'save_generator' && this.source) {
       // The gateway refuses this tool until global provider acceptance is
       // enabled. Local adapter acceptance is separate and cannot be bypassed
