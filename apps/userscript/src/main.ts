@@ -227,6 +227,7 @@ async function start(): Promise<void> {
   async function resumeBoundEditor(): Promise<void> {
     if (initializationError || !transport.configuration().paired || closing) return;
     const epoch = manualConnectionEpoch;
+    let matchedWorkspaceId: string | undefined;
     manager?.setStatus({
       connection: "connecting",
       reason: "Checking native editor and existing Workspace binding.",
@@ -268,6 +269,7 @@ async function start(): Promise<void> {
         });
         return;
       }
+      matchedWorkspaceId = candidate.id;
       if (await store.get<boolean>("perch:autoconnect-stop:" + candidate.id)) {
         manager?.setStatus({
           connection: "paused",
@@ -282,7 +284,7 @@ async function start(): Promise<void> {
         typeof error.code === "string" ? error.code : "RECONNECT_FAILED";
       manager?.setStatus({
         connection: ["EFFECT_UNKNOWN","TAB_BUSY"].includes(code) ? "blocked" : "offline",
-        workspace: candidate.id,
+        workspace: matchedWorkspaceId,
         reason: code === "EFFECT_UNKNOWN"
           ? "An unresolved Gateway effect prevents a new lease. Open Recovery for the exact held operation. Never repeat the unknown effect or re-pair to clear it."
           : code === "TAB_BUSY"
