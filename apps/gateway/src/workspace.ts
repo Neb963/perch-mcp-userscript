@@ -25,6 +25,7 @@ import {
   permissionsForTool,
 } from "../../../packages/contracts/src/index.js";
 import type { AuthProps, WorkspaceRecord } from "./registry.js";
+import { blocksNewLease, blocksNewMutation } from "../../../packages/contracts/src/effect-policy.js";
 interface Lease {
   workspaceId: string;
   epoch: number;
@@ -407,12 +408,7 @@ export class Workspace {
             "Unresolved-operation metadata budget reached; reconcile held operations.",
             429,
           );
-        if (
-          all.some(
-            (o) => ["UNKNOWN", "PARTIAL"].includes(o.phase) && !o.resolution,
-          ) &&
-          op.mutating
-        )
+        if (all.some(blocksNewMutation) && op.mutating)
           throw new ApiError(
             "EFFECT_UNKNOWN",
             "Workspace holds an unresolved effect.",
@@ -514,11 +510,7 @@ export class Workspace {
           409,
         );
       if (
-        this.operations().some(
-          (o) =>
-            ["DISPATCHED", "RUNNING", "UNKNOWN", "PARTIAL"].includes(o.phase) &&
-            !o.resolution,
-        )
+        this.operations().some(blocksNewLease)
       )
         throw new ApiError(
           "EFFECT_UNKNOWN",
@@ -694,6 +686,7 @@ export class Workspace {
           bindingRevision: l.bindingRevision,
           epoch: l.epoch,
           operationId: op.operationId,
+          tool: op.tool,
         });
       } catch (error) {
         op.phase = "REJECTED";

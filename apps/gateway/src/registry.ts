@@ -23,6 +23,7 @@ import {
   type Env,
 } from "./common.js";
 import { SqlRecords } from "./sql.js";
+import { requiresGeneratorReservation } from "../../../packages/contracts/src/effect-policy.js";
 import { resourceAdmin, resourceTool } from "./resources.js";
 export interface WorkspaceRecord {
   id: string;
@@ -684,6 +685,27 @@ export class Registry {
               "Workspace binding differs from current editor.",
               409,
             );
+          // Legacy (v0.1.4) incorrectly held the generator writer on
+          // a terminal CSS-only viewport reset. Release only when a matched,
+          // authenticated Durable Object terminal notice proves its scope.
+          // No outcome is rewritten or claimed successful.
+          const reservationKey = "reservation/" + w.binding.generatorId;
+          const held = this.db.get<{workspaceId:string;operationId:string}>(reservationKey);
+          if (held?.workspaceId === w.id) {
+            const notice = this.db.get<{
+              phase:string; event?:{
+                operationId:string;workspaceId:string;tool:string;phase:string;
+                bindingRevision:number;epoch:number;
+              };
+            }>("terminal-notice/" + w.id + "/" + held.operationId);
+            const ev = notice?.event;
+            if (ev && ev.operationId === held.operationId &&
+                ev.workspaceId === w.id && ev.tool === "set_viewport_size" &&
+                (notice?.phase === "PARTIAL" || notice?.phase === "UNKNOWN") &&
+                ev.phase === notice.phase && ev.bindingRevision === w.bindingRevision &&
+                Number.isSafeInteger(ev.epoch) && ev.epoch <= w.epoch)
+              this.db.delete(reservationKey);
+          }
           return { workspace: w, credentialEpoch: c.credentialEpoch };
         }),
       );
@@ -722,7 +744,7 @@ export class Registry {
             createdAt: Date.now(),
             state: "consumed",
           });
-          if (b.mutating === true && w.binding) {
+          if (requiresGeneratorReservation(String(b.tool ?? ''), b.mutating === true) && w.binding) {
             const key = "reservation/" + w.binding.generatorId,
               existing = this.db.get<{
                 workspaceId: string;
@@ -793,7 +815,8 @@ export class Registry {
         const terminalBinding = w.binding ?? w.recoveryBinding?.binding;
         if (
           terminalBinding &&
-          !["UNKNOWN", "PARTIAL"].includes(String(b.status))
+          (!["UNKNOWN", "PARTIAL"].includes(String(b.status)) ||
+            b.tool === "set_viewport_size")
         ) {
           const reservedKey = "reservation/" + terminalBinding.generatorId,
             existing = this.db.get<{ operationId: string }>(reservedKey);
