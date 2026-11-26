@@ -144,3 +144,27 @@ test('empty native syntax result reports partial rather than verified error-free
  assert.equal(partial.diagnosticsAvailability?.syntax,'partial');
  assert.equal((partial.syntaxErrors[0] as Record<string,unknown>).line,null);
 });
+
+test('grouped native syntax arrays preserve pane hints and partial coverage',async()=>{
+ const f=await fixture();
+ f.page.getEditorSyntaxErrors=()=>({
+  modelText:[{message:'fixture',line:12,column:2}],
+  outputTemplate:['unlocated fixture'],
+ });
+ const receipt=await f.bridge.diagnostics!();
+ assert.equal(receipt.syntaxErrors.length,2);
+ assert.equal((receipt.syntaxErrors[0] as Record<string,unknown>).path,'main.pjs');
+ assert.equal((receipt.syntaxErrors[1] as Record<string,unknown>).path,'index.html');
+ assert.equal(receipt.diagnosticsAvailability?.syntax,'partial');
+ assert.equal(receipt.diagnosticChannels?.editorSyntaxShape,'grouped-arrays');
+ f.dom.window.close();
+});
+test('native syntax unknown object cannot claim a clean or captured result',async()=>{
+ const f=await fixture();
+ f.page.getEditorSyntaxErrors=()=>({unknown:{secret:'fixture-secret'}});
+ const receipt=await f.bridge.diagnostics!();
+ assert.equal(receipt.diagnosticsAvailability?.syntax,'unavailable');
+ assert.equal(receipt.diagnosticChannels?.editorSyntaxShape,'object');
+ assert.doesNotMatch(JSON.stringify(receipt),/fixture-secret/);
+ f.dom.window.close();
+});
