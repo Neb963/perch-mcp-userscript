@@ -178,7 +178,7 @@ test('preview capability probes are cached for the same loaded frame and invalid
  // spread loses prototype methods: supply the required native bridge explicitly.
  const adapter=new PreviewAdapter({frame:()=>f.frame,revision:async()=> 'r1',
   bridge:{attest:bridge.attest,refresh:(p)=>f.bridge.refresh(p),
-   evaluate:(js,ms)=>f.bridge.evaluate(js,ms),diagnostics:()=>f.bridge.diagnostics()},verified:{}});
+   evaluate:(js,ms)=>f.bridge.evaluate(js,ms),diagnostics:()=>f.bridge.diagnostics!()},verified:{}});
  await adapter.preflight();
  assert.equal(probes,2);
  await adapter.call('page_eval',{js:'return 6 * 7;',timeoutMs:2000});
