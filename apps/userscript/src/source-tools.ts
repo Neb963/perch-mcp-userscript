@@ -96,21 +96,33 @@ export class SourceTools {
     if (name === 'checkpoint_list') return {checkpoints:await this.vfs.checkpointList()};
     if (name === 'checkpoint_create') return this.vfs.checkpoint(typeof args.label === 'string' ? args.label : 'Agent checkpoint',args.pinned===true);
     if (name === 'checkpoint_restore') return this.vfs.restore(string(args,'id'),string(args,'expectedRevision'));
+    if (name === 'workspace_status' || name === 'generator_info') {
+      const capabilities = await this.adapter.probe();
+      let unresolved: Awaited<ReturnType<VirtualFileSystem['unresolved']>> = [];
+      let localJournalError: string | null = null;
+      try { unresolved = await this.vfs.unresolved(); }
+      catch(error) { localJournalError = error instanceof BrowserError ? error.code : 'LOCAL_STORE_UNAVAILABLE'; }
+      try {
+        const snapshot = await this.vfs.snapshot();
+        const base = { identity:snapshot.identity,revision:snapshot.revision,
+          dirty:snapshot.dirty,saveState:snapshot.saveState,
+          snapshotVerified:true,sourceReadbackError:null,localJournalError,
+          capabilities,unresolved };
+        return name === 'generator_info'
+          ? { ...base, ...await this.adapter.generatorMetadata() }
+          : base;
+      } catch(error) {
+        const code = error instanceof BrowserError ? error.code : 'SOURCE_READBACK_UNAVAILABLE';
+        const base = {identity:capabilities.identity ?? await this.adapter.identity(),
+          revision:null,dirty:capabilities.dirty,saveState:'unknown',
+          snapshotVerified:false,sourceReadbackError:code,localJournalError,capabilities,unresolved};
+        return name === 'generator_info'
+          ? { ...base, ...await this.adapter.generatorMetadata() }
+          : base;
+      }
+    }
     const snapshot = await this.vfs.snapshot();
     if (expected && expected !== snapshot.revision) throw new BrowserError('STALE_REVISION','Workspace changed; read current source before applying edits.');
-    if (name === 'workspace_status' || name === 'generator_info') {
-      const base = { identity:snapshot.identity,revision:snapshot.revision,
-        dirty:snapshot.dirty,saveState:snapshot.saveState,
-        capabilities:await this.adapter.probe(),unresolved:await this.vfs.unresolved() };
-      return name === 'generator_info'
-        ? { ...base, ...await this.adapter.generatorMetadata(),
-            metadataAvailability: {
-              listing: 'Only nonconflicting native listing/isListed/isPrivate fields are reported; otherwise unknown.',
-              ownership: 'Only a bounded native ownership boolean or resolved boolean predicate is reported; otherwise unknown.',
-              editAccess: 'Only a bounded native Save-access boolean or resolved boolean predicate is reported; otherwise unknown.',
-            } }
-        : base;
-    }
     if (name === 'workspace_snapshot') { const entries = Object.entries(snapshot.files).sort(([a],[b])=>a.localeCompare(b)); const items = await Promise.all(entries.map(async ([path,bytes])=>({path,bytes:bytes.length,sha256:await digest(bytes)}))); const result = page(items,args.cursor,integer(args.limit,100,1,100)); const panels = Object.fromEntries(['main.pjs','index.html'].map(path => { const bytes = snapshot.files[path]!; return [path, {path,bytes:bytes.length,...(bytes.length <= 131072 ? {text:decodeText(bytes)} : {contentOmitted:true,recovery:'Use read with offset/limit for this panel.'})}]; })); return {revision:snapshot.revision,identity:snapshot.identity,panels,files:result.items,cursor:result.cursor}; }
     if (name === 'list_files' || name === 'glob') { const prefix = typeof args.path === 'string' ? args.path.replace(/\/$/,'') : ''; if (prefix && !['src','scratch','imports'].includes(prefix)) canonicalPath(prefix); const pattern = patternRegex(name === 'glob' ? string(args,'pattern') : '**'); const paths = Object.keys(snapshot.files).sort().filter(path=>(!prefix||path===prefix||path.startsWith(prefix+'/'))&&pattern.test(path)); const result=page(paths,args.cursor,integer(args.limit,100,1,100)); return name === 'list_files' ? {
       paths:result.items,

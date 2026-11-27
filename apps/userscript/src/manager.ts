@@ -32,7 +32,7 @@ export interface ManagerClient {
     },
   ): Promise<void>;
   localRecovery?(workspaceId:string):Promise<{
-    revision:string;
+    revision:string;sourceError?:string;
     holds:Array<{id:string;kind:string;state:string;createdAt:number;paths:string[];baseRevision:string}>;
   }>;
   resolveLocalHold?(workspaceId:string,journalId:string,expectedRevision:string,evidence:string):Promise<void>;
@@ -2275,7 +2275,8 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       item.append(el('strong',`${a.kind} · ${a.state}`));
       p('Affected files: '+a.paths.slice(0,6).join(', '),item,'muted');
       p('Check those files in the native editor before continuing. This will not reapply changes.',item);
-      if(client.resolveLocalHold)item.append(button('I checked these files — continue',async()=>{
+      if(local.sourceError)p('Source readback unavailable ('+local.sourceError+'). Connection can continue, but these edits cannot be acknowledged until exact bytes are readable.',item,'muted');
+      if(client.resolveLocalHold && local.revision && !local.sourceError)item.append(button('I checked these files — continue',async()=>{
         const evidence='Operator explicitly acknowledged local-file journal uncertainty after being instructed to inspect '+a.kind+
           '; acknowledgement at '+new Date().toISOString()+'.';
         await client.resolveLocalHold!(workspaceId,a.id,local.revision,evidence);
