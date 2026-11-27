@@ -29,9 +29,9 @@ export class OperationIndex<T extends IndexedOperation> {
       db.query("CREATE INDEX IF NOT EXISTS op_terminal_v1 ON operation_index_v1(terminal DESC)");
       // These triggers survive binary rollback. Old writers cannot leave a falsely clean projection.
       for (const [event,row] of [["INSERT","NEW"],["DELETE","OLD"]] as const) {
-        db.query(`CREATE TRIGGER IF NOT EXISTS op_dirty_${event.toLowerCase()}_v1 AFTER ${event} ON records WHEN ${row}.key LIKE 'operation/%' BEGIN INSERT OR IGNORE INTO operation_dirty_v1(key) VALUES(${row}.key); END`);
+        db.query(`CREATE TRIGGER IF NOT EXISTS op_dirty_${event.toLowerCase()}_v1 AFTER ${event} ON records WHEN ${row}.key LIKE 'operation/%' BEGIN INSERT INTO operation_dirty_v1(key) VALUES(${row}.key) ON CONFLICT(key) DO NOTHING; END`);
       }
-      db.query("CREATE TRIGGER IF NOT EXISTS op_dirty_update_v1 AFTER UPDATE ON records BEGIN INSERT OR IGNORE INTO operation_dirty_v1(key) SELECT OLD.key WHERE OLD.key LIKE 'operation/%'; INSERT OR IGNORE INTO operation_dirty_v1(key) SELECT NEW.key WHERE NEW.key LIKE 'operation/%'; END");
+      db.query("CREATE TRIGGER IF NOT EXISTS op_dirty_update_v1 AFTER UPDATE ON records BEGIN INSERT INTO operation_dirty_v1(key) SELECT OLD.key WHERE OLD.key LIKE 'operation/%' ON CONFLICT(key) DO NOTHING; INSERT INTO operation_dirty_v1(key) SELECT NEW.key WHERE NEW.key LIKE 'operation/%' ON CONFLICT(key) DO NOTHING; END");
       // One atomic initialization; an interruption rolls back all derived state.
       if (!db.query("SELECT id FROM operation_index_state_v1 WHERE id=1").length) {
         db.query("DELETE FROM operation_index_v1");

@@ -29,8 +29,8 @@ export class RegistryIndex {
       db.query("CREATE INDEX registry_activity_phase_v1 ON registry_activity_v1(phase,held DESC,updated DESC,key)");
       db.query("CREATE INDEX registry_activity_both_v1 ON registry_activity_v1(workspace,phase,held DESC,updated DESC,key)");
       for(const [event,row] of [["INSERT","NEW"],["DELETE","OLD"]] as const)
-        db.query(`CREATE TRIGGER registry_dirty_${event.toLowerCase()}_v1 AFTER ${event} ON records WHEN ${TRACKED(row)} BEGIN INSERT OR IGNORE INTO registry_dirty_v1 VALUES(${row}.key); END`);
-      db.query(`CREATE TRIGGER registry_dirty_update_v1 AFTER UPDATE ON records BEGIN INSERT OR IGNORE INTO registry_dirty_v1 SELECT OLD.key WHERE ${TRACKED("OLD")}; INSERT OR IGNORE INTO registry_dirty_v1 SELECT NEW.key WHERE ${TRACKED("NEW")}; END`);
+        db.query(`CREATE TRIGGER registry_dirty_${event.toLowerCase()}_v1 AFTER ${event} ON records WHEN ${TRACKED(row)} BEGIN INSERT INTO registry_dirty_v1 VALUES(${row}.key) ON CONFLICT(key) DO NOTHING; END`);
+      db.query(`CREATE TRIGGER registry_dirty_update_v1 AFTER UPDATE ON records BEGIN INSERT INTO registry_dirty_v1 SELECT OLD.key WHERE ${TRACKED("OLD")} ON CONFLICT(key) DO NOTHING; INSERT INTO registry_dirty_v1 SELECT NEW.key WHERE ${TRACKED("NEW")} ON CONFLICT(key) DO NOTHING; END`);
       for(const prefix of PREFIXES) db.query("INSERT OR IGNORE INTO registry_dirty_v1 SELECT DISTINCT key FROM records WHERE key>=? AND key<?",prefix,prefix+"\uffff");
       db.query("INSERT OR IGNORE INTO registry_dirty_v1 SELECT DISTINCT key FROM records WHERE key IN ('activity','library')");
       db.query("CREATE TABLE registry_index_version_v1 (version INTEGER PRIMARY KEY)");
