@@ -19,6 +19,8 @@ Ordinary native lifecycle misses the 120-read/40-write target. The v2 denominato
 
 There are four combined Worker/DO requests, one KV get and zero KV puts for each page in the measured fixture. Discovery only loads owned indexed rows. Additional Workspaces do not create per-chat heartbeats or background pollers.
 
+The separate scale replay issued 20 real local SDK Grants for distinct Connectors. Each wave of ten issued Grants plus management setup measured 40 KV puts and 210 combined Worker/DO requests. Parallel empty discovery for ten and twenty Connectors consumed 10 and 20 KV gets, respectively, with zero KV or SQL writes. See scale.json for the issuance split, SQL and payload counters.
+
 ## Capacity projection
 
 These figures are scenario budgets, separate from actual account billing. Cloudflare shares allowances across the account. Billed DO requests and duration include provider activity that this harness cannot reproduce exactly, such as physical hibernation, lease timers, cold eviction and non-test storage. No account usage was queried.

@@ -14,16 +14,16 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 | Phase | Depends on | Exit gate | Status |
 |---|---|---|---|
 | V00 | v0.2.0 | Baseline, authority amendment, full disposition, offline reproduction or explicit gap | Verified locally |
-| V01 | V00 | Connector-level Grant, strict version coexistence, indexed discovery and explicit Target | Foundation verified; catalog gated |
+| V01 | V00 | Connector-level Grant, strict version coexistence, indexed discovery and explicit Target | Foundation and local SDK catalog verified; rollout gated |
 | V02 | V01 | Durable fenced transition, exact management receipts and original-scope result ACL | Gateway and manager basic paths verified |
-| V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | Core and lease integration verified; exact operator quarantine export coverage open |
+| V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | Core and lease integration verified; exact operator quarantine export verified |
 | V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | Filesystem and scoped wire paths verified in local fixtures |
 | V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Scoped execution and grouped publication verified; retrieval and fault coverage incomplete |
 | V06 | V05 | Preview freshness, diagnostics, viewport, actual-pixel feasibility and verified Save | Offline branches verified; OWNER capture and provider gates open |
 | V07 | V01–V06 | Exact v2 catalog, archive/export compatibility, retirement and agent knowledge | v2 catalog and knowledge verified; compatibility retirement deferred |
 | V08 | V02–V07 | Manager, compatible migration/rollback and one-click rebind | Bundled manager and upgrade verified; OWNER rollout deferred |
 | V09 | V01–V08 | Native/legacy workload, capacity, OAuth and fault measurements | Benchmarks recorded; lifecycle target missed |
-| V10 | V00–V09 | Exact-head offline qualification, artifacts and unmerged PR | In progress |
+| V10 | V00–V09 | Exact-head offline qualification, artifacts and unmerged PR | Exact-head qualification in release outputs |
 
 ### V00 evidence
 
@@ -85,7 +85,7 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 ### V05 evidence
 
 - Six focused tests and typecheck passed. Workerd validates one-use segments, exact Operation key replay/conflict, key expiry and status lookup, and the local OAuth/MCP v2 tool list of 19 names. QuickJS ran 100 reads with one read-view permit. A denied publication left scratch unchanged. The batch fixture validates the entire shape before effects and preserves completed steps after a later failure.
-- A separate execution flag keeps the public v2 catalog opt-in. The waitMs delivery option currently returns the durable handle without waiting. Adjacent general mutation coalescing, public retrieval fault coverage and more bundled browser integration remain open.
+- A separate execution flag keeps the public v2 catalog opt-in. The waitMs delivery option currently returns the durable handle without waiting. Adjacent general mutation coalescing, public retrieval fault coverage and expanded bundled browser integration were addressed in V09. Provider-specific retrieval fault coverage remains open.
 
 ### V06 plan
 

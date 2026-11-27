@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BoundObjectStore, hasQuarantinedWorkspaceData, resolveBindingStorage } from '../../apps/userscript/src/binding-storage.js';
+import { BoundObjectStore, exportWorkspaceEvidence, hasQuarantinedWorkspaceData, resolveBindingStorage } from '../../apps/userscript/src/binding-storage.js';
 import { MemoryStore } from '../../apps/userscript/src/storage.js';
 import { bytesToBase64 } from '../../apps/userscript/src/native-types.js';
 import { VirtualFileSystem } from '../../apps/userscript/src/vfs.js';
@@ -99,4 +99,19 @@ test('GC deletes at most 32 orphan chunks and retains unknown publication eviden
   await store.delete(scope.epochPrefix + ':stage:unknown'); // Operator reconciled this synthetic intent.
   assert.equal(await objects.collectOrphans(), 32);
   assert.equal(await objects.collectOrphans(), 3);
+});
+
+test('operator Workspace export includes retained scopes and excludes foreign records and pairing',async()=>{
+  const store=new MemoryStore();
+  const scope=await resolveBindingStorage(tuple,()=>undefined);
+  await store.set('perch:pairing',{adminCredential:'private-credential'});
+  await store.set('perch:workspace:workspace-1:journal:old',{id:'held-legacy'});
+  await store.set('perch:workspace:workspace-10:journal:foreign',{id:'foreign'});
+  await store.set(scope.epochPrefix+':journal:held',{id:'held-current'});
+  const output=await exportWorkspaceEvidence(store,tuple.workspaceId);
+  const records=JSON.parse(output).records as unknown[];
+  assert.equal(records.length,2);
+  assert.match(output,/held-legacy/);
+  assert.match(output,/held-current/);
+  assert.doesNotMatch(output,/foreign|private-credential/);
 });

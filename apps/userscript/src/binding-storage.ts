@@ -265,3 +265,25 @@ export async function hasQuarantinedWorkspaceData(store: KeyValueStore, workspac
   return (await store.list()).some((key) => key.startsWith('perch:workspace:' + workspaceId + ':') ||
     key.startsWith('perch:operation:' + workspaceId + ':'));
 }
+
+/** Operator-only private export. Read exact Workspace namespaces and retain
+ * every record on failure. Pairing, credential and Resource keys are excluded. */
+export async function exportWorkspaceEvidence(store: KeyValueStore, workspaceId: string): Promise<string> {
+  if (!opaqueId.test(workspaceId)) throw new BrowserError('INVALID_INPUT','Invalid Workspace ID.');
+  const keys=(await store.list()).filter(key=>key.startsWith('perch:workspace:'+workspaceId+':') ||
+    key.startsWith('perch:operation:'+workspaceId+':') ||
+    (key.startsWith('perch:binding-v2:') && key.split(':',5)[3]===workspaceId)).sort();
+  if(keys.length>4096) throw new BrowserError('LIMIT_EXCEEDED','Exact Workspace archive is too large.');
+  const entries: string[]=[];
+  let bytes=0;
+  for(const key of keys){
+    const row=await store.get(key);
+    if(row===undefined)throw new BrowserError('STORAGE_CORRUPT','The Workspace archive changed during export.');
+    const encoded=JSON.stringify({key,row});
+    bytes+=utf8.encode(encoded).length;
+    if(bytes>64*1024*1024)throw new BrowserError('LIMIT_EXCEEDED','Exact Workspace archive exceeds 64 MiB.');
+    entries.push(encoded);
+  }
+  return '{"format":"perch-workspace-evidence-v1","workspaceId":'+JSON.stringify(workspaceId)+
+    ',"records":['+entries.join(',')+']}\n';
+}

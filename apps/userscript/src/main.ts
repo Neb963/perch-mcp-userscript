@@ -1,3 +1,4 @@
+import { exportWorkspaceEvidence } from './binding-storage.js';
 import { APP_VERSION } from "../../../packages/contracts/src/index.js";
 import { NativeAdapter } from "./adapter.js";
 import { LiveLifecycleReadback, NativeLifecycle } from "./lifecycle.js";
@@ -326,6 +327,7 @@ async function start(): Promise<void> {
     sourceBackup: () => controller.sourceBackup(),
     reconcileOperation: (operation) => controller.reconcileOperation(operation),
     localRecovery: workspaceId => controller.localRecovery(workspaceId),
+    exportWorkspaceEvidence: workspaceId => exportWorkspaceEvidence(store,workspaceId),
     resolveLocalHold: (workspaceId,journalId,expectedRevision,evidence) =>
       controller.resolveLocalHold(workspaceId,journalId,expectedRevision,evidence),
     restoreSourceBackup: (backup) => controller.restoreSourceBackup(backup),

@@ -105,7 +105,7 @@ await cp("docs/optimization/STORAGE-MIGRATION.md", "dist/cloudflare/docs/optimiz
 await cp("apps/gateway/.dev.vars.example", "dist/cloudflare/.dev.vars.example");
 await writeFile(
   "dist/STATUS.txt",
-  "VERIFICATION CANDIDATE — NOT A FULL-PARITY RELEASE. Read docs/RELEASE_VERIFICATION.md before installation. Production provider mutations and unverified preview capabilities remain gated.\n",
+  "OFFLINE DEVELOPMENT VERIFICATION CANDIDATE. Read OPERATOR-ACCEPTANCE.md and docs/verification/v0.3/ACCEPTANCE.md before installation. Capture and external acceptance gates remain open.\n",
 );
 const packageInfo = JSON.parse(await readFile("package.json", "utf8"));
 const sourceTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {

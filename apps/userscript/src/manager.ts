@@ -34,6 +34,7 @@ export interface ManagerClient {
       operatorEvidence: string;
     },
   ): Promise<void>;
+  exportWorkspaceEvidence?(workspaceId:string):Promise<string>;
   localRecovery?(workspaceId:string):Promise<{
     revision:string;sourceError?:string;
     holds:Array<{id:string;kind:string;state:string;createdAt:number;paths:string[];baseRevision:string}>;
@@ -2413,6 +2414,12 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     body.append(toolbar);
     const workspaceId=recoveryWorkspaceId;
     if(!workspaceId)return;
+    if (state.assignmentContractVersion===2 && client.exportWorkspaceEvidence)
+      toolbar.append(button('Export private Workspace evidence',()=>confirmAction(
+        'Download retained source and operation records for this Workspace? Keep the file private.',async()=>{
+          const bytes=await client.exportWorkspaceEvidence!(workspaceId);
+          client.download('perch-workspace-evidence.json',bytes,'application/json');
+        })));
     const snapshot=record(await client.request('GET',`${ADMIN}/workspaces/${encodeURIComponent(workspaceId)}/recovery`));
     if(own!==generation || workspaceId!==recoveryWorkspaceId)return;
     const lease=record(snapshot.activeLease),pending=num(snapshot.pendingClaimUntil);
