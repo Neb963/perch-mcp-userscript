@@ -1,5 +1,21 @@
 # Verification and release gates
 
+## v0.3 acceptance
+
+Use [the normative A01–A34 and OWNER-01–04 matrix](v0.3/PERCH-MCP-V0.3-IMPLEMENTATION-SPEC.md#12-acceptance-matrix-minimum-tests-all-offline-unless-marked-owner). Legacy acceptance IDs below refer to the earlier product contract. Preserve applicable regression coverage. Replace retired parity expectations with v2 denial, archive, unresolved-effect preservation and version-skew coverage.
+
+| Evidence tier | Proof and limits |
+|---|---|
+| T0 | Contract, static source or schema review. |
+| T1 | Deterministic unit/fault fixtures with exact positive, inverse, boundary and recovery assertions. |
+| T2 | Local workerd and synthetic bundled browser with a synthetic provider, strict network denial and actual SDK ingress where applicable. |
+| T5 | Measured concurrency, restart, virtual time and storage/quota faults. State the environment and workload. |
+| OWNER-01–04 | Real Firefox/Violentmonkey provider behavior, real OAuth clients, verified preview pixels, and physical Cloudflare migration/push/quotas. Record `DEFERRED_OWNER` during this task. |
+
+Use locked dependencies. Disable Cloudflare metadata and metrics, deny fixture egress and verify exact head typecheck, full tests, clean build, artifact hashes and local Wrangler dry-run. Never dispatch production readiness. Record command, versions, SHA, result counts, limitations and fixture conditions. Treat the standard image content and verified stored-source readback as separate acceptance checks. A missing screenshot capability is an explicit unresolved gate. Preserve a committed effect when delivery fails or result bytes expire.
+
+## Historical v0.1–v0.2.0 acceptance and qualification
+
 Evidence tiers: T0 static contract/schema review; T1 deterministic unit/fixture tests; T2 local Worker emulator and browser synthetic integration; T3 real Firefox with disposable generator and explicitly authorized provider operations; T4 deployed Cloudflare + real external web connectors; T5 concurrency and recovery run. No tier substitutes for higher-tier provider evidence. Record command, versions, fixture, expected/actual, sanitized logs, commit, date. No private captures. No GitHub Actions for design-only docs; implementation uses local tests first, focused CI as needed.
 
 | Test | Requirements | Required evidence |

@@ -1,4 +1,22 @@
-# Architecture v0.1
+# Perch MCP architecture
+
+The [v0.3 implementation specification](v0.3/PERCH-MCP-V0.3-IMPLEMENTATION-SPEC.md) defines the required architecture and the [design proposal](v0.3/PERCH-MCP-V0.3-DESIGN-PROPOSAL.md) documents alternatives and risks. The retained v0.1 and v0.2 material below describes the baseline and the compatibility behavior that remains relevant.
+
+| Boundary | v0.3 responsibility |
+|---|---|
+| Worker ingress | Pinned OAuth and MCP SDK validation, exact resource audience, contract selection, canonical input validation, bounded result projection |
+| Registry | Connector and Grant authentication, exclusive Assignment index, Binding generations, management CAS and receipts, current writer authority, scoped DispatchPermits |
+| Workspace Durable Object | Independent queue and lease, durable Operation lifecycle, exact terminal receipt, bounded result bytes and HTTP fetch/reply with advisory push |
+| Trusted userscript controller | Fresh native identity and lease checks, Binding-scoped local data, bounded native/readback algorithms, preview isolation and staged computation |
+| Native editor / saved source | Unsaved native draft and independently verified persisted generator source |
+| Operator manager | Pairing, consent, Assignment and rebind, recovery, policy and explicit activation |
+| Client | Explicit Target, agent-local knowledge and result interpretation |
+
+Only the Registry can grant authority. Target carries nonsecret generations used to reject stale calls. A lease Epoch change alone leaves the Target stable. Revoke blocks future permits after the Registry transition. An already-consumed permit may have effects, so rebind and transfer wait for exact settlement. Discovery and retained outcome access have separate authorization paths from browser dispatch.
+
+The v0.2.0 native Activity, operation and retained BLOB readers remain compatible. Preserve durable markers, DO names, OAuth KV, credentials and unresolved receipts. Resource and provider-specific legacy cleanup must preserve archive/recovery paths before it leaves the hot path. Keep separate SourceRevision, LocalRevision, PreviewRevision and SavedRevision proofs. Targeted reads and metadata listings avoid unrelated content. When a native change generation is unproven, use conservative readback at publication and Save boundaries. QuickJS and the untrusted preview have no privileged bridge.
+
+## Historical v0.1 architecture and v0.2.0 design amendments
 
 ## 1. Boundaries
 ```mermaid

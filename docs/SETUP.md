@@ -1,4 +1,19 @@
-# Setup and operator experience contract
+# Setup and operator experience
+
+This describes the v0.3 operator rollout contract. The working branch and draft review stay offline. Only the Operator can deploy, exercise real provider/browser gates and authorize migration or rollout. Follow [the implementation specification](v0.3/PERCH-MCP-V0.3-IMPLEMENTATION-SPEC.md#13-rollout-release-and-final-evidence) and the acceptance checklist packaged with the exact eventual candidate.
+
+| Stage | Operator check |
+|---|---|
+| Prepare | Verify release bytes against the manifest. Back up native drafts, local recovery and customized Resource exports. Resolve or preserve every Hold. Keep the existing bindings, names, pairing and OAuth KV. |
+| Establish matching readers | Use the matching Worker and userscript with v2 disabled. Verify legacy compatibility and the four Operator gates as applicable. |
+| Prepare authority | Verify bounded assignment/storage migration before cutover. Keep independent native storage and v2 activation controls. Preserve any existing native markers. |
+| Pilot | Reauthorize one Connector with the new consent screen. Verify two explicit owned Targets, old-target denial, preview behavior and exact operation recovery. |
+| Expand | Add Workspaces incrementally. Review actual scoped diagnostics and account measurements before opting into quota tuning. |
+| Recover | Preserve original result scope, credentials and provider effect evidence. Use a compatible reader or forward repair after cutover. Keep old archive data until separately authorized cleanup. |
+
+Expose Workspaces, Connectors, Activity, Settings and contextual recovery in the compact manager. For an idle clean rebind, show both native identities and the Connector before the one click. Pause, Detach, Transfer and Reconnect remain distinct. Dirty or unresolved state gives a specific reason and recovery path. The manager leaves the native editor usable during incompatible versions, quota outages or lost connectivity.
+
+## Historical installation and operator setup for v0.1–v0.2.0
 
 This remains the accepted release UX contract. The executable candidate guide is INSTALLATION.md; actual acceptance and remaining real-environment gates are in RELEASE_VERIFICATION.md.
 

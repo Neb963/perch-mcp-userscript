@@ -1,4 +1,16 @@
-# Agent connectors
+# OAuth Connectors
+
+A Connector is the OAuth principal at the exact resource URL `https://<gateway>/mcp/<connectorId>`. The v2 Grant authorizes only Workspaces assigned to that Connector under current policy. Multiple conversations using one Connector share its authority. Isolate tasks with separate Connectors when necessary.
+
+1. Pair once, then create a named Connector. Open the matching client authorization request and approve only its verified resource, client, scope, redirect and short code.
+2. Explicitly assign each intended Workspace to the Connector. The Operator verifies the actual ready editor Generator ID, Draft ID and installation when attaching or rebinding. An empty default Draft ID is valid.
+3. Install version-matched local knowledge in the agent client. Call `workspace_status({})` for assigned Workspaces and supply the intended Target to each execution. Report a missing/stale Target and obtain explicit intent for a replacement.
+4. On normal idle/clean rebind, keep the Connector endpoint and v2 Grant. The old Target becomes stale and the browser obtains a new lease. Resolve Holds and acknowledge dirty or unknown old state before committing.
+5. Use `operation_status` with the original Operation ID/key and Target when a response is lost. Never issue a new key to replay an uncertain effect.
+
+Legacy v1 routes, approvals and Grants remain fixed to the original Workspace and Binding during staged rollout. Freeze targetless admission, settle old work, verify browser compatibility and complete fresh Connector-level OAuth consent before the atomic v2 authority switch. Refresh the client catalog after the switch. One-time reauthorization may be needed even with the existing endpoint URL. Do not copy an admin credential or token into connector configuration or put one in a URL. Exact rollout predicates are in [the v0.3 implementation specification](v0.3/PERCH-MCP-V0.3-IMPLEMENTATION-SPEC.md#25-compatibility-migration).
+
+## Historical v1 Agent connectors and operational evidence
 
 1. In the intended native editor, create a Workspace and select Attach current editor. Confirm Generator ID and Draft ID; an empty default Draft ID is valid. Workspace identity is not inferred from a Slug alone.
 2. Create a named Agent for that Workspace. Copy its exact `https://<gateway>/mcp/<agentId>` URL. Each Agent has a separate protected resource audience. Do not add tokens to URLs.

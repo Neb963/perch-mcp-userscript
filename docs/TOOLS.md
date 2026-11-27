@@ -1,4 +1,32 @@
-# Tool catalog and parity contract
+# MCP tools
+
+The table describes the v2 contract during development. Argument definitions, permissions, result and abuse limits follow [implementation specification §§3–8](v0.3/PERCH-MCP-V0.3-IMPLEMENTATION-SPEC.md#3-public-mcp-contract-exactly-19-tools). Existing v1 schemas shown below remain historical and compatibility references. See [the disposition inventory](v0.3/TOOL-DISPOSITION.md) for all 52 baseline tools.
+
+| Tool | v2 behavior |
+|---|---|
+| `read` | Read selected files, exact text or binary ranges, with digest checks and bounded continuations. |
+| `write` | Apply an exact preconditioned file set or stage, chunk, commit or abort one large transfer. |
+| `delete` | Delete named src or scratch files under current preconditions. |
+| `rename` | Move named files within one allowed namespace. Verify destination before deleting source. |
+| `list_files` | Return paged metadata without file content reads. |
+| `page_eval` | Evaluate only in the bound preview subject to explicit freshness and effect fencing. |
+| `page_refresh` | Correlate the applied revision with the current preview. |
+| `preview_diagnostics` | Read bounded diagnostics for one preview epoch. |
+| `set_viewport_size` | Apply or reset viewport and verify observed geometry. |
+| `capture_page_image` | Capture verified preview pixels, subject to explicit capture permission and supported interface. |
+| `execute_js` | Run isolated QuickJS with declared file access and staged writes. |
+| `fetch_url` | Fetch bounded public GETs or one explicitly authorized POST without credentials. |
+| `fetch_generator` | Retrieve bounded revision-consistent public generator sources into immutable imports. |
+| `workspace_status` | Discover owned Workspaces or inspect one Target. Full source verification requires explicit opt-in and READ_SOURCE. |
+| `generator_info` | Inspect the bound native identity and perform independent saved readback only on request. |
+| `save_generator` | Save an explicit SourceRevision under a verified SavedRevision precondition and independently verify stored bytes. |
+| `operation_status` | Retrieve a durable operation receipt by ID or key under original-scope authorization. |
+| `cancel_operation` | Request cooperative cancellation of an authorized Operation. Preserve actual and uncertain effects. |
+| `batch` | Admit one bounded ordered action set for one Target. Preflight all actions before effects. |
+
+Only `workspace_status` allows a call without Target. Mutating and potentially effectful execution requests use an Operation key. Tools return actual phases and effects, and retained operation results recheck authority before delivery. Image content uses standard MCP image blocks when verified and supported. Availability never changes the 19-tool catalog.
+
+## Historical v1 tool catalog and parity contract
 
 The original 23 tool descriptions are transcribed in the owner-supplied discovery archive, not formal validated JSON Schema. Exclude platform_bug_report by owner decision; no report skill. Preserve names and core arguments where useful, but strict schemas and safety semantics take precedence. Additional browser calls observed in discovery-v3 (workspace_snapshot, capture_page_image, put_files, save_b64_file, read_b64_file) are tracked separately; aliases browser_eval/browser_refresh not necessary when equivalent tool exists. No native Helper session APIs. All tools return MCP content plus structured result where client supports; text fallback includes operationId, status, revision, concise guidance. Images use standard image content, artifact download fallback. Do not depend on client support for MCP resources/prompts, binary uploads, progress, Tasks or elicitation. Tool descriptions specify scope, prerequisites, arguments, side effects, error remedy, examples and follow-up tool. Machine-readable schema implementation required in P03, with additionalProperties false and exactly-one checks. No model-controlled routing parameters.
 

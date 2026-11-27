@@ -1,5 +1,44 @@
 # Implementation ledger
 
+## V00–V10 development contract (2026-11-27)
+
+Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179db13df0112c15f7e7942dca198e7d0486dbe`, equal to the merged v0.2.0 qualification head `3fd1e48630737a1defd96484a3af3d3d881c84a1`. The working branch is `development/v0.3.0`. Use local synthetic fixtures and local workerd. Production and preview calls, deployment, real browser/provider tests, production readiness dispatch and merging are operator-only.
+
+### V00 plan and verification
+
+1. Verify the actual base, PR #23, qualification run and workflow triggers. Use the v0.2.0 runtime/contracts and generated catalog as the inventory source.
+2. Bring the accepted v0.3 implementation contract into repository authority and mark earlier Helper parity and Resource implementation documents as historical. Publish complete per-tool disposition, permission changes and baseline source boundaries, including retention/export obligations.
+3. Establish the phase and evidence ledger. Re-run the locked baseline suite and representative local v0.2 benchmark if available, and record measured differences or exact reproduction blockers. Preserve the full historical evidence.
+4. Check document links, catalog/permission coverage and unchanged runtime. Commit the verified authority amendment before v2 runtime work. Keep v2 admission gated until the migration, version skew and activation checks pass.
+
+| Phase | Depends on | Exit gate | Status |
+|---|---|---|---|
+| V00 | v0.2.0 | Baseline, authority amendment, full disposition, offline reproduction or explicit gap | Verified locally |
+| V01 | V00 | Connector-level Grant, strict version coexistence, indexed discovery and explicit Target | In progress |
+| V02 | V01 | Durable fenced transition, exact management receipts and original-scope result ACL | Pending |
+| V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | Pending |
+| V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | Pending |
+| V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Pending |
+| V06 | V05 | Preview freshness, diagnostics, viewport, actual-pixel feasibility and verified Save | Pending |
+| V07 | V01–V06 | Exact v2 catalog, archive/export compatibility, retirement and agent knowledge | Pending |
+| V08 | V02–V07 | Manager, compatible migration/rollback and one-click rebind | Pending |
+| V09 | V01–V08 | Native/legacy workload, capacity, OAuth and fault measurements | Pending |
+| V10 | V00–V09 | Exact-head offline qualification, artifacts and unmerged PR | Pending |
+
+### V00 evidence
+
+- Matching merge and tested trees were verified against GitHub main, PR #23 and offline workflow run [46029453050](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46029453050). The production readiness workflow is main-only or manual. The pull-request workflow is offline and checks exact head. Operator confirmation is the evidence for disabled Cloudflare previews.
+- Locked install and local typecheck succeeded. Baseline offline suite passed 553 of 553 with Node 24.22.3 and npm 11.19.1. Both clean-source Miniflare benchmark runs reproduced the measured v0.2.0 SQL rows. The native mode measured 177–182 reads and 51–52 writes. Legacy mode measured 232–255 reads and 78–87 writes. See [raw replay evidence](docs/verification/v0.3-baseline/).
+- The v0.3 contract and [tool disposition](docs/v0.3/TOOL-DISPOSITION.md) supersede full Helper parity. Retirement preserves legacy/canonical readers and unsettled evidence. This checkpoint changes documentation only.
+
+### V01 plan
+
+- Define a strict shared Target, versioned Grant and explicit permission-ceiling fields. Require canonical Target encoding, checked generations and exact Connector/client/audience/credential epoch.
+- Keep existing v1 tokens and OAuth approval semantics for unchanged fixed assignments. Build a gated v2 Connector consent and scoped discovery path over a bounded, transactionally maintained assignment index. Exercise empty, paused and offline discovery, denied foreign Targets and stale owned Targets, with loopback tests.
+- Do not expose the new public catalog or dispatch v2 effects while any implementation dependency remains open. Preserve current core markers and use a separately tested schema fence where v2 authority is written.
+
+## Historical v0.1–v0.2.0 implementation ledger
+
 Status: executable verification candidate implemented. Local static/unit/emulator/rendered tests and packaging are in place; full product acceptance remains blocked by the explicitly listed real-browser/cloud/provider gates. No production deployment or live provider mutation has occurred.
 
 | Phase | Dependency | Deliverable / exit criteria | Status |

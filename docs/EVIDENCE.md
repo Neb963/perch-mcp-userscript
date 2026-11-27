@@ -1,5 +1,25 @@
 # Evidence register and decision record
 
+## v0.3 authority and baseline
+
+The accepted scope supersedes full Helper parity and model-facing Resource retrieval. The normative acceptance IDs are A01–A34 and OWNER-01–04 in [the v0.3 implementation specification](v0.3/PERCH-MCP-V0.3-IMPLEMENTATION-SPEC.md). The [design proposal](v0.3/PERCH-MCP-V0.3-DESIGN-PROPOSAL.md) documents the public references and 25 risk hypotheses. Each phase records tests and limitations against the current contract in [the ledger](../todo.md). The [disposition inventory](v0.3/TOOL-DISPOSITION.md) ties the scope amendment to the actual baseline schemas and source.
+
+GitHub main was verified at `9524583b04e480875011f3675a581357afe315c3`. The merge and PR #23 head `3fd1e48630737a1defd96484a3af3d3d881c84a1` both resolve to tree `1179db13df0112c15f7e7942dca198e7d0486dbe`. GitHub's [offline qualification](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46029453050) completed successfully at that exact head. The local locked v0.2.0 dependency install, strict typecheck and 553/553 tests passed under Node 24.22.3/npm 11.19.1. Earlier deployment and browser observations below stay historical.
+
+| Baseline measurement | v0.2.0 qualification |
+|---|---:|
+| Native full ingress, 0/150/999/1,000 retained history | 177/52, 180/51, 180/51, 182/52 SQL reads/writes |
+| Legacy full ingress, same histories | 232/80, 239/78, 253/78, 255/87 SQL reads/writes |
+| Exact Workspace status | 2/0 SQL reads/writes |
+| Separate ten file writes / one coherent `put_files` | 1,880/540 vs 188/54 SQL reads/writes |
+| Successful OAuth refresh | 2 KV writes per refresh at 900 s access TTL |
+
+These numbers are comparisons for V09. They come from the [baseline report and machine evidence](verification/gateway-optimization-report.md), which separate request counts, SQL, virtual-day cleanup and provider billing. A source-equivalent v0.2.0 run supplies a baseline, while each v0.3 claim requires evidence from the new tested tree.
+
+The existing offline workflow checks out the exact pull-request head and performs locked install, tests, build, hash verification and local Wrangler dry-run. The separate production readiness workflow triggers on pushes to main or manual dispatch and contacts production. Work is confined to the nondeploying branch and production readiness is excluded.
+
+## Historical platform evidence and v0.2.0 qualification
+
 Review date 2026-11-26. Inputs supplied in conversation, retained externally (public repository). Archive integrity checks passed for all three. discovery-v3.zip: 89 entries (includes directories); canonical report claims 94 capabilities, 78 tested. Userscript-Perchance-MCP-Discovery.zip: 93 entries, 23 tool schema descriptions. skills-all.zip: 15 files, 13 skill bodies plus README and manifest. perchance-discovery.md: consolidated newer platform reference, 340 lines. Do not copy raw captures or third-party source into public repository without verified rights and redaction. These are historical external research, not live results of Perch MCP.
 
 ## Platform evidence extraction
