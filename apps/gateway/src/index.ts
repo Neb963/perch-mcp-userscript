@@ -1,5 +1,5 @@
 import { projectMcpImages, type McpImageBlock } from "./mcp-media.js";
-import { incident, reportIncident } from "./incident.js";
+import { incident, reportIncident, probeRegistryHealth } from "./incident.js";
 import {
   OAuthAuthorizationServer,
   OAuthResourceServer,
@@ -452,22 +452,13 @@ async function route(
   if (path === "/live")
     return json({ ok: true, version: VERSION, role: "worker-liveness" });
   if (path === "/health") {
-    try {
-      const upstream = await registry(env).fetch(
-        new Request("https://internal/internal/health") as never,
-      ) as unknown as Response;
-      if (upstream.status < 500) return upstream;
-      const record = await upstream.clone().json().catch(() => null) as
-        { traceId?: unknown } | null;
-      const traceId = typeof record?.traceId === "string" ? record.traceId : crypto.randomUUID();
-      return json({ ok: false, code: "GATEWAY_DEGRADED", dependency: "registry",
-        retryable: true, traceId }, 503);
-    } catch (error) {
-      const traceId = crypto.randomUUID();
-      reportIncident(env, ctx, incident("worker", "/health", 503, error, traceId));
-      return json({ ok: false, code: "GATEWAY_DEGRADED", dependency: "registry",
-        retryable: true, traceId }, 503);
-    }
+    const probe = await probeRegistryHealth(() => registry(env).fetch(
+      new Request("https://internal/internal/health") as never,
+    ) as unknown as Promise<Response>);
+    if (probe.failure?.error)
+      reportIncident(env, ctx, incident("worker", "/health", 503,
+        probe.failure.error, probe.failure.traceId));
+    return probe.response;
   }
   if (path === "/setup")
     return html(
@@ -901,18 +892,12 @@ export default {
   scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): void {
     // Independent five-minute health probe; does not claim leases or run tools.
     ctx.waitUntil((async () => {
-      try {
-        const response = await registry(env).fetch(
-          new Request("https://internal/internal/health") as never,
-        ) as unknown as Response;
-        if (response.ok) return;
-        const body = await response.clone().json().catch(() => null) as
-          { traceId?: unknown } | null;
-        reportIncident(env, ctx, incident("scheduled", "/health", response.status,
-          undefined, typeof body?.traceId === "string" ? body.traceId : undefined));
-      } catch (error) {
-        reportIncident(env, ctx, incident("scheduled", "/health", 503, error));
-      }
+      const probe = await probeRegistryHealth(() => registry(env).fetch(
+        new Request("https://internal/internal/health") as never,
+      ) as unknown as Promise<Response>);
+      if (!probe.failure) return;
+      reportIncident(env, ctx, incident("scheduled", "/health", probe.response.status,
+        probe.failure.error, probe.failure.traceId));
     })());
   },
 };
