@@ -315,3 +315,19 @@ Incident confirmed by Cloudflare dashboard (5.93M rows read) and sanitized runti
 - Miniflare CI run 46002237270: 374/375 passed; all SQL tests pass (24 reads/0 writes per idle poll both empty and after 150 operations; lifecycle 190–194 reads and 70–75 writes total, Activity 108 reads/0 writes per 100 entries). Preserve responsive approvals during first 30s of Agents view. Add read-only indexed idle fast path with explicit dirty/active/outbox/expiry/retention/alarm checks; tighten idle budget to 10 reads. No production deployment until full green CI.
 
 - CI 46002621140: functional tests including OAuth approval discovery passed; idle shortcut measured 12 reads, 0 writes, still above strict 10-read target. Remove redundant lease lookup by hashing before synchronous validation and renewal. Add explicit provider SQL quota connectivity-only retry hint (300s, no operation replay), bounded automatic browser retry delays and targeted tests.
+
+## O01–O07 gateway optimization program (2026-11-27)
+
+Authority: docs/optimization/PERCH-MCP-OPTIMIZATION-PLAN.md and companion prompt. Baseline fb998f890e7870afac011f0c54f5035018cfe208. Branch optimization/gateway-o01-o07; do not merge/deploy or contact live services even after quota reset. All production/browser/provider gates DEFERRED_LIVE.
+
+| Phase | Dependency | Exact offline acceptance | Status |
+|---|---|---|---|
+| O01 | none | pinned runtime baseline; complete ingress and independent SQL/request/KV/alarm counters; hermetic faults/history fixtures | IN_PROGRESS |
+| O02 | O01 | idle <=10/0, invalid <=2/0, status target <=5/0; request-local authorization; awaited fencing and durable outbox | PLANNED |
+| O03 | O02 | constant Activity append at1000; keyset pages; Resource point lookup independent bodies; bounded verified migration | PLANNED |
+| O04 | O03 | typed sole canonical operations, args/results separate; exact state preservation; target lifecycle <=80 reads/30 writes or explicit unmet evidence | PLANNED |
+| O05 | O04 | opt-in authenticated hibernatable notification; healthy push no idle fetch; <=60s silent-loss reconciliation; fallback | PLANNED |
+| O06 | O04/O05 | 192KiB binary rows, bounded media catalog/cleanup, legacy hydration, 10-file batch comparison | PLANNED |
+| O07 | O01–O06 | local conservative admission headroom, no incident OAuth-KV writes; full offline suite/build/dryrun/CI/artifacts/report/operator handoff | PLANNED |
+
+Preparation: remote main matches baseline; readiness workflow pushes main only; PR verify has local test/build/dryrun, no deployment. Existing local checkout retained; new isolated worktree used. npm ci locked install passed. Initial baseline test invocation blocked by automatic approval review because default Miniflare Request.cf bootstrap fetched external metadata. Fixture runtime now explicitly cf:false and rejects all outbound worker requests; rerun only after this correction. No live test completed or claimed.

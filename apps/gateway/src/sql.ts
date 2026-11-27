@@ -13,7 +13,7 @@ export class SqlRecords {
     );
   }
   /** All statements consume their cursor before reading Cloudflare's counters. */
-  query<T extends Record<string, string | number | null | ArrayBuffer> = Record<string, string | number | null | ArrayBuffer>>(sql: string, ...args: (string | number | null)[]): T[] {
+  query<T extends Record<string, string | number | null | ArrayBuffer> = Record<string, string | number | null | ArrayBuffer>>(sql: string, ...args: (string | number | null | ArrayBuffer)[]): T[] {
     this.usage.statements++;
     let cursor;
     try {cursor = this.storage.sql.exec<T>(sql,...args);}

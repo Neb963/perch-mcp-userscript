@@ -81,7 +81,7 @@ before(async () => {
     external: ["cloudflare:*", "node:*"],
     conditions: ["workerd", "worker", "browser"],
   });
-  mf = new Miniflare({
+  mf = new Miniflare({ cf: false, outboundService: () => { throw new Error("OFFLINE_FIXTURE_NETWORK_DENIED"); },
     modules: true,
     script: result.outputFiles[0]!.text,
     compatibilityDate: "2026-07-30",
