@@ -24,7 +24,7 @@ import {
   type Env,
 } from "./common.js";
 import { SqlRecords } from "./sql.js";
-import { incident, persistIncident } from "./incident.js";
+import { incident, persistIncident, registryFailureReason } from "./incident.js";
 import { requiresGeneratorReservation } from "../../../packages/contracts/src/effect-policy.js";
 import { resourceAdmin, resourceTool } from "./resources.js";
 export interface WorkspaceRecord {
@@ -107,15 +107,20 @@ export interface AuthProps {
   bindingRevision: number;
 }
 export class Registry {
-  private db: SqlRecords;
+  private records?: SqlRecords;
   constructor(
     private state: DurableObjectState,
     private env: Env,
-  ) {
-    this.db = new SqlRecords(state.storage);
+  ) {}
+  private get db(): SqlRecords {
+    // Initialization failures must cross the same redacted fetch error boundary.
+    return this.records ??= new SqlRecords(this.state.storage);
   }
   private core(): Core {
-    const c = this.db.get<Core>("core", {
+    // Do not evaluate deployment defaults for an existing paired installation.
+    // A malformed optional ISSUER_URL must not hide the persisted authority.
+    const stored = this.db.get<Core>("core");
+    const c: Core = stored === undefined ? {
       schemaVersion: 1,
       revision: 1,
       policyRevision: 1,
@@ -123,7 +128,8 @@ export class Registry {
       issuer: this.env.ISSUER_URL ? origin(this.env.ISSUER_URL) : null,
       paired: false,
       credentialEpoch: 1,
-    });
+    } : stored;
+    if (!c || typeof c !== "object") throw new Error("SQLITE_RECORD_CORRUPT");
     if (c.schemaVersion !== 1)
       throw new ApiError(
         "INCOMPATIBLE_VERSION",
@@ -240,6 +246,11 @@ export class Registry {
         // Preserve the root error even when Registry admin/diagnostics is unavailable.
         console.error(JSON.stringify({ kind: "perch-mcp-registry-exception", ...event }));
         await persistIncident(this.env, event);
+      }
+      if (new URL(request.url).pathname === "/internal/health") {
+        const headers = new Headers(response.headers);
+        headers.set("X-Perch-Registry-Failure", registryFailureReason(error));
+        return new Response(response.body, { status: response.status, headers });
       }
       return response;
     }

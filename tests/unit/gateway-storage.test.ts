@@ -210,6 +210,10 @@ test("terminal outbox survives receipt loss and instance restart without duplica
     const revision = registryDb.get<{ revision: number }>("core").revision;
     loseReceipt = false;
     const restarted = new Workspace(local.state, env);
+    // Requests during the persisted retry window cannot hammer Registry.
+    await restarted.fetch(request());
+    assert.equal(calls, 1);
+    localDb.put("outbox-retry-at", Date.now() - 1);
     await restarted.fetch(request());
     assert.equal(
       localDb.get<{ terminalNotified: boolean }>("operation/fixture-operation")
@@ -459,4 +463,37 @@ test("corrupt SQLite record is reported without replacing canonical state", () =
     const untouched=f.storage.sql.exec<{value:string}>("SELECT value FROM records WHERE key=?", "core").toArray();
     assert.equal(untouched[0]?.value, "{invalid-json");
   } finally {f.db.close();}
+});
+
+
+test("persisted Registry authority does not evaluate invalid deployment defaults", async () => {
+  const f = fixture();
+  try {
+    const db = new SqlRecords(f.storage);
+    const core = { schemaVersion: 1, revision: 7, policyRevision: 1,
+      paused: false, issuer: "https://fixture.example", paired: true, credentialEpoch: 1 };
+    db.put("core", core);
+    const registry = new Registry(f.state, { ISSUER_URL: "not a URL" } as Env);
+    const response = await registry.fetch(new Request("https://internal/internal/health"));
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as {paired:boolean}).paired, true);
+    assert.deepEqual(db.get("core"), core);
+  } finally { f.db.close(); }
+});
+
+test("idle Workspace maintenance neither recreates backoff nor rewrites schema", async () => {
+  const f = fixture();
+  try {
+    const db = new SqlRecords(f.storage);
+    db.put("schema", 1);
+    db.put("outbox-backoff", 1000);
+    const workspace = new Workspace(f.state, {} as Env);
+    await workspace.alarm();
+    assert.equal(db.get("outbox-backoff"), undefined);
+    assert.equal(db.get("outbox-retry-at"), undefined);
+    await workspace.alarm();
+    assert.equal(db.get("outbox-backoff"), undefined);
+    assert.equal(db.get("schema"), 1);
+    assert.equal(await f.storage.getAlarm(), null);
+  } finally { f.db.close(); }
 });

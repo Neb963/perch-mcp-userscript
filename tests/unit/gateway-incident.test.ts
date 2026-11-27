@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { incident, persistIncident, probeRegistryHealth, routeClass } from '../../apps/gateway/src/incident.js';
+import { incident, persistIncident, probeRegistryHealth, registryFailureReason, routeClass } from '../../apps/gateway/src/incident.js';
 import type { Env } from '../../apps/gateway/src/common.js';
 
 const traceId='72094c21-3272-450a-89ef-969a00b90c18';
@@ -47,4 +47,27 @@ test('incident evidence excludes source, URLs, OAuth tokens and raw error messag
   assert.equal(puts.length,1);
   assert.equal(puts[0]!.ttl,7*86400);
   assert.doesNotMatch(puts[0]!.value,/SECRET-DO-NOT-LOG/);
+});
+
+
+test('public readiness classifies quota and storage failures without exposing raw exception data',async()=>{
+  for(const [message,reason] of [
+    ['Your account has exceeded its free tier daily row read limit SECRET', 'REGISTRY_QUOTA'],
+    ['Durable Object is overloaded SECRET', 'REGISTRY_OVERLOADED'],
+    ['SQLITE_FULL SECRET', 'REGISTRY_STORAGE_FULL'],
+    ['SQLITE_RECORD_CORRUPT SECRET', 'REGISTRY_STORAGE_CORRUPT'],
+    ['invalid URL SECRET', 'REGISTRY_CONFIGURATION_INVALID'],
+  ] as const) {
+    assert.equal(registryFailureReason(new Error(message)),reason);
+    const response=(await probeRegistryHealth(async()=>{throw new Error(message)})).response;
+    assert.equal(response.status,503);
+    const raw=await response.text();
+    assert.equal(JSON.parse(raw).reason,reason);
+    assert.doesNotMatch(raw,/SECRET/);
+  }
+  const invalid=await probeRegistryHealth(async()=>Response.json({traceId},{status:409,headers:{'X-Perch-Registry-Failure':'REGISTRY_SCHEMA_INCOMPATIBLE'}}));
+  assert.equal(invalid.response.status,503);
+  assert.equal((await invalid.response.json() as {reason:string}).reason,'REGISTRY_SCHEMA_INCOMPATIBLE');
+  const forged=await probeRegistryHealth(async()=>Response.json({traceId},{status:500,headers:{'X-Perch-Registry-Failure':'secret-fixture'}}));
+  assert.equal((await forged.response.json() as {reason:string}).reason,'REGISTRY_HTTP_ERROR');
 });
