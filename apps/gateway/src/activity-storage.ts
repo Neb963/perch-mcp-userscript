@@ -372,7 +372,8 @@ export class CanonicalActivity {
           if (this.generation() !== meta.generation) throw new CorruptActivity();
           const core = this.db.get<Record<string, unknown>>("core");
           if (core !== undefined) {
-            if (!core || typeof core !== "object" || Array.isArray(core) || (core.schemaVersion !== 1 && core.schemaVersion !== 2))
+            if (!core || typeof core !== "object" || Array.isArray(core) || (core.schemaVersion !== 1 && core.schemaVersion !== 2 &&
+              !(core.schemaVersion === 3 && core.assignmentContractVersion === 2)))
               throw new CorruptActivity();
             if (core.schemaVersion === 1) this.db.put("core", { ...core, schemaVersion: 2 });
           }

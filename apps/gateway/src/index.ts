@@ -219,6 +219,7 @@ function oauthServer(config: Configuration) {
         await rpc(registry(options.env), "/internal/authorize", {
           props: options.props,
           agentId: options.props.agentId,
+          ...(options.props.contractVersion === 2 ? { authenticatedClientId: options.clientId } : {}),
           permissions: [],
         });
       } catch (error) {
@@ -265,6 +266,12 @@ async function mcp(
   props: AuthProps,
   agentId: string,
 ): Promise<Response> {
+  if (props.contractVersion === 2) {
+    await rpc(registry(env), '/internal/authorize', {
+      props, agentId, resource: new URL('/mcp/' + agentId, request.url).href,
+    });
+    throw new ApiError('UPGRADE_REQUIRED', 'The v2 tool catalog is still being prepared.', 409);
+  }
   const authorized = await rpc<{
     workspace: WorkspaceRecord;
     agent: AgentRecord;
@@ -623,19 +630,24 @@ async function route(
       code: string;
       handle: string;
       agentLabel: string;
-      workspaceLabel: string;
+      workspaceLabel: string | null;
+      contractVersion: 1 | 2;
+      permissionCeiling?: string[];
       clientId: string;
       redirectUri: string;
       scope: string[];
     }>(registry(env), "/internal/oauth/pending", { request: auth });
+    const connectorConsent = pending.contractVersion === 2;
     return html(
-      "<h1>Approve in Perch MCP</h1><p>Open Perch MCP → Agents in the Perchance editor and match code <code>" +
-        escape(pending.code) +
-        "</code>.</p><dl><dt>Agent</dt><dd>" +
-        escape(pending.agentLabel) +
-        "</dd><dt>Workspace</dt><dd>" +
-        escape(pending.workspaceLabel) +
-        "</dd><dt>Client</dt><dd>" +
+      "<h1>Approve in Perch MCP</h1><p>Open Perch MCP → " + (connectorConsent ? "Connectors" : "Agents") +
+        " in the Perchance editor and match code <code>" + escape(pending.code) +
+        "</code>.</p><dl><dt>" + (connectorConsent ? "Connector" : "Agent") +
+        "</dt><dd>" + escape(pending.agentLabel) + "</dd>" +
+        (connectorConsent
+          ? "<dt>Resource</dt><dd>" + escape(auth.resource ?? "") + "</dd><dt>Permission ceiling</dt><dd>" +
+            escape((pending.permissionCeiling ?? []).join(", ")) + "</dd>"
+          : "<dt>Workspace</dt><dd>" + escape(pending.workspaceLabel ?? "") + "</dd>") +
+        "<dt>Client</dt><dd>" +
         escape(pending.clientId) +
         "</dd><dt>Callback</dt><dd>" +
         escape(pending.redirectUri) +

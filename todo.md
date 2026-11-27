@@ -14,8 +14,8 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 | Phase | Depends on | Exit gate | Status |
 |---|---|---|---|
 | V00 | v0.2.0 | Baseline, authority amendment, full disposition, offline reproduction or explicit gap | Verified locally |
-| V01 | V00 | Connector-level Grant, strict version coexistence, indexed discovery and explicit Target | In progress |
-| V02 | V01 | Durable fenced transition, exact management receipts and original-scope result ACL | Pending |
+| V01 | V00 | Connector-level Grant, strict version coexistence, indexed discovery and explicit Target | Foundation verified; catalog gated |
+| V02 | V01 | Durable fenced transition, exact management receipts and original-scope result ACL | In progress |
 | V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | Pending |
 | V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | Pending |
 | V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Pending |
@@ -36,6 +36,17 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 - Define a strict shared Target, versioned Grant and explicit permission-ceiling fields. Require canonical Target encoding, checked generations and exact Connector/client/audience/credential epoch.
 - Keep existing v1 tokens and OAuth approval semantics for unchanged fixed assignments. Build a gated v2 Connector consent and scoped discovery path over a bounded, transactionally maintained assignment index. Exercise empty, paused and offline discovery, denied foreign Targets and stale owned Targets, with loopback tests.
 - Do not expose the new public catalog or dispatch v2 effects while any implementation dependency remains open. Preserve current core markers and use a separately tested schema fence where v2 authority is written.
+
+### V01 evidence
+
+- Locked baseline dependencies, strict typecheck, and 555 of 555 offline tests passed. Local workerd fixtures verify one Connector with two assigned slots, an independent Connector, empty discovery, exact audience and client checks, foreign/stale Target denial, cursor scope, legacy continuation and real SDK PKCE consent. Public v2 tool listing remains disabled until the catalog and execution path are complete.
+- New assignment authority is explicit core schema 3 with an assignment marker. The v0.2 Registry rejects schema 3. Compatible readers retain canonical Activity and Resource markers. OAuth approval listings omit sealed callback URLs, which can contain authorization codes.
+
+### V02 plan
+
+- Use persisted Registry transition intent and exact management receipt. Check operator CAS, canonical native identity, installation proof and old draft acknowledgement. Change Binding/Assignment generations and indexed ownership in one transaction only after Workspace settlement.
+- Freeze old admissions/dispatch at Registry and persist a Workspace admission fence. Queue cancellation must prove no dispatch. Active effect, unresolved notice or pending receipt holds the transition. Renew/reply and claim must not transfer an old lease.
+- Authorize v2 result and cancel by exact initiating Grant and Target with current tool permissions, independent of browser lease. Test replay, stale revisions, stale scopes, cross-Connector denial, and delayed dispatch in local workerd. Keep catalog disabled.
 
 ## Historical v0.1–v0.2.0 implementation ledger
 
