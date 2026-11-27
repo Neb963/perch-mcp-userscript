@@ -315,17 +315,26 @@ test('Recovery presents a single human-readable action, no unexplained evidence 
 });
 
 test('Blocked Reconnect opens Recovery instead of stranding the operator at TAB_BUSY',async()=>{
- const f=fixture({attach:async()=>{throw Object.assign(new Error('Active lease'),{code:'TAB_BUSY'});}});
+ const identity={generatorId:'generator-1',slug:'synthetic',draftId:'',browserInstallationId:'installation-1'};
+ const w={id:'workspace-1',label:'Synthetic',revision:1,bindingRevision:1,binding:identity,
+   permissions:['READ_SOURCE'],paused:false};
+ const f=fixture({probe:async()=>({ready:true,identity}),
+   attach:async()=>{throw Object.assign(new Error('Active lease'),{code:'TAB_BUSY'});}});
  const delegate=f.client.request;
- f.client.request=async(method,path,body)=>path.endsWith('/recovery')?{
-   workspaceId:'workspace-1',activeLease:{epoch:8,expiresAt:Date.now()+180000},
-   pendingClaimUntil:null,action:'WAIT_FOR_LEASE',blockingOperations:[],
- }:delegate(method,path,body);
+ f.client.request=async(method,path,body)=>{
+   if(path.endsWith('/recovery'))return{
+     workspaceId:'workspace-1',activeLease:{epoch:8,expiresAt:Date.now()+180000},
+     pendingClaimUntil:null,action:'WAIT_FOR_LEASE',blockingOperations:[],
+   };
+   if(path.endsWith('/workspaces'))return{items:[w],revision:1};
+   if(path.endsWith('/workspaces/workspace-1'))return w;
+   return delegate(method,path,body);
+ };
  await f.handle.open('Workspaces');
  click(f.root,'Reconnect');
  await until(()=>/Another editor has the lease/.test(f.root.textContent??''));
  assert.match(f.root.textContent??'',/Recovery/);
- assert.match(f.root.textContent??'',/Reconnect blocked \(TAB_BUSY\)/);
+ assert.match(f.root.textContent??'',/Connection held \(TAB_BUSY\)/);
 });
 
 test('Recovery acknowledges one local journal and never clears peers',async()=>{
