@@ -122,7 +122,15 @@ export class ImageTransferHandler<T extends ImageOperation = ImageOperation> {
     return manifests;
   }
   /** Invoke with the Workspace's normal expiration pass; reads still enforce the TTL independently. */
-  expire(): void { this.db.transaction(() => { this.manifests(); }); }
+  expire(keys?:string[]): void {
+    this.db.transaction(() => {
+      if(keys===undefined){this.manifests();return;}
+      for(const key of keys){
+        const manifest=this.db.get<Manifest>(key);
+        if(manifest&&manifest.expiresAt<=this.now())this.remove(manifest);
+      }
+    });
+  }
   /** Include in the Workspace's existing alarm; no separate scheduler or binding is required. */
   nextExpiry(): number | undefined {
     const times = this.db.keys("image/manifest/").map((key) => this.db.get<Manifest>(key).expiresAt);

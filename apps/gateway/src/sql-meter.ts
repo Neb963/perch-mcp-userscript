@@ -6,7 +6,7 @@ export function emptyUsage():SqlUsage {return {reads:0,writes:0,statements:0,unm
 function add(to:SqlUsage,from:SqlUsage):void {to.reads+=from.reads;to.writes+=from.writes;to.statements+=from.statements;to.unmetered+=from.unmetered;}
 export function trackSql(sql:string,usage:SqlUsage):void {
   const current=scope.getStore();if(!current)return;
-  const category=/^CREATE\b|sqlite_master/.test(sql)?"schema":/operation_(?:index|dirty)/.test(sql)?"operation-index":/registry_activity/.test(sql)?"activity-index":/registry_(?:entity|dirty|counts|index)/.test(sql)?"registry-index":/FROM records|INTO records|UPDATE records/.test(sql)?"canonical":"other";
+  const category=/^CREATE\b|sqlite_master/.test(sql)?"schema":/operation_(?:index|dirty)/.test(sql)?"operation-index":/workspace_maintenance/.test(sql)?"maintenance-index":/registry_activity/.test(sql)?"activity-index":/registry_(?:entity|dirty|counts|index)/.test(sql)?"registry-index":/FROM records|INTO records|UPDATE records/.test(sql)?"canonical":"other";
   add(current.usage,usage);add(current.categories[category]??=emptyUsage(),usage);
 }
 function safeRoute(path:string):string {

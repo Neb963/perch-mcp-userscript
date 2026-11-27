@@ -20,6 +20,7 @@ import {
 } from "./common.js";
 import { SqlRecords } from "./sql.js";
 import { OperationIndex } from "./operation-index.js";
+import { MaintenanceIndex } from "./maintenance-index.js";
 import {
   toolDefinitions,
   validateToolCall,
@@ -68,6 +69,7 @@ interface Operation {
 export class Workspace {
   private db: SqlRecords;
   private journal: OperationIndex<Operation>;
+  private maintenance: MaintenanceIndex;
   private music: MusicHandler;
   private images: ImageTransferHandler<Operation>;
   constructor(
@@ -84,6 +86,7 @@ export class Workspace {
       );
     if (schema === undefined) this.db.put("schema", 1);
     this.journal = new OperationIndex<Operation>(this.db);
+    this.maintenance = new MaintenanceIndex(this.db);
     this.images = new ImageTransferHandler(this.db, {
       getLease: () => this.db.get<Lease>("lease"),
       getOperation: (operationId) =>
@@ -167,8 +170,8 @@ export class Workspace {
     if (due !== undefined) deadlines.push(due);
     if (this.journal.pendingExists()) deadlines.push(retryAt ?? Date.now() + 1000);
     if (this.journal.stats().eligible > 1000) deadlines.push(Date.now());
-    for (const expiry of [this.images.nextExpiry(), this.music.nextExpiry()])
-      if (expiry !== undefined) deadlines.push(expiry);
+    const maintenanceDue=this.maintenance.nextDue();
+    if(maintenanceDue!==undefined)deadlines.push(maintenanceDue);
     const existing = await this.state.storage.getAlarm();
     if (!deadlines.length) {
       if (existing !== null) await this.state.storage.deleteAlarm();
@@ -252,13 +255,17 @@ export class Workspace {
     }
   }
   private expire(): void {
-    this.images.expire();
-    this.music.expire();
     this.db.transaction(() => {
       const now = Date.now();
-      for (const key of this.db.keys("retired/"))
-        if (this.db.get<Lease>(key).expiresAt + 86400000 < now)
-          this.db.delete(key);
+      const maintenance=this.maintenance.due(now);
+      for(const {key,kind} of maintenance)if(kind==="retired"){
+        const lease=this.db.get<Lease>(key);
+        if(lease&&lease.expiresAt+86400000<now)this.db.delete(key);
+      }
+      const imageKeys=maintenance.filter(row=>row.kind==="image").map(row=>row.key);
+      const musicKeys=maintenance.filter(row=>row.kind==="music").map(row=>row.key);
+      if(imageKeys.length)this.images.expire(imageKeys);
+      if(musicKeys.length)this.music.expire(musicKeys);
       for (const op of this.journal.due(now)) {
         const terminalCode = (
           op.result as { error?: { code?: unknown } } | undefined

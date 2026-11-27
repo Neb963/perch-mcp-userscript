@@ -305,3 +305,5 @@ Incident confirmed by Cloudflare dashboard (5.93M rows read) and sanitized runti
 - Derived Registry catalog indexes expiration, entity paging, workspace-scoped grants/holds and Activity ordering/filtering; current Activity appends update the exact changed entries, while rollback writes trigger reconstruction. Canonical history and unresolved notices remain intact. Scheduled bounded cleanup; no new binding. SQL telemetry is per-invocation via AsyncLocalStorage, fixed route/query categories, no source, credentials, or durable metric writes.
 
 - Active expiration has a separate selection path so historical backlog cannot hide expired execution. Chunk updates now use conditional UPSERT and delete only obsolete parts; rollback readers retain the same canonical record format.
+
+- Added indexed media/retired-lease deadlines and bounded cleanup, preserving indefinite uncertain paid media intents. Ordinary polls no longer enumerate media history.
