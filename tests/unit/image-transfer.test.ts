@@ -46,7 +46,7 @@ test("1 MiB image crosses bounded chunks, publishes only at commit, and yields a
   assert.ok(JSON.stringify(uploaded).length < 1024);
   assert.equal(requests.length, 8);
   assert.ok(requests.every((body) => JSON.stringify(body).length < 512 * 1024));
-  assert.equal(f.authorizations(), requests.length);
+  assert.equal(f.authorizations(), requests.length + 1); // Commit revalidates authority again after asynchronous hashing.
   f.op.phase = "SUCCEEDED";
   const hydrated = await f.handler.hydrate(summary(uploaded), f.scope);
   const projected = projectMcpImages(hydrated);
@@ -194,4 +194,39 @@ test("browser validates all images before uploading, validates progress, and sto
   calls = 0;
   await assert.rejects(() => uploadImageResult(image(24), { operation: f.operation, send: async (body) => { calls++; if (body.action === "chunk") throw new Error("disconnected"); return f.send(body); } }));
   assert.equal(calls, 2);
+});
+
+test("image commit checks current authority after asynchronous hashing before publication", async () => {
+  const f = fixture(), bytes = Buffer.from(image(24).content[0]!.data, "base64"), sha256 = await hash(bytes);
+  await f.send({ ...f.operation, action: "start", index: 0, byteLength: bytes.length, sha256, mimeType: "image/png" });
+  await f.send({ ...f.operation, action: "chunk", index: 0, offset: 0, data: bytes.toString("base64") });
+  let checks = 0;
+  f.setAuthorize(async () => { if (++checks === 2) throw Object.assign(new Error("revoked during digest"), { code: "AUTH_REQUIRED" }); });
+  await assert.rejects(() => f.send({ ...f.operation, action: "commit", index: 0 }), errorCode("AUTH_REQUIRED"));
+  assert.equal(checks, 2);
+  assert.equal(f.db.get<{ state: string }>("image/manifest/operation/0").state, "STAGING");
+});
+
+test("image result cannot outlive its TTL during the post-hash authority check", async () => {
+  const f = fixture(), uploaded = await uploadImageResult(image(24), { operation: f.operation, send: f.send }) as { content: { imageTransfer: unknown }[] };
+  f.op.phase = "SUCCEEDED";
+  f.setAuthorize(async () => { f.setTime(1000 + IMAGE_TTL_MS); });
+  await assert.rejects(() => f.handler.read(uploaded.content[0]!.imageTransfer, "image/png", f.scope), errorCode("RESULT_EXPIRED"));
+});
+
+test("an unknown image payload format never falls back to readable legacy bytes", async () => {
+  const f = fixture(), uploaded = await uploadImageResult(image(24), { operation: f.operation, send: f.send }) as { content: { imageTransfer: unknown }[] };
+  f.op.phase = "SUCCEEDED";
+  const manifest = f.db.get<Record<string, unknown>>("image/manifest/operation/0"); manifest.payloadFormat = "BLOB_FUTURE";
+  f.db.put("image/manifest/operation/0", manifest);
+  await assert.rejects(() => f.handler.read(uploaded.content[0]!.imageTransfer, "image/png", f.scope), errorCode("INCOMPATIBLE_VERSION"));
+});
+
+
+test("malformed image expiry never becomes an unlimited-lived result", async () => {
+  for(const expiresAt of [undefined,null,NaN,Infinity,-1,"1000"]) {
+    const f=fixture(), uploaded=await uploadImageResult(image(24),{operation:f.operation,send:f.send}) as {content:{imageTransfer:unknown}[]};
+    f.op.phase="SUCCEEDED";const manifest=f.db.get<Record<string,unknown>>("image/manifest/operation/0");manifest.expiresAt=expiresAt;f.db.put("image/manifest/operation/0",manifest);
+    await assert.rejects(()=>f.handler.read(uploaded.content[0]!.imageTransfer,"image/png",f.scope),/SQLITE_RECORD_CORRUPT/);
+  }
 });

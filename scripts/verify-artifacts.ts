@@ -21,6 +21,11 @@ for (const line of checksums.trim().split("\n")) {
   checked++;
 }
 assert.deepEqual([...manifestPaths].sort(), Object.keys(files).filter(p => p !== "SHA256SUMS.txt").sort());
+for (const line of (await readFile("dist/DOWNLOAD-SHA256SUMS.txt","utf8")).trim().split("\n")) {
+  const match=/^([a-f0-9]{64})  ([A-Za-z0-9_.-]+)$/.exec(line);
+  assert.ok(match,"Invalid external download checksum entry");
+  assert.equal(createHash("sha256").update(await readFile("dist/"+match[2])).digest("hex"),match[1]);
+}
 const cloud = unzipSync(files["perch-mcp-cloudflare.zip"]!);
 for (const [path, contents] of Object.entries(cloud)) assert.deepEqual(contents, files["cloudflare/" + path]);
 const release = JSON.parse(new TextDecoder().decode(files["RELEASE.json"]));
@@ -33,6 +38,11 @@ assert.ok(
 );
 assert.ok(files["cloudflare/worker.mjs"]);
 assert.ok(files["docs/RELEASE_VERIFICATION.md"]);
+assert.ok(files["OPERATOR-ACCEPTANCE.md"]);
+assert.ok(files["perch-mcp-source.zip"]);
+assert.match(release.sourceCommit, /^[0-9a-f]{40}$/);
+assert.equal(release.version, release.workerVersion);
+assert.deepEqual(cloud["OPERATOR-ACCEPTANCE.md"], files["OPERATOR-ACCEPTANCE.md"]);
 assert.ok(
   !Object.keys(files).some(
     (p) => p.includes("node_modules/") || p.endsWith("/.dev.vars"),
@@ -50,6 +60,8 @@ const extracted = await mkdtemp(join(tmpdir(), "perch-packaged-worker-"));
 const scriptPath = join(extracted, "worker.mjs");
 await writeFile(scriptPath, cloud["worker.mjs"]!);
 const mf = new Miniflare({
+  cf: false,
+  outboundService: () => { throw new Error("OFFLINE_FIXTURE_NETWORK_DENIED"); },
   modules: true,
   scriptPath,
   modulesRoot: dirname(scriptPath),

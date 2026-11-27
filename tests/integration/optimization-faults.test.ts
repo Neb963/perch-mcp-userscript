@@ -46,7 +46,7 @@ test('failed alarm scheduling cannot turn admitted work into failed admission an
   const h=await faultHarness();
   try {
     const f=h.fixtures[0]!,stub=h.wns.get(h.wns.idFromName(f.workspaceId));
-    await control(stub as unknown as Stub,{alarmFailures:1});
+    await control(stub as unknown as Stub,{clearAlarm:true,alarmFailures:1});
     const admitted=await h.admit(f),operationId=String(admitted.operationId);
     assert.equal((await h.status(f,operationId)).status,'ADMITTED');
     const poll=await h.browser(f,'poll',{waitMs:0});

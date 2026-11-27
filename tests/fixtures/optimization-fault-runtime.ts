@@ -56,7 +56,8 @@ class FixtureObject {
     const path=new URL(request.url).pathname;
     if(path==='/__fixture_faults') {
       if(request.method==='POST') {
-        const body=await request.json() as Partial<Plan>;
+        const body=await request.json() as Partial<Plan>&{clearAlarm?:boolean};
+        if(body.clearAlarm===true)await this.state.storage.deleteAlarm();
         if(body.now!==undefined)this.plan.now=body.now;
         if(body.sqlPattern!==undefined)this.plan.sqlPattern=body.sqlPattern;
         this.plan.sqlSkip=body.sqlSkip??0;

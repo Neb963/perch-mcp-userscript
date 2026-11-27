@@ -97,6 +97,10 @@ await writeFile(
 await cp("docs", "dist/docs", { recursive: true });
 await cp("README.md", "dist/README.md");
 await cp("CLIENT_SPEC.md", "dist/CLIENT_SPEC.md");
+await cp("OPERATOR-ACCEPTANCE.md", "dist/OPERATOR-ACCEPTANCE.md");
+await cp("OPERATOR-ACCEPTANCE.md", "dist/cloudflare/OPERATOR-ACCEPTANCE.md");
+await mkdir("dist/cloudflare/docs/optimization", { recursive: true });
+await cp("docs/optimization/STORAGE-MIGRATION.md", "dist/cloudflare/docs/optimization/STORAGE-MIGRATION.md");
 await cp("apps/gateway/.dev.vars.example", "dist/cloudflare/.dev.vars.example");
 await writeFile(
   "dist/STATUS.txt",
@@ -113,6 +117,8 @@ await writeFile(
       classification: "verification-candidate",
       version: packageInfo.version,
       sourceTree,
+      sourceCommit: execFileSync("git", ["rev-parse", "HEAD"], {encoding:"utf8"}).trim(),
+      workerVersion: /export const VERSION = "([0-9.]+)"/.exec(await readFile("apps/gateway/src/common.ts","utf8"))?.[1],
       sourceDirty:
         execFileSync("git", ["status", "--porcelain"], {
           encoding: "utf8",
@@ -197,6 +203,8 @@ async function collect(
 const cloud = await collect("dist/cloudflare");
 await writeFile("dist/perch-mcp-cloudflare.zip", zipSync(cloud, zipOptions));
 for (const key of Object.keys(hashes)) delete hashes[key];
+// Include the exact tracked source in the hashed package, before hashing.
+execFileSync("git", ["archive", "--format=zip", "--output=dist/perch-mcp-source.zip", "HEAD"]);
 const archive = await collect("dist");
 delete archive["perch-mcp-candidate.zip"];
 archive["SHA256SUMS.txt"] = new TextEncoder().encode(
@@ -206,6 +214,13 @@ archive["SHA256SUMS.txt"] = new TextEncoder().encode(
 );
 await writeFile("dist/perch-mcp-candidate.zip", zipSync(archive, zipOptions));
 await writeFile("dist/SHA256SUMS.txt", archive["SHA256SUMS.txt"]!);
+// External manifest includes the enclosing archive; the archive cannot hash itself.
+const downloads = ["perch-mcp.user.txt","perch-mcp.user.js","perch-mcp-cloudflare.zip",
+  "perch-mcp-source.zip","perch-mcp-candidate.zip","RELEASE.json","OPERATOR-ACCEPTANCE.md"];
+const downloadChecksums: string[] = [];
+for (const name of downloads) downloadChecksums.push(
+  createHash("sha256").update(await readFile("dist/"+name)).digest("hex")+"  "+name);
+await writeFile("dist/DOWNLOAD-SHA256SUMS.txt",downloadChecksums.join("\n")+"\n");
 console.log(
   JSON.stringify({
     userscriptBytes: userscript.length,

@@ -23,6 +23,10 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CLOUDFLARE_CF_FETCH_ENABLED: "false"
+      WRANGLER_SEND_METRICS: "false"
+      PERCH_REQUIRE_CLEAN_ARTIFACT: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -48,10 +52,14 @@ jobs:
         with:
           name: perch-mcp-userscript-tested
           path: |
+            dist/perch-mcp-candidate.zip
+            dist/RELEASE.json
+            dist/OPERATOR-ACCEPTANCE.md
             dist/perch-mcp.user.txt
             dist/perch-mcp-source.zip
             dist/perch-mcp.user.js
             dist/perch-mcp-cloudflare.zip
             dist/SHA256SUMS.txt
+            dist/DOWNLOAD-SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30

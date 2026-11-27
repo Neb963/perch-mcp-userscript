@@ -63,3 +63,10 @@ test('legacy expiry during migration resets reverse verification and never retai
     store.prepareStep();assert.equal(store.progress().stage,'VERIFY_NATIVE');finish(store);assert.equal(store.get('operation/expiring')!.result,undefined);assert.equal(store.receiptDigest('operation/expiring'),undefined);
   }finally{f.close();}
 });
+
+test('incomplete phase/timestamp state blocks cutover rather than manufacturing an active terminal row',()=>{
+  const f=fixture();try{
+    const incomplete={phase:'SUCCEEDED',tool:'read',sequence:1,createdAt:1,deadlineMs:2};f.db.put('operation/incomplete',incomplete);
+    const store=new OperationStore(f.db,'native');assert.throws(()=>store.prepareStep(),/SQLITE_RECORD_CORRUPT/);assert.equal(store.blocked,true);assert.deepEqual(f.db.get('operation/incomplete'),incomplete);assert.equal(f.db.get('schema'),undefined);
+  }finally{f.close();}
+});

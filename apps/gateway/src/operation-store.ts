@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { SqlRecords } from './sql.js';
 import { OperationIndex } from './operation-index.js';
+import type { BudgetOperation, BudgetVector } from './admission-budget.js';
 import { ApiError, canonical } from './common.js';
 import { blocksNewLease, blocksNewMutation, isTerminalViewportEffect } from '../../../packages/contracts/src/effect-policy.js';
 
@@ -40,6 +41,9 @@ function validate(value:unknown): asserts value is StoredOperation {
   if(!object(value)||!PHASES.includes(String(value.phase))||typeof value.tool!=='string'||
       !['sequence','createdAt','deadlineMs'].every(k=>typeof value[k]==='number'&&Number.isSafeInteger(value[k]))||
       (value.terminalAt!==undefined&&(typeof value.terminalAt!=='number'||!Number.isSafeInteger(value.terminalAt))))corrupt();
+  const terminal=TERMINAL.includes(String(value.phase));
+  if(terminal?(typeof value.terminalAt!=='number'||value.terminalAt<=0):value.terminalAt!==undefined)corrupt();
+  if(value.terminalNotified&&!terminal)corrupt();
   for(const [field] of Object.entries(TYPED)) {
     if(!own(value,field)||value[field]===undefined||value[field]===null)continue;
     if(NUMBERS.has(field)? typeof value[field]!=='number'||!Number.isSafeInteger(value[field]) :
@@ -108,6 +112,7 @@ export class OperationStore<T extends StoredOperation> {
       const state=this.migration();
       if(!state||!['BACKFILL','VERIFY','VERIFY_NATIVE','READY','NATIVE','BLOCKED'].includes(state.stage)||state.generation!==2)
         throw new Error('SQLITE_SCHEMA_INCOMPATIBLE');
+      if(state.stage==='NATIVE'&&db.get<number>('schema')!==2)throw new Error('SQLITE_SCHEMA_INCOMPATIBLE');
       this.stage=state.stage as Stage;this.initialized=true;
     } else if(mode!=='legacy')this.prepare();
     // Initialize legacy projection outside admission transactions. A later
@@ -125,7 +130,7 @@ export class OperationStore<T extends StoredOperation> {
   private legacy():OperationIndex<T> {if(!this.legacyIndex)throw new ApiError('GATEWAY_DEGRADED','Legacy operation index is unavailable while bounded storage migration prepares its authority; preserve pending browser replies and retry after migration.',503);return this.legacyIndex;}
   private migration():Migration|undefined {return this.db.query<Migration>("SELECT stage,cursor,generation,resumeStage,verification FROM operation_migration_v2 WHERE id=1")[0];}
   progress():Record<string,unknown> {const state=this.initialized?this.migration():undefined;return state?{...state,authority:state.stage==='NATIVE'?'native':'legacy'}:{stage:'LEGACY',authority:'legacy'};}
-  refreshMigrationState():void {if(this.initialized){const state=this.migration();if(!state)throw new Error('SQLITE_SCHEMA_INCOMPATIBLE');this.stage=state.stage as Stage;}}
+  refreshMigrationState():void {if(this.initialized){const state=this.migration();if(!state||!['BACKFILL','VERIFY','VERIFY_NATIVE','READY','NATIVE','BLOCKED'].includes(state.stage)||state.generation!==2)throw new Error('SQLITE_SCHEMA_INCOMPATIBLE');this.stage=state.stage as Stage;}}
   blockMigration():void {if(!this.initialized||this.native||this.blocked)return;const state=this.migration();this.db.query("UPDATE operation_migration_v2 SET stage='BLOCKED',resumeStage=? WHERE id=1",state?.stage??'BACKFILL');this.stage='BLOCKED';}
   private prepare():void {
     this.db.transaction(()=>{
@@ -134,8 +139,8 @@ export class OperationStore<T extends StoredOperation> {
         phase TEXT NOT NULL CHECK(phase IN ('ADMITTED','DISPATCHED','RUNNING','SUCCEEDED','REJECTED','UNKNOWN','PARTIAL','CANCELLED')),
         tool TEXT NOT NULL,workspace TEXT,epoch INTEGER,binding INTEGER,tab TEXT,digest TEXT,agent TEXT,trace TEXT,
         notified INTEGER CHECK(notified IS NULL OR notified IN (0,1)),mutating INTEGER CHECK(mutating IS NULL OR mutating IN (0,1)),
-        context TEXT NOT NULL,presence TEXT NOT NULL,hasArgs INTEGER NOT NULL CHECK(hasArgs IN (0,1)),hasResult INTEGER NOT NULL CHECK(hasResult IN (0,1)),active INTEGER NOT NULL,pending INTEGER NOT NULL,hold INTEGER NOT NULL,
-        leaseBlock INTEGER NOT NULL,retention INTEGER,due INTEGER,argSize INTEGER NOT NULL,resultSize INTEGER NOT NULL) WITHOUT ROWID`);
+        context TEXT NOT NULL,presence TEXT NOT NULL,hasArgs INTEGER NOT NULL CHECK(hasArgs IN (0,1)),hasResult INTEGER NOT NULL CHECK(hasResult IN (0,1)),active INTEGER NOT NULL CHECK(active IN (0,1)),pending INTEGER NOT NULL CHECK(pending IN (0,1)),hold INTEGER NOT NULL CHECK(hold IN (0,1)),
+        leaseBlock INTEGER NOT NULL CHECK(leaseBlock IN (0,1)),retention INTEGER,due INTEGER,argSize INTEGER NOT NULL CHECK(argSize>=0),resultSize INTEGER NOT NULL CHECK(resultSize>=0)) WITHOUT ROWID`);
       for(const kind of PAYLOADS)this.db.query(`CREATE TABLE IF NOT EXISTS operation_${kind}_v2 (key TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID`);
       this.db.query('CREATE TABLE IF NOT EXISTS operation_native_stats_v2 (id INTEGER PRIMARY KEY,total INTEGER NOT NULL,eligible INTEGER NOT NULL,resultSize INTEGER NOT NULL,activeCount INTEGER NOT NULL,pendingCount INTEGER NOT NULL,holdCount INTEGER NOT NULL,leaseCount INTEGER NOT NULL,lastTerminal INTEGER NOT NULL)');
       this.db.query('INSERT OR IGNORE INTO operation_native_stats_v2 VALUES(1,0,0,0,0,0,0,0,0)');
@@ -159,14 +164,18 @@ export class OperationStore<T extends StoredOperation> {
     });
     this.initialized=true;this.stage='BACKFILL';
   }
-  private readLegacy(key:string):T|undefined {
+  private legacyPartsPresent(key:string):boolean {
     // Legacy writers used <=32k UTF-16 units per part. Preflight a bounded
     // metadata page before loading bytes; corrupt/oversized records remain intact.
     // 4 MiB exceeds args + retained reply + late observation accepted by the
     // 512 KiB HTTP boundary, including legacy metadata; it raises no wire limit.
     const parts=this.db.query<{part:number;chars:number;bytes:number}>("SELECT part,length(value) AS chars,length(CAST(value AS BLOB)) AS bytes FROM records WHERE key=? ORDER BY part LIMIT 134",key);
-    if(!parts.length)return undefined;
+    if(!parts.length)return false;
     if(parts.length>133||parts.some((p,n)=>p.part!==n||p.chars>32000)||parts.reduce((n,p)=>n+p.bytes,0)>4*1024*1024)corrupt();
+    return true;
+  }
+  private readLegacy(key:string):T|undefined {
+    if(!this.legacyPartsPresent(key))return undefined;
     const value=this.db.get<T>(key);validate(value);
     const record=value as StoredOperation&{operationId?:unknown};
     if(record.operationId!==undefined&&key!=="operation/"+record.operationId)corrupt();
@@ -309,11 +318,46 @@ export class OperationStore<T extends StoredOperation> {
   }
   private keys(sql:string,...args:number[]):Key[] {return this.db.query<Key>(sql,...args);}
   private load(rows:Key[]):T[] {return rows.map(({key})=>{const op=this.get(key);if(!op)corrupt();return op;});}
+  retainedOperationSummary():{retainedOperations:number;retainedResultBytes:number} {
+    if(this.native) {
+      const row=this.db.query<{total:number;resultSize:number}>('SELECT total,resultSize FROM operation_native_stats_v2 WHERE id=1')[0];
+      if(!row||!Number.isSafeInteger(row.total)||row.total<0||!Number.isSafeInteger(row.resultSize)||row.resultSize<0)corrupt();
+      return {retainedOperations:row.total,retainedResultBytes:row.resultSize*4};
+    }
+    const stats=this.legacy().stats(),obligations=this.legacy().obligationKeys();
+    return {retainedOperations:stats.eligible+obligations.length,retainedResultBytes:stats.resultSize*4};
+  }
+  /** A rollover reads bounded obligation metadata, never retained result bodies. */
+  budgetObligations():BudgetOperation[] {
+    let keys:Key[];
+    if(this.native) {
+      const stats=this.db.query<{activeCount:number;pendingCount:number;holdCount:number}>('SELECT activeCount,pendingCount,holdCount FROM operation_native_stats_v2 WHERE id=1')[0];
+      if(!stats||Object.values(stats).some(v=>!Number.isSafeInteger(v)||v<0)||stats.activeCount>8||stats.pendingCount>128||stats.holdCount>128)corrupt();
+      const active=this.keys(`SELECT key FROM ${TABLE} WHERE active=1 ORDER BY sequence LIMIT 9`);
+      const pending=this.keys(`SELECT key FROM ${TABLE} WHERE ${RECOVERY} AND pending=1 ORDER BY created LIMIT 129`);
+      const held=this.keys(`SELECT key FROM ${TABLE} WHERE ${RECOVERY} AND hold=1 ORDER BY created LIMIT 129`);
+      keys=[...new Map([...active,...pending,...held].map(row=>[row.key,row])).values()];
+    }else keys=this.legacy().obligationKeys();
+    return keys.map(({key})=>{
+      let row:{tool:string;args:string|null;reservation:string|null}|undefined;
+      if(this.native)row=this.db.query<{tool:string;args:string|null;reservation:string|null}>(`SELECT o.tool,a.value AS args,json_extract(o.context,'$.budgetReservation') AS reservation FROM ${TABLE} o LEFT JOIN operation_args_v2 a USING(key) WHERE o.key=?`,key)[0];
+      else {
+        if(!this.legacyPartsPresent(key))corrupt();
+        row=this.db.query<{tool:string;args:string|null;reservation:string|null}>("SELECT json_extract(value,'$.tool') AS tool,json_extract(value,'$.args') AS args,json_extract(value,'$.budgetReservation') AS reservation FROM (SELECT group_concat(value,'') AS value FROM (SELECT value FROM records WHERE key=? ORDER BY part))",key)[0];
+      }
+      if(!row||typeof row.tool!=='string')corrupt();
+      const result:BudgetOperation={tool:row.tool};
+      if(row.args!==null){const args=parsed(row.args);if(!object(args))corrupt();result.args=args;}
+      if(row.reservation!==null)result.budgetReservation=parsed(row.reservation) as BudgetVector;
+      return result;
+    });
+  }
   activeStats():{argSize:number}[] {return this.native?this.db.query<{argSize:number}>(`SELECT argSize FROM ${TABLE} WHERE active=1 ORDER BY sequence LIMIT 9`):this.legacy().activeStats();}
   running():boolean {return this.native?this.keys(`SELECT key FROM ${TABLE} WHERE active=1 AND phase IN ('DISPATCHED','RUNNING') ORDER BY sequence LIMIT 1`).length>0:this.legacy().running();}
+  workAvailable():boolean{return this.native?this.keys(`SELECT key FROM ${TABLE} WHERE active=1 AND phase='ADMITTED' ORDER BY sequence LIMIT 1`).length>0:this.legacy().admittedExists();}
   nextAdmitted():T|undefined {return this.native?this.load(this.keys(`SELECT key FROM ${TABLE} WHERE active=1 AND phase='ADMITTED' ORDER BY sequence LIMIT 1`))[0]:this.legacy().nextAdmitted();}
   pendingKeys():Key[] {return this.native?this.keys(`SELECT key FROM ${TABLE} WHERE ${RECOVERY} AND pending=1 ORDER BY created LIMIT 32`):this.legacy().pendingKeys();}
-  private count(column:'pendingCount'|'holdCount'|'leaseCount'):number {return this.db.query<{count:number}>(`SELECT ${column} AS count FROM operation_native_stats_v2 WHERE id=1`)[0]!.count;}
+  private count(column:'pendingCount'|'holdCount'|'leaseCount'):number {const row=this.db.query<{count:number}>(`SELECT ${column} AS count FROM operation_native_stats_v2 WHERE id=1`)[0];if(!row||!Number.isSafeInteger(row.count)||row.count<0)corrupt();return row.count;}
   pendingExists():boolean{return this.native?this.count('pendingCount')>0:this.legacy().pendingExists();}
   pendingFull():boolean{return this.native?this.count('pendingCount')>=128:this.legacy().pendingFull();}
   holds():boolean{return this.native?this.count('holdCount')>0:this.legacy().holds();}

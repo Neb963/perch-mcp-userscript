@@ -2237,6 +2237,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     const statusPanel=el('section',undefined,'recovery-status'),message=el('div',undefined,'recovery-message');
     const lines:Record<string,[string,string]>={
       RECONNECT:['Ready to connect','No Gateway operation is blocking this Workspace.'],
+      WAIT_FOR_STORAGE:['Storage preparation pending','Preserve pending results and complete storage activation before reconnecting.'],
       WAIT_FOR_TERMINAL:['Work still settling','A previous operation has not finished. Its result will be checked before reconnecting.'],
       RECONCILE:['Review needed','A previous operation has an uncertain result. Check its effects before continuing.'],
     };
@@ -2250,7 +2251,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       if(!w)throw new Error('Workspace changed. Refresh first.');
       await connectWorkspace(w);
     },'primary'));
-    else if(action==='WAIT_FOR_TERMINAL')statusPanel.append(button('Check again',async()=>refresh()));
+    else if(action==='WAIT_FOR_TERMINAL'||action==='WAIT_FOR_STORAGE')statusPanel.append(button('Check again',async()=>refresh()));
     body.append(statusPanel);
     if(blockers.length){
       heading('Operations requiring attention');

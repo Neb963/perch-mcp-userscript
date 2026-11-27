@@ -4,7 +4,7 @@ import type {
   DurableObjectStub,
   KVNamespace,
 } from "@cloudflare/workers-types";
-export const VERSION = "0.1.12";
+export const VERSION = "0.2.0";
 export const HAR_NATIVE_ACTIONS: Readonly<Record<string,string>> = Object.freeze({
   save_generator:"SAVE",rename_generator:"RENAME",set_listing:"LISTING",
 });
@@ -280,7 +280,8 @@ export interface Env {
   PUSH_NOTIFICATIONS_ENABLED?: string;
   BINARY_PAYLOADS_ENABLED?: string;
   ADMISSION_BUDGET_ENABLED?: string;
-  ADMISSION_BUDGET_POLICY?: string;
+  ADMISSION_BUDGET_CAPS_JSON?: string;
+  ADMISSION_BUDGET_BASELINE_JSON?: string;
   SQL_TELEMETRY_ENABLED?: string;
   REGISTRY: DurableObjectNamespace;
   WORKSPACES: DurableObjectNamespace;

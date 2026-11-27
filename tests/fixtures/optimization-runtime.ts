@@ -1,13 +1,13 @@
 // Test-only entrypoint. Never included in release or deployed Worker.
 import worker, { Registry as BaseRegistry, Workspace as BaseWorkspace } from '../../apps/gateway/src/index.js';
-import type { DurableObjectState, DurableObjectStorage, ExecutionContext } from '@cloudflare/workers-types';
+import type { DurableObjectState, DurableObjectStorage, ExecutionContext, WebSocket as DurableSocket } from '@cloudflare/workers-types';
 import type { Env } from '../../apps/gateway/src/common.js';
 
 function metrics() {
   return { requests: 0, kvGet: 0, kvPut: 0, kvDelete: 0, kvList: 0,
     alarmGet: 0, alarmSet: 0, alarmDelete: 0, alarmInvocations: 0,
     sqlReads: 0, sqlWrites: 0, sqlStatements: 0, sqlFailures: 0, responseBytes: 0,
-    wallMs: 0, coldStarts: 1 };
+    wallMs: 0, coldStarts: 1, wsAccepted: 0, wsIncoming: 0, wsIncomingBytes: 0, wsCloseEvents: 0 };
 }
 type Metrics = ReturnType<typeof metrics>;
 function wrappedStorage(storage: DurableObjectStorage, m: Metrics): DurableObjectStorage {
@@ -43,6 +43,9 @@ function wrappedState(state: DurableObjectState, m: Metrics): DurableObjectState
   const storage = wrappedStorage(state.storage, m);
   return new Proxy(state, {get(target,key) {
     if (key === 'storage') return storage;
+    if (key === 'acceptWebSocket') return (...args: Parameters<DurableObjectState['acceptWebSocket']>) => {
+      const value = target.acceptWebSocket(...args); m.wsAccepted++; return value;
+    };
     const value=Reflect.get(target,key,target);
     return typeof value === 'function' ? value.bind(target) : value;
   }});
@@ -75,6 +78,16 @@ export class Workspace extends BaseWorkspace {
     finally {this.fixtureMetrics.wallMs+=performance.now()-at;}
   }
   async alarm(): Promise<void> {this.fixtureMetrics.alarmInvocations++; return super.alarm();}
+  webSocketMessage(socket: DurableSocket, message: string | ArrayBuffer): void {
+    this.fixtureMetrics.wsIncoming++;
+    this.fixtureMetrics.wsIncomingBytes += typeof message === 'string' ? new TextEncoder().encode(message).byteLength : message.byteLength;
+    super.webSocketMessage(socket, message);
+  }
+  webSocketClose(socket: DurableSocket, code: number, reason: string, clean: boolean): void {
+    this.fixtureMetrics.wsCloseEvents++;
+    super.webSocketClose(socket, code, reason, clean);
+  }
+  webSocketError(socket: DurableSocket, error: unknown): void {super.webSocketError(socket, error);}
 }
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

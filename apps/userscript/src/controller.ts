@@ -1,3 +1,4 @@
+import type { NotificationChannel } from "./notifications.js";
 import { isRetryableGatewayFailure } from "./connection-failures.js";
 import { uploadImageResult } from "./image-transfer.js";
 import {
@@ -33,6 +34,7 @@ interface Lease {
   leaseCredential: string;
   expiresAt: number;
   permissions: string[];
+  notifications?: { version: 1 };
 }
 interface LocalOperation {
   operationId: string;
@@ -86,10 +88,12 @@ export class BrowserController {
   private source?: SourceTools;
   private heartbeat?: ReturnType<typeof setInterval>;
   private pollAbort?: AbortController;
+  private push?: NotificationChannel;
   private renewalInFlight = false;
   private consecutivePollFailures = 0;
   private lastPollSuccessAt?: number;
   private lastFailureCode?: string;
+  private lastFailureConnectivityRetryable?: boolean;
   private currentStatus: ControllerStatus = { connection: "offline" };
   private stopped = true;
   /** Monotonic attachment generation. A late claim must never undo Pause. */
@@ -124,11 +128,13 @@ export class BrowserController {
       connection: this.currentStatus.connection,
       workspaceId: this.currentStatus.workspace ?? null,
       reasonCode: this.lastFailureCode ?? null,
+      connectivityRetryable: this.lastFailureConnectivityRetryable ?? null,
       consecutivePollFailures: this.consecutivePollFailures,
       lastPollSuccessAt: this.lastPollSuccessAt ?? null,
       leasePresent: !!this.lease,
       leaseRemainingMs: this.lease ? Math.max(0, this.lease.expiresAt - Date.now()) : 0,
       stopped: this.stopped,
+      notifications: this.push?.diagnostics() ?? {state: "http"},
       failureStage: this.lastAttachStage,
       attachFailureCode: this.lastAttachCode,
       statusReason: this.currentStatus.reason ?? null,
@@ -217,10 +223,13 @@ export class BrowserController {
       this.viewportUncertain = false;
       this.stopped = false;
       this.lastFailureCode = undefined;
+      this.lastFailureConnectivityRetryable = undefined;
       this.lastAttachCode = null;
       this.lastAttachStage = null;
       this.consecutivePollFailures = 0;
       this.pollAbort = new AbortController();
+      if (claim.notifications?.version === 1 && typeof this.transport.notifications === "function")
+        this.push = this.transport.notifications(claim);
       this.heartbeat = setInterval(() => {void this.renew(claim);}, 60000);
       (this.heartbeat as unknown as {unref?:()=>void}).unref?.();
       this.updateStatus({connection:"connected",workspace:workspaceId,dirty:probe.dirty,
@@ -259,12 +268,16 @@ export class BrowserController {
       this.running = this.poll().catch((error:unknown) => {
         if (this.lease !== claim || this.stopped) return;
         this.stopped = true;
+        this.push?.stop();
         this.pollAbort?.abort();
         if (this.heartbeat) clearInterval(this.heartbeat);
         this.heartbeat = undefined;
         this.lastFailureCode = error instanceof TransportError ? error.code : "POLL_FAILED";
-        this.updateStatus({connection:"offline",workspace:workspaceId,
-          reason:`Poll stopped (${this.lastFailureCode}). Read-only reconnect will check the lease and any pending effects.`});
+        this.lastFailureConnectivityRetryable = error instanceof TransportError ? error.connectivityRetryable : undefined;
+        this.updateStatus({connection:this.lastFailureConnectivityRetryable===false?"blocked":"offline",workspace:workspaceId,
+          reason:this.lastFailureConnectivityRetryable===false
+            ? "Gateway storage or configuration needs repair. Automatic connection retries stopped; inspect readiness and diagnostics."
+            : `Poll stopped (${this.lastFailureCode}). Read-only reconnect will check the lease and any pending effects.`});
       });
     } catch (error) {
       if (generation !== this.connectionGeneration &&
@@ -273,9 +286,10 @@ export class BrowserController {
       const code=error && typeof error==="object" && "code" in error &&
         typeof error.code==="string" ? error.code : "CONNECTION_FAILED";
       this.lastFailureCode = code;
+      this.lastFailureConnectivityRetryable = error instanceof TransportError ? error.connectivityRetryable : undefined;
       this.lastAttachCode = code;
       this.lastAttachStage = stage;
-      const blocked=["BINDING_MISMATCH","EFFECT_UNKNOWN","TAB_BUSY","PAUSED","SCOPE_DENIED"].includes(code);
+      const blocked=this.lastFailureConnectivityRetryable===false || ["BINDING_MISMATCH","EFFECT_UNKNOWN","TAB_BUSY","PAUSED","SCOPE_DENIED"].includes(code);
       const reason=`Connection failed at ${stage} (${code}). ${error instanceof Error ? error.message : "Inspect the editor and Workspace before retrying."}`;
       // A failed preflight never evicts an unrelated healthy lease.
       this.updateStatus(this.lease ? {...previousStatus,reason} :
@@ -286,6 +300,8 @@ export class BrowserController {
   async pause(): Promise<void> {
     const generation = ++this.connectionGeneration;
     this.stopped = true;
+    this.push?.stop();
+    this.push = undefined;
     this.pollAbort?.abort();
     this.pollAbort = undefined;
     if (this.heartbeat) clearInterval(this.heartbeat);
@@ -319,14 +335,15 @@ export class BrowserController {
         "/api/v1/tab/heartbeat",
         this.ids(lease),
         lease.leaseCredential,
-      )) as { expiresAt: number; permissions: string[] };
+      )) as { expiresAt: number; permissions: string[]; workAvailable?: boolean };
       if (this.stopped || this.lease !== lease) return;
       if (
         !Number.isSafeInteger(state.expiresAt) ||
         state.expiresAt <= Date.now()
       )
         throw new Error("Expired lease.");
-      lease.expiresAt = state.expiresAt;
+      lease.expiresAt = Math.max(lease.expiresAt, state.expiresAt);
+      this.push?.reconcile(state.workAvailable === true);
       if (Array.isArray(state.permissions))
         lease.permissions = lease.permissions.filter((p) =>
           state.permissions.includes(p),
@@ -335,9 +352,10 @@ export class BrowserController {
       if (this.stopped || this.lease !== lease) return;
       const code = error instanceof TransportError ? error.code : "HEARTBEAT_FAILED";
       this.lastFailureCode = code;
+      this.lastFailureConnectivityRetryable = error instanceof TransportError ? error.connectivityRetryable : undefined;
       // The poll request also refreshes the same lease. A transient failed
       // heartbeat is not proof of lease revocation or loss of connection.
-      const temporary = isRetryableGatewayFailure(code);
+      const temporary = isRetryableGatewayFailure(code, this.lastFailureConnectivityRetryable);
       if (temporary && lease.expiresAt > Date.now() + 1000) {
         this.updateStatus({
           connection: "degraded", workspace: lease.workspaceId,
@@ -346,6 +364,7 @@ export class BrowserController {
         return;
       }
       this.stopped = true;
+      this.push?.stop();
       this.pollAbort?.abort();
       this.abort?.abort();
       if (this.heartbeat) clearInterval(this.heartbeat);
@@ -569,27 +588,40 @@ export class BrowserController {
     return this.artifacts.list();
   }
   private async poll(): Promise<void> {
+    let waitForNotification = false, observedRevision = 0;
     while (!this.stopped && this.lease) {
-      const lease = this.lease;
+      const lease = this.lease, push = this.push;
+      if (push) {
+        // Reconnect only between HTTP requests. Never abort a poll which may
+        // already have durably dispatched an operation.
+        await push.connectIfDue();
+        if (waitForNotification && push.healthy)
+          await push.wait(observedRevision, this.pollAbort?.signal);
+        if (this.stopped || this.lease !== lease || this.push !== push) return;
+      }
+      const beforeFetch = push?.revision ?? 0;
       let reply: { operations?: unknown[]; expiresAt?: number };
       try {
         // The Worker holds an idle poll for up to 25 seconds. A 45-second
         // browser budget allows network/proxy latency without a false offline
         // transition. Abort on explicit Pause or document navigation.
         reply = (await this.transport.tab(
-          "/api/v1/tab/poll", this.ids(lease), lease.leaseCredential,
+          "/api/v1/tab/poll", { ...this.ids(lease),
+            ...(push?.healthy || push?.immediateFallback ? { waitMs: 0 } : {}) }, lease.leaseCredential,
           { timeoutMs: 45000, signal: this.pollAbort?.signal },
         )) as { operations?: unknown[]; expiresAt?: number };
       } catch (error) {
         if (this.stopped || this.lease !== lease) return;
         const code = error instanceof TransportError ? error.code : "POLL_FAILED";
+        waitForNotification = false;
         this.lastFailureCode = code;
+        this.lastFailureConnectivityRetryable = error instanceof TransportError ? error.connectivityRetryable : undefined;
         this.consecutivePollFailures++;
         // The gateway serializes dispatched Operations. Re-polling the
         // current lease never issues a new Workspace claim or duplicates an
         // operation ACK. Only transient network failures are retried here.
         if (
-          !isRetryableGatewayFailure(code) ||
+          !isRetryableGatewayFailure(code, this.lastFailureConnectivityRetryable) ||
           Date.now() + 1500 >= lease.expiresAt
         ) throw error;
         this.updateStatus({
@@ -608,6 +640,7 @@ export class BrowserController {
       this.consecutivePollFailures = 0;
       this.lastPollSuccessAt = Date.now();
       this.lastFailureCode = undefined;
+      this.lastFailureConnectivityRetryable = undefined;
       if (this.currentStatus.connection === "degraded" && !this.viewportUncertain)
         this.updateStatus({ connection: "connected", workspace: lease.workspaceId });
       if (this.stopped || this.lease !== lease) return;
@@ -617,14 +650,19 @@ export class BrowserController {
         reply.operations.length > 8
       )
         throw new Error("Invalid poll response.");
-      if (typeof reply.expiresAt === "number")
-        lease.expiresAt = reply.expiresAt;
+      if (typeof reply.expiresAt === "number" && Number.isSafeInteger(reply.expiresAt))
+        lease.expiresAt = Math.max(lease.expiresAt, reply.expiresAt);
+      push?.fetched();
       for (const raw of reply.operations) {
         if (this.stopped) break;
         await this.execute(raw, lease);
       }
-      // Poll implementations may return immediately when idle; bounded jitter prevents a hot loop.
-      if (!reply.operations.length)
+      waitForNotification = !reply.operations.length && push?.healthy === true;
+      observedRevision = beforeFetch;
+      // A healthy notification channel sleeps without periodic work-fetches.
+      // The existing heartbeat wakes this loop only when authoritative work
+      // is pending, recovering a dropped advisory signal within its cadence.
+      if (!reply.operations.length && !waitForNotification)
         await new Promise((resolve) =>
           setTimeout(resolve, 500 + Math.random() * 250),
         );

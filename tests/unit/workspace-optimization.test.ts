@@ -29,7 +29,7 @@ function fixture(onRpc: (path: string) => Promise<Response> = async () => Respon
   const state = { storage } as DurableObjectState;
   const env = { REGISTRY: { idFromName: () => 'installation', get: () => ({ fetch: (request: Request) => onRpc(new URL(request.url).pathname) }) } } as unknown as Env;
   const records = new SqlRecords(storage);
-  return { records, queries, env, state, close: () => sqlite.close() };
+  return { sqlite, records, queries, env, state, close: () => sqlite.close() };
 }
 function operation(operationId: string, phase = 'ADMITTED', deadline = Date.now() + 30000) {
   return { operationId, sequence: 1, argsDigest: 'a'.repeat(64), workspaceId: 'workspace-fixture', epoch: 1,
@@ -127,4 +127,55 @@ test('a second poll cannot consume a durable dispatch attempt while its Registry
     assert.equal(second.status,200);assert.deepEqual((await second.json() as {operations:unknown[]}).operations,[]);assert.equal(dispatches,1);
     gate.release();const response=await first;assert.equal(response.status,200);assert.equal((await response.json()as{operations:unknown[]}).operations.length,1);
   }finally{gate.release();f.close();}
+});
+
+test('pre-index preparation preserves pending terminal evidence until verified counter authority exists',async()=>{
+  const f=fixture();try{
+    const token='fixture-lease-token'.padEnd(64,'x');await lease(f.records,token);
+    f.records.put('operation/current',operation('current','RUNNING'));
+    f.env.CANONICAL_STORAGE_MODE='prepare';let workspace=new Workspace(f.state,f.env);
+    const status=await workspace.fetch(request('/internal/status',{workspaceId:'workspace-fixture',operationId:'current'}));assert.equal(status.status,200);
+    const recovery=await workspace.fetch(request('/internal/recovery',{workspaceId:'workspace-fixture'}));assert.equal(recovery.status,200);const view=await recovery.json() as {blockingOperationsKnown:boolean;leaseClaimAvailable:boolean;action:string};assert.equal(view.blockingOperationsKnown,false);assert.equal(view.leaseClaimAvailable,false);assert.equal(view.action,'WAIT_FOR_STORAGE');
+    const terminal={operationId:'current',status:'SUCCEEDED',effectState:'VERIFIED',data:{retained:'browser-journal'}};
+    const reply=()=>workspace.fetch(request('/api/v1/tab/reply',{workspaceId:'workspace-fixture',epoch:1,tabInstanceId:'tab-fixture',operationId:'current',phase:'SUCCEEDED',result:terminal},token));
+    assert.equal((await reply()).status,503);assert.equal(f.records.get<{phase:string}>('operation/current').phase,'RUNNING');
+    for(let n=0;n<30;n++){const response=await workspace.fetch(request('/internal/migration',{workspaceId:'workspace-fixture',action:'step',idempotencyKey:crypto.randomUUID()}));assert.equal(response.status,200);if((await response.json()as{stage:string}).stage==='READY')break;}
+    assert.equal((await reply()).status,503,'prepare never acknowledges against unverified global counters');
+    f.env.CANONICAL_STORAGE_MODE='native';workspace=new Workspace(f.state,f.env);
+    for(let n=0;n<30;n++){const response=await workspace.fetch(request('/internal/migration',{workspaceId:'workspace-fixture',action:'step',idempotencyKey:crypto.randomUUID()}));assert.equal(response.status,200);if((await response.json()as{stage:string}).stage==='NATIVE')break;}
+    assert.equal((await reply()).status,200);
+    const completed=await workspace.fetch(request('/internal/status',{workspaceId:'workspace-fixture',operationId:'current'}));assert.equal((await completed.json()as{status:string}).status,'SUCCEEDED');
+  }finally{f.close();}
+});
+
+test('failed migration action receipt rolls back cutover marker and restores cached authority before retry',async()=>{
+  const f=fixture();try{
+    f.env.CANONICAL_STORAGE_MODE='prepare';let workspace=new Workspace(f.state,f.env);
+    const step=(key=crypto.randomUUID())=>workspace.fetch(request('/internal/migration',{workspaceId:'workspace-fixture',action:'step',idempotencyKey:key}));
+    for(let n=0;n<30;n++){const response=await step();assert.equal(response.status,200);if((await response.json()as{stage:string}).stage==='READY')break;}
+    f.sqlite.exec("CREATE TRIGGER fail_migration_receipt BEFORE INSERT ON operation_migration_actions_v2 BEGIN SELECT RAISE(ABORT,'fixture receipt storage unavailable'); END");
+    f.env.CANONICAL_STORAGE_MODE='native';workspace=new Workspace(f.state,f.env);
+    const key=crypto.randomUUID();assert.equal((await step(key)).status,500);assert.equal(f.records.get('schema'),1);
+    const status=await workspace.fetch(request('/internal/migration',{action:'status'}));assert.equal((await status.json()as{stage:string}).stage,'READY');
+    f.sqlite.exec('DROP TRIGGER fail_migration_receipt');const retry=await step(key);assert.equal(retry.status,200);assert.equal((await retry.json()as{stage:string}).stage,'NATIVE');assert.equal(f.records.get('schema'),2);
+    assert.equal((await step(key)).status,200);
+  }finally{f.close();}
+});
+
+test('first admission budget allocation prepares unknown retained media outside the failed admission transaction',async()=>{
+  const f=fixture();try{
+    const token='fixture-lease-token'.padEnd(64,'x');await lease(f.records,token);
+    f.env.ADMISSION_BUDGET_ENABLED='true';
+    f.records.put('operation/retained',{...operation('retained','SUCCEEDED'),terminalAt:Date.now(),terminalNotified:true,args:undefined});
+    f.records.put('image/manifest/retained/0',{operationId:'retained',index:0,byteLength:8,sha256:'b'.repeat(64),workspaceId:'workspace-fixture',epoch:1,bindingRevision:1,tabInstanceId:'tab-fixture',agentId:'agent-fixture',mimeType:'image/png',nextOffset:0,state:'STAGING',expiresAt:Date.now()+600000});
+    const workspace=new Workspace(f.state,f.env);
+    const admit=()=>workspace.fetch(request('/internal/admit',{workspace:{id:'workspace-fixture',epoch:1,bindingRevision:1},tool:'read',args:{path:'main.pjs'},permissions:['READ_SOURCE'],requiredPermissions:['READ_SOURCE'],mutating:false,props:{grantId:'grant-fixture',agentId:'agent-fixture',workspaceId:'workspace-fixture',bindingRevision:1},agentId:'agent-fixture'}));
+    const first=await admit();assert.equal(first.status,503);assert.equal(f.records.get('admission-budget/v1'),undefined);
+    assert.ok((await f.state.storage.getAlarm())!>Date.now());
+    await workspace.alarm();
+    assert.equal((await admit()).status,200);
+    const accounting=f.records.get<{cleanupSummary:{imageManifests:number;imageBytes:number}}>('admission-budget/v1');
+    assert.equal(accounting.cleanupSummary.imageManifests,1);assert.equal(accounting.cleanupSummary.imageBytes,8);
+    assert.equal(f.records.get<{state:string}>('image/manifest/retained/0').state,'STAGING');
+  }finally{f.close();}
 });

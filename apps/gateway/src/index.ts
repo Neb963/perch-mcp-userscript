@@ -1,4 +1,6 @@
 import { pollWaitMs, paceIdlePoll } from "./poll-pacing.js";
+import { validatePushUpgrade } from './push-notifications.js';
+import {validateIngress,IngressAdmission,OAuthAuditAdmission} from './ingress.js';
 import { projectMcpImages, type McpImageBlock } from "./mcp-media.js";
 import { incident, reportIncident, probeRegistryHealth } from "./incident.js";
 import {
@@ -101,6 +103,8 @@ function cors(
   env: Env,
   issuer?: string | null,
 ): Response {
+  // A reconstructed Response discards workerd's socket attachment.
+  if(response.status===101)return response;
   const o = request.headers.get("origin");
   const headers = new Headers(response.headers);
   if (o && o !== "null" && allowedOrigin(request, env, issuer)) {
@@ -398,7 +402,8 @@ async function mcp(
                 : "Tool request failed.",
             retryable: false,
             recovery:
-              "Inspect workspace_status and operation_status; do not replay an unknown effect.",
+              error instanceof ApiError || error instanceof ToolError ? error.recovery :
+                "Inspect workspace_status and operation_status; do not replay an unknown effect.",
           },
         };
       }
@@ -555,6 +560,16 @@ async function route(
     return response;
   }
   if (path.startsWith("/api/v1/tab/")) {
+    if(path==='/api/v1/tab/socket') {
+      if(env.PUSH_NOTIFICATIONS_ENABLED!=='true')
+        throw new ApiError('NOT_FOUND','Notifications are disabled.',404);
+      validatePushUpgrade(request);
+      const values=u.searchParams.getAll('workspaceId');
+      if(values.length!==1||[...u.searchParams.keys()].some(key=>key!=='workspaceId')||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(values[0]!))
+        throw new ApiError('INVALID_INPUT','Exact Workspace ID required.');
+      return await workspace(env,values[0]!).fetch(request as never) as unknown as Response;
+    }
     const clone = request.clone(),
       body = await parseBody(clone);
     if (
@@ -843,6 +858,8 @@ async function route(
   return authorizationServer.fetch(request, env, ctx as never);
 }
 type AuditRoute = "authorize" | "authorize_complete" | "token" | "register";
+const ingressAdmission=new IngressAdmission();
+const oauthAuditAdmission=new OAuthAuditAdmission();
 function auditRoute(path: string): AuditRoute | null {
   if (path === "/authorize") return "authorize";
   if (path === "/authorize/complete") return "authorize_complete";
@@ -869,6 +886,7 @@ function auditOAuth(
 ): void {
   const routeName = auditRoute(new URL(request.url).pathname);
   if (!routeName || !["GET", "POST"].includes(request.method)) return;
+  if(!oauthAuditAdmission.allow(routeName,request.method,originClass(request),status,code))return;
   // Audit is best effort; a logging outage must never prevent authorization.
   // Do not persist raw URL, Origin, query, OAuth credentials, handles or bodies.
   ctx.waitUntil(
@@ -889,11 +907,16 @@ export default {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const issuer: string | null = env.ISSUER_URL ?? null;
+    let auditEligible=false;
     try {
+      if(request.method!=='OPTIONS') {validateIngress(request,env);auditEligible=true;}
       if (!allowedOrigin(request, env, issuer))
         throw new ApiError("SCOPE_DENIED", "Origin is not allowed.", 403);
       if (request.method === "OPTIONS")
         return cors(new Response(null, { status: 204 }), request, env, issuer);
+      auditEligible=false;
+      ingressAdmission.check(request);
+      auditEligible=true;
       const response = await route(request, env, ctx);
       if (response.status >= 500) {
         const body = await response.clone().json().catch(() => null) as
@@ -902,7 +925,7 @@ export default {
         reportIncident(env, ctx, incident("worker", new URL(request.url).pathname,
           response.status, undefined, traceId));
       }
-      auditOAuth(
+      if(auditEligible)auditOAuth(
         request, env, ctx, response.status,
         response.headers.get("X-Perch-OAuth-Outcome") ??
           (new URL(request.url).pathname === "/token" && response.ok
@@ -918,7 +941,7 @@ export default {
       if (response.status >= 500)
         reportIncident(env, ctx, incident("worker", new URL(request.url).pathname,
           response.status, error, traceId));
-      auditOAuth(
+      if(auditEligible)auditOAuth(
         request, env, ctx, response.status,
         error instanceof ApiError ? error.code : "INTERNAL_ERROR",
         traceId,

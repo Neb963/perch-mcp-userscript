@@ -1,4 +1,6 @@
 import { withSqlUsage } from "./sql-meter.js";
+import { validateRegistryCore } from "./registry-core.js";
+import { appendOAuthDiagnostic, readOAuthDiagnostics } from "./oauth-diagnostics.js";
 import { resourceStorageMaintenance, resourceStorageNeedsMaintenance, resourceStorageStatus, resourceLibraryIsNative, resourceLibraryRevision } from "./resource-storage.js";
 import { ResourceError } from "../../../packages/resource-library/src/index.js";
 import type { DurableObjectState } from "@cloudflare/workers-types";
@@ -27,7 +29,7 @@ import {
 } from "./common.js";
 import { SqlRecords } from "./sql.js";
 import { RegistryIndex } from "./registry-index.js";
-import { incident, persistIncident, registryFailureReason, registryQuotaDimension, registryFailureSignal } from "./incident.js";
+import { incident, incidentSummary, persistIncident, registryFailureReason, registryQuotaDimension, registryFailureSignal } from "./incident.js";
 import { requiresGeneratorReservation } from "../../../packages/contracts/src/effect-policy.js";
 import { resourceAdmin, resourceTool } from "./resources.js";
 export interface WorkspaceRecord {
@@ -141,7 +143,7 @@ export class Registry {
       paired: false,
       credentialEpoch: 1,
     } : stored;
-    if (!c || typeof c !== "object") throw new Error("SQLITE_RECORD_CORRUPT");
+    validateRegistryCore(c);
     if (c.schemaVersion !== 1 && c.schemaVersion !== 2)
       throw new ApiError(
         "INCOMPATIBLE_VERSION",
@@ -332,17 +334,7 @@ export class Registry {
         typeof b.status !== "number" || !Number.isInteger(b.status) || b.status < 200 || b.status > 599 ||
         !/^[a-f0-9-]{36}$/.test(String(b.traceId))
       ) throw new ApiError("INVALID_INPUT", "Invalid bounded diagnostic event.");
-      this.db.transaction(() => {
-        const now = Date.now(),
-          budget = this.db.get<{ minute: number; count: number }>("diagnostic-budget", { minute: Math.floor(now / 60000), count: 0 }),
-          minute = Math.floor(now / 60000),
-          count = budget.minute === minute ? budget.count : 0;
-        if (count >= 120) return;
-        this.db.put("diagnostic-budget", { minute, count: count + 1 });
-        const rows = this.db.get<Record<string, unknown>[]>("diagnostic-events", []);
-        rows.push({ at: now, route, method, originClass, status: b.status, code, traceId: b.traceId });
-        this.db.put("diagnostic-events", rows.filter((row) => Number(row.at) > now - 7 * 86400000).slice(-100));
-      });
+      appendOAuthDiagnostic(this.db,b);
       return json({ ok: true });
     }
     if (path === "/internal/registration-budget") {
@@ -393,6 +385,7 @@ export class Registry {
         ok: true,
         version: VERSION,
         schemaVersion: 1,
+        storageSchemaVersion: c.schemaVersion,
         paired: c.paired,
         configured: !!c.issuer,
         providerWritesEnabled: this.env.PROVIDER_WRITES_ENABLED === "true",
@@ -1097,7 +1090,8 @@ export class Registry {
       return json({
         schemaVersion: 1,
         gatewayVersion: VERSION,
-        events: this.db.get<Record<string, unknown>[]>("diagnostic-events", []),
+        events: readOAuthDiagnostics(this.db),
+        incidents: incidentSummary(),
       });
     if (path === prefix + "state")
       return json({

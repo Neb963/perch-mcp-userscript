@@ -1,7 +1,7 @@
 import { withSqlUsage } from "./sql-meter.js";
 import { ImageTransferHandler } from "./image-transfer.js";
 import { MusicHandler } from "./media/handler.js";
-import type { DurableObjectState } from "@cloudflare/workers-types";
+import type { DurableObjectState, WebSocket as DurableSocket } from "@cloudflare/workers-types";
 import {
   ApiError,
   bearer,
@@ -21,6 +21,8 @@ import {
 import { SqlRecords } from "./sql.js";
 import { OperationStore, operationReceiptDigest } from "./operation-store.js";
 import { MaintenanceIndex } from "./maintenance-index.js";
+import { PushNotifications } from "./push-notifications.js";
+import { reserveAdmission, admissionBudgetPolicy, admissionBudgetSnapshot, type BudgetVector, type RetainedCleanupSummary } from "./admission-budget.js";
 import {
   toolDefinitions,
   validateToolCall,
@@ -67,13 +69,16 @@ interface Operation {
   lateObservation?: unknown;
   terminalResultDigest?: string;
   dispatchAttempt?: {id:string;reconcileAt:number};
+  budgetReservation?: BudgetVector;
 }
 export class Workspace {
   private db: SqlRecords;
   private operations: OperationStore<Operation>;
   private journal: OperationStore<Operation>;
   private maintenance: MaintenanceIndex;
-  private music: MusicHandler;
+  private music: MusicHandler<Operation>;
+  private push: PushNotifications;
+  private mediaPreparing=false;
   private images: ImageTransferHandler<Operation>;
   private terminalDrain?: Promise<void>;
   constructor(
@@ -93,11 +98,21 @@ export class Workspace {
     if (schema === undefined) this.db.put("schema", 1);
     this.operations = new OperationStore<Operation>(this.db, env.CANONICAL_STORAGE_MODE ?? "legacy");
     this.journal = this.operations;
-    this.maintenance = new MaintenanceIndex(this.db);
+    this.push=new PushNotifications(this.db,this.state,{
+      enabled:env.PUSH_NOTIFICATIONS_ENABLED==="true",getLease:()=>this.db.get<Lease|undefined>("lease"),
+      allowedOrigins:["https://perchance.org",...(env.ALLOWED_ORIGINS??"").split(",").map(s=>s.trim()).filter(Boolean),...(env.ISSUER_URL?[env.ISSUER_URL]:[])],
+    });
+    // Recover only an already-created media catalog. Ordinary reads never
+    // initialize unrelated media tables or enumerate retained music history.
+    if(this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='media_prepare_v1'").length)
+      this.mediaPreparing=this.db.query("SELECT 1 AS pending WHERE EXISTS(SELECT 1 FROM media_prepare_v1 WHERE complete=0 LIMIT 1) OR EXISTS(SELECT 1 FROM media_dirty_v1 LIMIT 1)").length>0;
+    this.maintenance = new MaintenanceIndex(this.db,undefined,()=>this.operations.native);
     this.images = new ImageTransferHandler(this.db, {
       getLease: () => this.db.get<Lease>("lease"),
       getOperation: (operationId) =>
         this.operations.get("operation/" + operationId),
+      binaryPayloadsEnabled:()=>this.env.BINARY_PAYLOADS_ENABLED==="true"&&this.operations.native,
+      onStoragePreparationPending:()=>this.requestMediaPreparation(),
       authorize: async (op) => {
         const fresh = await rpc<{ workspace: WorkspaceRecord }>(
           registry(this.env),
@@ -120,8 +135,12 @@ export class Workspace {
           );
       },
     });
-    this.music = new MusicHandler(this.db, this.env, {
+    this.music = new MusicHandler<Operation>(this.db, this.env, {
       getLease: () => this.db.get<Lease>("lease"),
+      getOperation:operationId=>this.operations.get("operation/"+operationId),
+      putOperation:op=>this.operations.put("operation/"+op.operationId,op),
+      binaryPayloadsEnabled:()=>this.env.BINARY_PAYLOADS_ENABLED==="true"&&this.operations.native,
+      onStoragePreparationPending:()=>this.requestMediaPreparation(),
       authorize: async (op, action) => {
         const result = await rpc<{ workspace: WorkspaceRecord }>(
           registry(this.env),
@@ -176,14 +195,18 @@ export class Workspace {
   async alarm(): Promise<void> {
     return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","workspace","alarm",async()=>{
       if(this.operations.migrating)this.operations.prepareStep();
+      if(this.mediaPreparing){const imagesReady=this.images.prepareStorage(),musicReady=this.music.prepareStorage();this.mediaPreparing=!(imagesReady&&musicReady);}
       if(!this.operations.journalReady){await this.scheduleAlarm();return;}
       this.expire();
       await this.drainTerminalOutbox();
     });
   }
+  webSocketMessage(socket:DurableSocket,message:string|ArrayBuffer):void {this.push.webSocketMessage(socket,message);}
+  webSocketClose(socket:DurableSocket,code:number,_reason:string,_wasClean:boolean):void {this.push.webSocketClose(socket,code);}
+  webSocketError(socket:DurableSocket,_error:unknown):void {this.push.webSocketError(socket);}
   private async scheduleAlarm(retryAt?: number): Promise<void> {
     const deadlines: number[] = [];
-    if(this.operations.migrating)deadlines.push(Date.now()+1000);
+    if(this.operations.migrating||this.mediaPreparing)deadlines.push(Date.now()+1000);
     if(!this.operations.journalReady) {
       const existing=await this.state.storage.getAlarm();
       if(deadlines.length){const next=Date.now()+1000;if(existing===null||existing<=Date.now()||next<existing)await this.state.storage.setAlarm(next);}
@@ -426,20 +449,22 @@ export class Workspace {
     const row = this.db.query<{ operationDue: number | null; maintenanceDue: number | null; lastActivity: number | null }>(
       this.operations.native ? `SELECT
         (SELECT due FROM operation_native_v2 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS operationDue,
-        (SELECT due FROM workspace_maintenance_v1 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS maintenanceDue,
+        (SELECT due FROM workspace_maintenance_v2 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS maintenanceDue,
         lastTerminal AS lastActivity FROM operation_native_stats_v2 WHERE id=1 AND eligible<=1000
         AND activeCount=0 AND pendingCount=0
-        AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_dirty_v1 LIMIT 1)
-        AND NOT EXISTS(SELECT 1 FROM records WHERE key IN ('outbox-backoff','outbox-retry-at') LIMIT 1)` :
+        AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_dirty_v2 LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM records WHERE key>='outbox-' AND key<'outbox-\uffff' LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_prepare_v2 WHERE complete=0 LIMIT 1)` :
       `SELECT (SELECT due FROM operation_index_v1 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS operationDue,
-        (SELECT due FROM workspace_maintenance_v1 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS maintenanceDue,
+        (SELECT due FROM workspace_maintenance_v2 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS maintenanceDue,
         (SELECT terminal FROM operation_index_v1 ORDER BY terminal DESC LIMIT 1) AS lastActivity
        FROM operation_index_state_v1 WHERE id=1 AND eligible<=1000
         AND NOT EXISTS(SELECT 1 FROM operation_dirty_v1 LIMIT 1)
-        AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_dirty_v1 LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_dirty_v2 LIMIT 1)
         AND NOT EXISTS(SELECT 1 FROM operation_index_v1 WHERE active=1 LIMIT 1)
         AND NOT EXISTS(SELECT 1 FROM operation_index_v1 WHERE pending=1 LIMIT 1)
-        AND NOT EXISTS(SELECT 1 FROM records WHERE key IN ('outbox-backoff','outbox-retry-at') LIMIT 1)`
+        AND NOT EXISTS(SELECT 1 FROM records WHERE key>='outbox-' AND key<'outbox-\uffff' LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_prepare_v2 WHERE complete=0 LIMIT 1)`
     )[0];
     if(!row)return undefined;
     const due=Math.min(row.operationDue??Infinity,row.maintenanceDue??Infinity);
@@ -452,10 +477,42 @@ export class Workspace {
     }
     return {lastActivityAt:row.lastActivity??0};
   }
+  private requestMediaPreparation():void {
+    this.mediaPreparing=true;
+    // The caller may be a failed admission transaction. Schedule only after
+    // that synchronous transaction has committed or rolled back.
+    const prepare=Promise.resolve().then(()=>this.scheduleAlarm()).catch(()=>{});
+    if(typeof this.state.waitUntil==="function")this.state.waitUntil(prepare);
+    else void prepare;
+  }
+  /** Rollover-only conservative cleanup allocation; never reads artifact bodies. */
+  private retainedCleanupSummary():RetainedCleanupSummary {
+    const retained=this.operations.retainedOperationSummary();
+    const metadata=(status:Record<string,unknown>,prefix:string):{count:number;bytes:number}=>{
+      const value=status.metadata;
+      if(value&&typeof value==="object"&&!Array.isArray(value)) {
+        const m=value as Record<string,unknown>;
+        if(m.stage==="READY"&&Number.isSafeInteger(m.indexedCount)&&Number(m.indexedCount)>=0&&Number.isSafeInteger(m.indexedReservedBytes)&&Number(m.indexedReservedBytes)>=0)
+          return {count:Number(m.indexedCount),bytes:Number(m.indexedReservedBytes)};
+      }
+      if(!this.db.query("SELECT key FROM records WHERE key>=? AND key<? LIMIT 1",prefix,prefix+"\uffff").length)return {count:0,bytes:0};
+      this.requestMediaPreparation();
+      throw new ApiError("GATEWAY_DEGRADED","Retained media accounting is preparing; no new operation was admitted.",503,"Preserve pending results and wait for bounded storage preparation.");
+    };
+    const image=metadata(this.images.storageStatus(),"image/manifest/"),music=metadata(this.music.storageStatus(),"music/journal/");
+    const retired=this.db.query<{key:string}>("SELECT key FROM records WHERE key>=? AND key<? AND part=0 ORDER BY key LIMIT 4097","retired/","retired/\uffff");
+    if(retired.length>4096)throw new ApiError("GATEWAY_DEGRADED","Retained lease accounting exceeds its bounded verification window.",503);
+    return {nativeOperations:this.operations.native,...retained,imageBytes:image.bytes,imageManifests:image.count,musicBytes:music.bytes,musicJournals:music.count,retiredLeases:retired.length};
+  }
   /** Only the Worker admin router may call this fixed migration surface. */
   private migrationAction(b:Record<string,unknown>):Record<string,unknown> {
     const action=b.action??"status";
-    if(action==="status")return this.operations.progress();
+    if(action==="status") {
+      let maintenanceReady:boolean|null=null;
+      try{maintenanceReady=this.maintenance.idleReady();}catch{ /* Unknown readiness is explicit. */ }
+      const status=(read:()=>Record<string,unknown>):Record<string,unknown>=>{try{return read();}catch{return {metadata:{stage:"UNAVAILABLE"}};}};
+      return {...this.operations.progress(),maintenanceReady,media:{image:status(()=>this.images.storageStatus()),music:status(()=>this.music.storageStatus())}};
+    }
     if(action!=="step"&&action!=="resume")throw new ApiError("INVALID_INPUT","Unknown storage migration action.");
     if(this.operations.progress().stage==="LEGACY")throw new ApiError("INCOMPATIBLE_VERSION","Set CANONICAL_STORAGE_MODE to prepare or native before starting migration.",409);
     const key=id(b.idempotencyKey,"idempotencyKey"),workspaceId=id(b.workspaceId,"workspaceId");
@@ -488,8 +545,9 @@ export class Workspace {
     }
   }
   private async route(request: Request, maintenance: {settled:boolean}): Promise<Response> {
-    const path = new URL(request.url).pathname,
-      b = await parseBody(request);
+    const path = new URL(request.url).pathname;
+    if(path==="/api/v1/tab/socket"){maintenance.settled=true;return this.push.upgrade(request);}
+    const b=await parseBody(request);
     if (path === "/internal/sql-usage") return json(this.db.snapshotUsage());
     if (path === "/internal/migration") {
       maintenance.settled=true;
@@ -499,7 +557,8 @@ export class Workspace {
       }
       return json(result);
     }
-    if (path.startsWith("/internal/") && !["/internal/status", "/internal/cancel"].includes(path)) this.expire();
+    if (path.startsWith("/internal/") && !["/internal/status", "/internal/cancel"].includes(path) &&
+        (path!=="/internal/recovery"||this.operations.journalReady)) this.expire();
     if (path === "/internal/admit") {
       if(this.operations.blocked)throw new ApiError("GATEWAY_DEGRADED", "Operation migration is blocked; inspect storage-migration status and repair the recorded fixture before resuming.",503);
       const w = b.workspace as WorkspaceRecord,
@@ -530,7 +589,7 @@ export class Workspace {
         phase: "ADMITTED",
         createdAt: Date.now(),
       };
-      this.db.transaction(() => {
+      const committedLease=this.db.transaction(() => {
         // Argument hashing yields. The initially observed lease cannot authorize
         // a commit after release, expiry, or a replacement document's claim.
         const current = this.db.get<Lease>("lease");
@@ -575,10 +634,15 @@ export class Workspace {
             "Workspace queue byte budget exhausted.",
             429,
           );
+        const budget=reserveAdmission(this.db,admissionBudgetPolicy(this.env),op,()=>this.operations.budgetObligations(),Date.now(),()=>this.retainedCleanupSummary());
+        if(budget)op.budgetReservation=budget.reservation;
         op.sequence = this.db.get<number>("sequence", 0) + 1;
         this.db.put("sequence", op.sequence);
         this.operations.put("operation/" + op.operationId, op);
+        return current;
       });
+      // No await separates the transaction's current lease from this hint.
+      try{this.push.notify(committedLease);}catch{ /* A missed hint is recovered by authoritative heartbeat. */ }
       return json(this.summary(op));
     }
     if (path === "/internal/status" || path === "/internal/cancel") {
@@ -653,7 +717,7 @@ export class Workspace {
         : null;
       const claiming = this.db.get<{expiresAt:number}>("claiming");
       const pendingClaimUntil = claiming && claiming.expiresAt > now ? claiming.expiresAt : null;
-      const operations = this.journal.leaseBlockers()
+      const operations = (this.operations.journalReady?this.journal.leaseBlockers():[])
         .filter(op=>op.workspaceId === workspaceId)
         .sort((a,z)=>a.createdAt-z.createdAt)
         .slice(0,128)
@@ -664,11 +728,15 @@ export class Workspace {
           terminalAt:op.terminalAt??null,
           resolvable: ['UNKNOWN','PARTIAL'].includes(op.phase) && !op.resolution,
         }));
-      return json({schemaVersion:1,workspaceId,observedAt:now,
+      let budget:ReturnType<typeof admissionBudgetSnapshot>;
+      try{budget=admissionBudgetSnapshot(this.db,admissionBudgetPolicy(this.env));}
+      catch{budget={enabled:this.env.ADMISSION_BUDGET_ENABLED==="true",known:false,scope:"workspace",reason:"ACCOUNTING_UNAVAILABLE"};}
+      return json({schemaVersion:1,workspaceId,observedAt:now,admissionBudget:budget,
         activeLease:active,pendingClaimUntil,blockingOperations:operations,
-        storageMigration:this.operations.progress(),
-        leaseClaimAvailable:!active&&!pendingClaimUntil&&!operations.length,
-        action: operations.some(op=>op.resolvable) ? 'RECONCILE' :
+        storageMigration:this.operations.progress(),storagePreparing:!this.operations.journalReady,
+        blockingOperationsKnown:this.operations.journalReady,
+        leaseClaimAvailable:this.operations.journalReady&&!active&&!pendingClaimUntil&&!operations.length,
+        action: !this.operations.journalReady ? 'WAIT_FOR_STORAGE' : operations.some(op=>op.resolvable) ? 'RECONCILE' :
           operations.length ? 'WAIT_FOR_TERMINAL' :
           active||pendingClaimUntil ? 'WAIT_FOR_LEASE' : 'RECONNECT',
       });
@@ -732,8 +800,10 @@ export class Workspace {
           this.db.put("lease", l);
           this.db.delete("claiming");
         });
+        this.push.close();
         return json({
           workspaceId,
+          ...(this.push.enabled?{notifications:{version:1}}:{}),
           epoch: l.epoch,
           bindingRevision: l.bindingRevision,
           tabInstanceId,
@@ -772,6 +842,7 @@ export class Workspace {
             current,
           );
           this.db.delete("lease");
+          this.push.close();
         }
       }
       return json(this.summary(op));
@@ -783,6 +854,7 @@ export class Workspace {
       b,
       path === "/api/v1/tab/reply" && b.phase !== "RUNNING",
     );
+    if(path==="/api/v1/tab/ticket"){maintenance.settled=true;return json(await this.push.issue(l));}
     if (path !== "/api/v1/tab/poll") this.expire();
     if (path === "/api/v1/tab/image")
       return json(await this.images.handle(b, l));
@@ -791,10 +863,12 @@ export class Workspace {
     if (path === "/api/v1/tab/release") {
       this.db.put("retired/" + l.epoch + "/" + l.tabInstanceId, l);
       this.db.delete("lease");
+      this.push.close();
       return json({ ok: true });
     }
     if (path === "/api/v1/tab/heartbeat") {
-      const valid = await rpc<{ permissions: string[] }>(
+      let valid:{permissions:string[]};
+      try {valid = await rpc<{ permissions: string[] }>(
         registry(this.env),
         "/internal/lease-check",
         {
@@ -803,7 +877,11 @@ export class Workspace {
           bindingRevision: l.bindingRevision,
           credentialEpoch: l.credentialEpoch,
         },
-      );
+      );}catch(error){
+        const active=this.db.get<Lease>("lease");
+        if(active&&active.epoch===l.epoch&&active.bindingRevision===l.bindingRevision&&active.tabInstanceId===l.tabInstanceId&&active.secretHash===l.secretHash)this.push.close();
+        throw error;
+      }
       const current = this.db.get<Lease>("lease");
       if (
         !current ||
@@ -820,6 +898,7 @@ export class Workspace {
       return json({
         expiresAt: current.expiresAt,
         permissions: current.permissions,
+        ...(this.push.enabled?{workAvailable:this.journal.workAvailable()}:{}),
       });
     }
     if (path === "/api/v1/tab/poll") {

@@ -1,11 +1,11 @@
 {
   "name": "perch-mcp",
-  "version": "0.1.18",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test tests/unit/*.test.ts tests/integration/*.test.ts",
+    "test": "node --import tsx --test --test-concurrency=4 tests/unit/*.test.ts tests/integration/*.test.ts",
     "build": "node --import tsx scripts/build.ts",
     "check": "npm run typecheck && npm test && npm run build && npm run verify:artifacts",
     "verify:artifacts": "node --import tsx scripts/verify-artifacts.ts"

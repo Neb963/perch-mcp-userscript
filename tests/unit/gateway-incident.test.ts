@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { incident, persistIncident, probeRegistryHealth, registryFailureReason, routeClass, IncidentRecorder, incidentSummary } from '../../apps/gateway/src/incident.js';
+import { VERSION } from "../../apps/gateway/src/common.js";
 import type { Env } from '../../apps/gateway/src/common.js';
 
 const traceId='72094c21-3272-450a-89ef-969a00b90c18';
@@ -25,9 +26,27 @@ test('connection error during scheduled/HTTP Registry probe stays an observable 
   assert.equal(outcome.response.status,503);
   assert.equal(outcome.failure?.error instanceof TypeError,true);
   assert.match(String(outcome.failure?.traceId),/^[0-9a-f-]{36}$/);
-  const good=await probeRegistryHealth(async()=>Response.json({schemaVersion:1,version:'fixture'}));
+  const good=await probeRegistryHealth(async()=>Response.json({ok:true,schemaVersion:1,version:VERSION,paired:false,configured:false,providerWritesEnabled:false,nativeActionsEnabled:false,protocolVersions:['2026-07-28']}));
   assert.equal(good.response.status,200);
   assert.equal(good.failure,undefined);
+});
+test('readiness rejects malformed success bodies and projects only validated public fields',async()=>{
+  const valid={ok:true,schemaVersion:1,version:VERSION,paired:false,configured:false,
+    providerWritesEnabled:false,nativeActionsEnabled:false,protocolVersions:['2026-07-28']};
+  for(const body of [{},{...valid,ok:false},{...valid,paired:'false'},
+    {...valid,version:'0.0.0'},{...valid,protocolVersions:['SECRET-private-value']}]) {
+    const result=await probeRegistryHealth(async()=>Response.json(body));
+    assert.equal(result.response.status,503);
+    const data=await result.response.text();
+    assert.equal(JSON.parse(data).stage,'CORE_VALIDATE');
+    assert.doesNotMatch(data,/SECRET-private-value/);
+  }
+  const html=await probeRegistryHealth(async()=>new Response('<html>SECRET-private</html>'));
+  assert.equal(html.response.status,503);
+  const good=await probeRegistryHealth(async()=>Response.json({...valid,private:'SECRET-private'}));
+  assert.equal(good.response.status,200);
+  assert.equal(good.response.headers.get('Cache-Control'),'no-store');
+  assert.doesNotMatch(await good.response.text(),/SECRET-private/);
 });
 
 test('incident evidence excludes source, URLs, OAuth tokens and raw error messages',async()=>{

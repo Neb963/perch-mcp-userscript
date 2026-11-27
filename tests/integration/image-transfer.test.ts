@@ -59,3 +59,54 @@ test("actual gateway revalidates Workspace policy before accepting the next imag
     assert.deepEqual(poll.operations, []);
   } finally { await h.close(); }
 });
+
+test('actual Workspace refuses BLOB writes from the binary flag alone before the canonical schema fence', {timeout:20000}, async () => {
+  const h=await createCapacityHarness(1,{BINARY_PAYLOADS_ENABLED:'true',CANONICAL_STORAGE_MODE:'legacy'},{entryPoint:'tests/fixtures/binary-gateway-runtime.ts'});
+  try {
+    const f=h.fixtures[0]!,stub=h.wns.get(h.wns.idFromName(f.workspaceId));
+    const admitted=await h.admit(f,'read_image',{path:'scratch/legacy.png'}),operationId=String(admitted.operationId);
+    await h.browser(f,'poll',{waitMs:0});await h.browser(f,'reply',{operationId,phase:'RUNNING'});
+    const bytes=Buffer.from([137,80,78,71,13,10,26,10,37]);
+    const original={content:[{type:'image',mimeType:'image/png',data:bytes.toString('base64')}]};
+    const uploaded=await uploadImageResult(original,{operation:{operationId,workspaceId:f.workspaceId,epoch:Number(f.lease.epoch),bindingRevision:Number(f.lease.bindingRevision),tabInstanceId:String(f.lease.tabInstanceId)},send:body=>h.browser(f,'image',body)});
+    assert.deepEqual(await h.internal(stub,'/__fixture_media',{operationId}),{schema:1,format:'LEGACY',binaryRows:0});
+    await h.browser(f,'reply',{operationId,phase:'SUCCEEDED',result:{operationId,status:'SUCCEEDED',effectState:'VERIFIED',data:uploaded}});
+    const result=await h.internal(stub,'/internal/status',{workspaceId:f.workspaceId,operationId,bindingRevision:f.lease.bindingRevision,agentId:f.agentId});
+    assert.deepEqual(projectMcpImages(result).images,original.content);
+  } finally {await h.close();}
+});
+
+test('actual Workspace migrates with retained legacy image bytes, writes native BLOBs only after cutover, and reads both after flag disable', {timeout:20000}, async () => {
+  const h=await createCapacityHarness(1,{BINARY_PAYLOADS_ENABLED:'true',CANONICAL_STORAGE_MODE:'prepare'},{entryPoint:'tests/fixtures/binary-gateway-runtime.ts'});
+  try {
+    const f=h.fixtures[0]!,stub=h.wns.get(h.wns.idFromName(f.workspaceId));
+    async function transfer(marker:number) {
+      const admitted=await h.admit(f,'read_image',{path:'scratch/image-'+marker+'.png'}),operationId=String(admitted.operationId);
+      await h.browser(f,'poll',{waitMs:0});await h.browser(f,'reply',{operationId,phase:'RUNNING'});
+      const bytes=Buffer.from([137,80,78,71,13,10,26,10,marker]);
+      const original={content:[{type:'image',mimeType:'image/png',data:bytes.toString('base64')}]};
+      const uploaded=await uploadImageResult(original,{operation:{operationId,workspaceId:f.workspaceId,epoch:Number(f.lease.epoch),bindingRevision:Number(f.lease.bindingRevision),tabInstanceId:String(f.lease.tabInstanceId)},send:body=>h.browser(f,'image',body)});
+      await h.browser(f,'reply',{operationId,phase:'SUCCEEDED',result:{operationId,status:'SUCCEEDED',effectState:'VERIFIED',data:uploaded}});
+      return {operationId,original};
+    }
+    const legacy=await transfer(37);
+    assert.deepEqual(await h.internal(stub,'/__fixture_media',{operationId:legacy.operationId}),{schema:1,format:'LEGACY',binaryRows:0});
+    await h.internal(stub,'/__fixture_runtime',{mode:'native'});
+    const path='/api/v1/admin/workspaces/'+f.workspaceId+'/storage-migration';
+    let native=false;
+    for(let step=0;step<128;step++) {
+      const state=await h.get(path);
+      if(state.stage==='NATIVE'){native=true;break;}
+      const workspace=await h.get('/api/v1/admin/workspaces/'+f.workspaceId);
+      await h.request(path,{expectedRevision:workspace.revision,action:'step'});
+    }
+    assert.equal(native,true);
+    const current=await transfer(43);
+    assert.deepEqual(await h.internal(stub,'/__fixture_media',{operationId:current.operationId}),{schema:2,format:'BLOB_V1',binaryRows:1});
+    await h.internal(stub,'/__fixture_runtime',{binary:false});
+    for(const image of [legacy,current]) {
+      const result=await h.internal(stub,'/internal/status',{workspaceId:f.workspaceId,operationId:image.operationId,bindingRevision:f.lease.bindingRevision,agentId:f.agentId});
+      assert.deepEqual(projectMcpImages(result).images,image.original.content);
+    }
+  } finally {await h.close();}
+});

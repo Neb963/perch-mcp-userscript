@@ -336,6 +336,19 @@ test('Blocked Reconnect opens Recovery instead of stranding the operator at TAB_
  assert.match(f.root.textContent??'',/Recovery/);
  assert.match(f.root.textContent??'',/Connection held \(TAB_BUSY\)/);
 });
+test('Recovery explains pending storage preparation without claiming empty holds or offering reconnect',async()=>{
+ const f=fixture(),delegate=f.client.request;
+ f.client.request=async(method,path,body)=>path.endsWith('/recovery')?{
+  schemaVersion:1,workspaceId:'workspace-1',action:'WAIT_FOR_STORAGE',storagePreparing:true,
+  blockingOperationsKnown:false,leaseClaimAvailable:false,blockingOperations:[],activeLease:null,
+ }:delegate(method,path,body);
+ await f.handle.open('Recovery');
+ assert.match(f.root.textContent??'',/Storage preparation pending/);
+ assert.match(f.root.textContent??'',/Preserve pending results/);
+ assert.ok([...f.root.querySelectorAll('button')].some(b=>b.textContent==='Check again'));
+ assert.equal([...f.root.querySelectorAll('button')].some(b=>b.textContent==='Connect now'),false);
+ assert.equal(f.requests.some(row=>row.method!=='GET'),false);
+});
 
 test('Recovery acknowledges one local journal and never clears peers',async()=>{
  const acknowledgments:string[]=[];

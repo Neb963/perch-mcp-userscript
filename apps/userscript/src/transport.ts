@@ -1,3 +1,4 @@
+import { NotificationChannel, type NotificationSocket, type NotificationTicket } from "./notifications.js";
 import type { KeyValueStore } from "./native-types.js";
 
 export interface TransportDiagnostic {
@@ -16,6 +17,7 @@ export class TransportError extends Error {
     readonly status = 0,
     readonly traceId?: string,
     readonly connectivityRetryAfterSeconds?: number,
+    readonly connectivityRetryable?: boolean,
   ) {
     super(message);
     this.name = "TransportError";
@@ -102,6 +104,7 @@ export class GatewayTransport {
   constructor(
     private readonly store: KeyValueStore,
     private readonly fetcher: typeof fetch = fetch,
+    private readonly socketFactory?: (url: string, protocols: string[]) => NotificationSocket,
   ) {}
   async initialize(): Promise<void> {
     const suggestion = await this.store.get<string>("perch:suggested-origin");
@@ -244,6 +247,27 @@ export class GatewayTransport {
       leaseSecret,
       options,
     );
+  }
+  notifications(lease: { workspaceId: string; epoch: number; tabInstanceId: string; leaseCredential: string }): NotificationChannel | undefined {
+    const origin = this.pairing?.origin;
+    const factory = this.socketFactory ?? (typeof WebSocket === "function"
+      ? ((url: string, protocols: string[]) => new WebSocket(url, protocols)) : undefined);
+    if (!origin || !factory) return;
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(lease.workspaceId) ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(lease.tabInstanceId) ||
+        !Number.isSafeInteger(lease.epoch) || lease.epoch < 1)
+      throw new TransportError("INVALID_INPUT", "Notification lease scope is invalid.");
+    const url = new URL("/api/v1/tab/socket", origin);
+    url.protocol = "wss:";
+    url.searchParams.set("workspaceId", lease.workspaceId);
+    return new NotificationChannel({
+      url: url.href,
+      requestTicket: async signal => await this.tab("/api/v1/tab/ticket", {
+        workspaceId: lease.workspaceId, epoch: lease.epoch, tabInstanceId: lease.tabInstanceId,
+      }, lease.leaseCredential, { signal, timeoutMs: 10_000 }) as NotificationTicket,
+      socket: factory,
+      retryDelayMs: () => this.connectivityRetryDelayMs(),
+    });
   }
   private async authenticated(
     role: "admin" | "execution",
@@ -509,15 +533,27 @@ export class GatewayTransport {
       const retry = response.status===503 && code==="GATEWAY_DEGRADED" &&
         typeof data==="object" && data!==null && "connectivityRetryAfterSeconds" in data &&
         data.connectivityRetryAfterSeconds===300 ? 300 : undefined;
+      // Only classified readiness corruption/configuration is terminal for
+      // connectivity. Generic operation retryable:false says nothing about
+      // safe connectivity recovery (including the explicit SQL quota hint).
+      const terminalReadiness = path === "/health" && response.status === 503 &&
+        code === "GATEWAY_DEGRADED" && retry === undefined &&
+        typeof data === "object" && data !== null && !Array.isArray(data) &&
+        "ok" in data && data.ok === false && "dependency" in data && data.dependency === "registry" &&
+        "retryable" in data && data.retryable === false && "reason" in data &&
+        typeof data.reason === "string" && ["REGISTRY_SCHEMA_INCOMPATIBLE",
+          "REGISTRY_CONFIGURATION_INVALID", "REGISTRY_STORAGE_CORRUPT"].includes(data.reason);
       if(retry && origin===this.pairing?.origin)
         this.retryConnectivityAt=Math.max(this.retryConnectivityAt,Date.now()+retry*1000);
       throw new TransportError(
         code,
-        retry ? "Daily gateway SQL allowance exhausted. Automatic connectivity retries are paused for up to five minutes."
+        terminalReadiness ? "Gateway storage or configuration needs repair. Automatic connectivity retries stopped; inspect readiness and diagnostics."
+          : retry ? "Daily gateway SQL allowance exhausted. Automatic connectivity retries are paused for up to five minutes."
           : `Gateway rejected the request (${code}). Refresh authoritative state before retrying.`,
         response.status,
         traceId,
         retry,
+        terminalReadiness ? false : undefined,
       );
     }
     return data;

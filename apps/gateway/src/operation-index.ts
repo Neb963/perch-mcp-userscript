@@ -82,8 +82,17 @@ export class OperationIndex<T extends IndexedOperation> {
   }
   private select(sql: string, ...args: number[]): Key[] { this.sync(); return this.db.query<Key>(sql,...args); }
   private load(rows: Key[]): T[] { return rows.map(({key}) => { const o=this.db.get<T>(key); if(!o)throw new Error("SQLITE_RECORD_CORRUPT"); return o; }); }
+  obligationKeys():Key[] {
+    this.sync();
+    const active=this.db.query<Key>("SELECT key FROM operation_index_v1 WHERE active=1 ORDER BY sequence LIMIT 9");
+    const pending=this.db.query<Key>("SELECT key FROM operation_index_v1 WHERE pending=1 ORDER BY created LIMIT 129");
+    const held=this.db.query<Key>("SELECT key FROM operation_index_v1 WHERE hold=1 ORDER BY created LIMIT 129");
+    if(active.length>8||pending.length>128||held.length>128)throw new Error("SQLITE_RECORD_CORRUPT");
+    return [...new Map([...active,...pending,...held].map(row=>[row.key,row])).values()];
+  }
   activeStats(): {argSize:number}[] {this.sync();return this.db.query<{argSize:number}>("SELECT argSize FROM operation_index_v1 WHERE active=1 ORDER BY sequence LIMIT 9");}
   running():boolean {return this.select("SELECT key FROM operation_index_v1 WHERE active=1 AND phase IN ('DISPATCHED','RUNNING') ORDER BY sequence LIMIT 1").length>0;}
+  admittedExists():boolean {return this.select("SELECT key FROM operation_index_v1 WHERE active=1 AND phase='ADMITTED' ORDER BY sequence LIMIT 1").length>0;}
   nextAdmitted():T|undefined {return this.load(this.select("SELECT key FROM operation_index_v1 WHERE active=1 AND phase='ADMITTED' ORDER BY sequence LIMIT 1"))[0];}
   pendingKeys():Key[] {return this.select("SELECT key FROM operation_index_v1 WHERE pending=1 ORDER BY created LIMIT 32");}
   pendingExists(): boolean { return this.select("SELECT key FROM operation_index_v1 WHERE pending=1 ORDER BY created LIMIT 1").length>0; }

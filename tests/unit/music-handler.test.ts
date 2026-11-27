@@ -140,3 +140,28 @@ test('idle music expiry physically removes chunks while retaining operation evid
     assert.equal(s.db.get<MusicOperation>('operation/op-a').operationId, 'op-a');
   } finally { Date.now = previous; }
 });
+
+test('Music canonical operation callbacks preserve extensions and never mutate stale legacy operation rows', async () => {
+  const s = setup();
+  const canonical = new Map([['op-a', { ...s.operation, sequence: 91, argsDigest: 'immutable-digest', extension: { nullable: null, original: true } }]]);
+  const handler = new MusicHandler(s.db, env, {
+    ...s.deps,
+    getOperation: id => structuredClone(canonical.get(id)),
+    putOperation: operation => { canonical.set(operation.operationId, structuredClone(operation)); },
+    generate: async () => { throw new MusicProviderError('EFFECT_UNKNOWN', 'synthetic uncertain generation', 'UNKNOWN'); },
+  });
+  await assert.rejects(handler.handle('/api/v1/tab/music', s.body, s.deps.getLease()!), code('EFFECT_UNKNOWN'));
+  assert.equal(canonical.get('op-a')!.phase, 'UNKNOWN');
+  assert.equal(canonical.get('op-a')!.sequence, 91);
+  assert.equal(canonical.get('op-a')!.argsDigest, 'immutable-digest');
+  assert.deepEqual(canonical.get('op-a')!.extension, { nullable: null, original: true });
+  assert.equal(s.db.get<MusicOperation>('operation/op-a').phase, 'RUNNING');
+});
+
+
+test('missing paid media expiry fails closed without regenerating or discarding retained bytes', async () => {
+  const s=setup();await s.handler.handle('/api/v1/tab/music',s.body,s.deps.getLease()!);
+  const journal=s.db.get<Record<string,unknown>>('music/journal/op-a');delete journal.expiresAt;s.db.put('music/journal/op-a',journal);
+  await assert.rejects(s.handler.handle('/api/v1/tab/music-result',{...s.body,offset:0},s.deps.getLease()!),/SQLITE_RECORD_CORRUPT/);
+  assert.equal(s.calls(),1);assert.ok(s.db.keys('music/chunk/op-a/').length>0);
+});

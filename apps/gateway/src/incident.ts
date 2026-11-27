@@ -218,7 +218,24 @@ export async function probeRegistryHealth(read: () => Promise<Response>): Promis
 }> {
   try {
     const upstream = await read();
-    if (upstream.ok) return { response: upstream };
+    if (upstream.ok) {
+      const body=await upstream.clone().json().catch(()=>undefined) as Record<string,unknown>|undefined;
+      const protocols=body?.protocolVersions;
+      if(upstream.status!==200||!body||body.ok!==true||body.version!==VERSION||body.schemaVersion!==1||
+          typeof body.paired!=='boolean'||typeof body.configured!=='boolean'||
+          !Array.isArray(protocols)||protocols.length===0||protocols.length>8||
+          protocols.some(value=>!['2026-07-28','2025-11-25','2025-06-18'].includes(String(value)))||
+          typeof body.providerWritesEnabled!=='boolean'||typeof body.nativeActionsEnabled!=='boolean'||
+          (body.storageSchemaVersion!==undefined&&![1,2].includes(Number(body.storageSchemaVersion)))) {
+        const traceId=crypto.randomUUID();
+        return {response:degraded(traceId,'REGISTRY_STORAGE_CORRUPT','UNKNOWN','CORE_VALIDATE','unavailable'),failure:{traceId}};
+      }
+      return {response:Response.json({ok:true,version:VERSION,schemaVersion:1,
+        paired:body.paired,configured:body.configured,protocolVersions:protocols,
+        providerWritesEnabled:body.providerWritesEnabled,nativeActionsEnabled:body.nativeActionsEnabled,
+        ...(body.storageSchemaVersion===undefined?{}:{storageSchemaVersion:body.storageSchemaVersion})},
+        {headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}})};
+    }
     const record = await upstream.clone().json().catch(() => null) as
       { traceId?: unknown } | null;
     const traceId = typeof record?.traceId === 'string' && TRACE.test(record.traceId)

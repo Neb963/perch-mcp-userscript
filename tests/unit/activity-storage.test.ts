@@ -298,7 +298,8 @@ test("actual Registry terminal, migration, old-client paging and exact receipt d
   try {
     const credential = "synthetic-activity-admin".padEnd(64, "x");
     f.db.put("core", { schemaVersion: 1, revision: 1, policyRevision: 1, paused: false,
-      issuer: "https://activity.test", paired: true, adminHash: await digest(credential), credentialEpoch: 1 });
+      issuer: "https://activity.test", paired: true, adminHash: await digest(credential),
+      executionHash:"f".repeat(64), browserInstallationId:"synthetic-browser", credentialEpoch: 1 });
     f.db.put("workspace/workspace", { id: "workspace", label: "Synthetic", revision: 1,
       bindingRevision: 1, permissions: ["READ_SOURCE"], paused: false, binding: null, epoch: 1 });
     const registry = new Registry({ storage: f.storage } as DurableObjectState,
