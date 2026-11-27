@@ -107,12 +107,28 @@ export function registryFailureReason(error: unknown): RegistryFailureReason {
   if (/sqlite|database|storage|durable object namespace|durable object binding/.test(message)) return 'REGISTRY_STORAGE_UNAVAILABLE';
   return 'REGISTRY_UNCLASSIFIED';
 }
-function degraded(traceId: string, reason: RegistryFailureReason): Response {
+const QUOTA_DIMENSIONS = ['DURATION', 'ROWS_READ', 'ROWS_WRITTEN', 'REQUESTS', 'SPENDING', 'STORAGE', 'UNKNOWN'] as const;
+type QuotaDimension = typeof QUOTA_DIMENSIONS[number];
+function knownQuota(value: unknown): value is QuotaDimension {
+  return typeof value === 'string' && (QUOTA_DIMENSIONS as readonly string[]).includes(value);
+}
+export function registryQuotaDimension(error: unknown): QuotaDimension {
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  if (/spending|billing|budget/.test(message)) return 'SPENDING';
+  if (/rows? (?:read|reads)|read(?:s|ing)? rows?/.test(message)) return 'ROWS_READ';
+  if (/rows? (?:written|write|writes)|writ(?:e|es|ing) rows?/.test(message)) return 'ROWS_WRITTEN';
+  if (/duration|gb.s|gigabyte.second/.test(message)) return 'DURATION';
+  if (/requests?/.test(message)) return 'REQUESTS';
+  if (/storage|disk/.test(message)) return 'STORAGE';
+  return 'UNKNOWN';
+}
+function degraded(traceId: string, reason: RegistryFailureReason, dimension: QuotaDimension = 'UNKNOWN'): Response {
   return Response.json({ ok: false, code: 'GATEWAY_DEGRADED',
     dependency: 'registry', retryable: ![
       'REGISTRY_SCHEMA_INCOMPATIBLE', 'REGISTRY_CONFIGURATION_INVALID',
       'REGISTRY_STORAGE_CORRUPT',
-    ].includes(reason), traceId, version: VERSION, reason },
+    ].includes(reason), traceId, version: VERSION, reason,
+    ...(reason === "REGISTRY_QUOTA" ? { quotaDimension: dimension } : {}) },
     {status: 503, headers: {'Cache-Control':'no-store'}});
 }
 
@@ -129,10 +145,11 @@ export async function probeRegistryHealth(read: () => Promise<Response>): Promis
       ? record.traceId : crypto.randomUUID();
     const classified = upstream.headers.get('X-Perch-Registry-Failure');
     const reason = knownReason(classified) ? classified : 'REGISTRY_HTTP_ERROR';
-    return { response: degraded(traceId, reason), failure: { traceId } };
+    const quota = upstream.headers.get('X-Perch-Registry-Quota');
+    return { response: degraded(traceId, reason, knownQuota(quota) ? quota : 'UNKNOWN'), failure: { traceId } };
   } catch (error) {
     const traceId = crypto.randomUUID();
-    return { response: degraded(traceId, registryFailureReason(error)),
+    return { response: degraded(traceId, registryFailureReason(error), registryQuotaDimension(error)),
       failure: { traceId, error } };
   }
 }

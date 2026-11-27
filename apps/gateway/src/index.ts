@@ -1,3 +1,4 @@
+import { pollWaitMs, paceIdlePoll } from "./poll-pacing.js";
 import { projectMcpImages, type McpImageBlock } from "./mcp-media.js";
 import { incident, reportIncident, probeRegistryHealth } from "./incident.js";
 import {
@@ -529,9 +530,11 @@ async function route(
       !/^[A-Za-z0-9_-]{1,128}$/.test(body.workspaceId)
     )
       throw new ApiError("INVALID_INPUT", "Workspace ID required.");
-    return workspace(env, body.workspaceId).fetch(
+    const waitMs = path === "/api/v1/tab/poll" ? pollWaitMs(body.waitMs) : 0;
+    const response = await workspace(env, body.workspaceId).fetch(
       request as never,
-    ) as unknown as Promise<Response>;
+    ) as unknown as Response;
+    return path === "/api/v1/tab/poll" ? paceIdlePoll(response, waitMs) : response;
   }
   const config = await rpc<Configuration>(registry(env), "/internal/config");
   if (!config.issuer || u.origin !== config.issuer)

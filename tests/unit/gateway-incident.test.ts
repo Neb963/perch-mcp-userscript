@@ -71,3 +71,12 @@ test('public readiness classifies quota and storage failures without exposing ra
   const forged=await probeRegistryHealth(async()=>Response.json({traceId},{status:500,headers:{'X-Perch-Registry-Failure':'secret-fixture'}}));
   assert.equal((await forged.response.json() as {reason:string}).reason,'REGISTRY_HTTP_ERROR');
 });
+
+test("quota dimensions are allowlisted and omit raw errors", async () => {
+  const result=await probeRegistryHealth(async()=>{throw new Error("daily row read limit exceeded SECRET");});
+  const data=await result.response.json() as {quotaDimension:string};
+  assert.equal(data.quotaDimension,"ROWS_READ");
+  assert.doesNotMatch(JSON.stringify(data),/SECRET/);
+  const forged=await probeRegistryHealth(async()=>Response.json({}, {status:503,headers:{"X-Perch-Registry-Failure":"REGISTRY_QUOTA","X-Perch-Registry-Quota":"secret"}}));
+  assert.equal((await forged.response.json() as {quotaDimension:string}).quotaDimension,"UNKNOWN");
+});

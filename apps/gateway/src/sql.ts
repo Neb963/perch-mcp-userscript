@@ -1,4 +1,5 @@
 import type { DurableObjectStorage } from "@cloudflare/workers-types";
+export const WORKSPACE_JOURNAL_IDLE_KEY = "workspace-journal-idle/v1";
 /** SQLite-backed chunked records; every mutation runs within transactionSync. */
 export class SqlRecords {
   constructor(private storage: DurableObjectStorage) {
@@ -23,6 +24,7 @@ export class SqlRecords {
   }
   put(key: string, value: unknown): void {
     const s = JSON.stringify(value);
+    this.invalidateJournalIdle(key);
     this.storage.sql.exec("DELETE FROM records WHERE key=?", key);
     let offset = 0,
       part = 0;
@@ -41,7 +43,12 @@ export class SqlRecords {
     }
   }
 
+  private invalidateJournalIdle(key: string): void {
+    if (key.startsWith("operation/"))
+      this.storage.sql.exec("DELETE FROM records WHERE key=?", WORKSPACE_JOURNAL_IDLE_KEY);
+  }
   delete(key: string): void {
+    this.invalidateJournalIdle(key);
     this.storage.sql.exec("DELETE FROM records WHERE key=?", key);
   }
   keys(prefix: string): string[] {

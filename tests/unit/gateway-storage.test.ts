@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { SqlRecords } from "../../apps/gateway/src/sql.js";
+import { SqlRecords, WORKSPACE_JOURNAL_IDLE_KEY } from "../../apps/gateway/src/sql.js";
 import { Registry } from "../../apps/gateway/src/registry.js";
 import { Workspace } from "../../apps/gateway/src/workspace.js";
 import type {
@@ -12,6 +12,7 @@ import type { Env } from "../../apps/gateway/src/common.js";
 function fixture() {
   const db = new DatabaseSync(":memory:");
   let alarm: number | null = null;
+  const counts = { operationScans: 0 };
   const storage = {
     async getAlarm() {
       return alarm;
@@ -24,6 +25,7 @@ function fixture() {
     },
     sql: {
       exec(sql: string, ...args: (string | number)[]) {
+        if (sql.includes("SELECT DISTINCT key") && args[0] === "operation/") counts.operationScans++;
         const statement = db.prepare(sql);
         const rows = sql.trim().startsWith("SELECT")
           ? statement.all(...args)
@@ -43,7 +45,7 @@ function fixture() {
       }
     },
   } as unknown as DurableObjectStorage;
-  return { db, storage, state: { storage } as DurableObjectState };
+  return { db, storage, counts, state: { storage } as DurableObjectState };
 }
 test("SQLite chunks preserve Unicode at boundaries and rollback atomically", () => {
   const f = fixture();
@@ -496,4 +498,32 @@ test("idle Workspace maintenance neither recreates backoff nor rewrites schema",
     assert.equal(db.get("schema"), 1);
     assert.equal(await f.storage.getAlarm(), null);
   } finally { f.db.close(); }
+});
+
+test("idle journal survives cold starts and invalidates on every operation mutation", async () => {
+  const local = fixture();
+  try {
+    const records = new SqlRecords(local.storage);
+    for (let i = 0; i < 150; i++)
+      records.put("operation/" + i, { ...opFixture("SUCCEEDED"), operationId: String(i),
+        terminalAt: Date.now(), terminalNotified: true, result: undefined });
+    const env = { REGISTRY: { idFromName: () => "installation", get: () => ({
+      fetch: async () => Response.json({ ok: true }),
+    }) } } as unknown as Env;
+    await new Workspace(local.state, env).alarm();
+    assert.ok(records.get(WORKSPACE_JOURNAL_IDLE_KEY));
+    const baseline = local.counts.operationScans;
+    for (let i = 0; i < 10; i++) await new Workspace(local.state, env).alarm();
+    assert.equal(local.counts.operationScans, baseline);
+    assert.throws(() => records.transaction(() => {
+      records.put("operation/rollback", opFixture());
+      throw new Error("rollback");
+    }));
+    assert.ok(records.get(WORKSPACE_JOURNAL_IDLE_KEY));
+    records.put("operation/fixture-operation", opFixture());
+    assert.equal(records.get(WORKSPACE_JOURNAL_IDLE_KEY), undefined);
+    await new Workspace(local.state, env).alarm();
+    assert.equal(records.get<{phase:string}>("operation/fixture-operation")?.phase, "UNKNOWN");
+    assert.ok(local.counts.operationScans > baseline);
+  } finally { local.db.close(); }
 });
