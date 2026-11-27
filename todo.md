@@ -311,3 +311,5 @@ Incident confirmed by Cloudflare dashboard (5.93M rows read) and sanitized runti
 - Authenticate claims before local maintenance and guard writes; fence expired/superseded claim completions. Failed auxiliary outbox maintenance does not rewrite a committed operation response. New derived tables use compact WITHOUT ROWID layout; canonical tables unchanged.
 
 - Epoch 18: scoped internal configuration to the requested Agent on MCP routes; empty approval refresh 15s, pending 4s, failures back off to 60s. Userscript 0.1.18 / Worker 0.1.12 candidate. Test harness now disposes partially initialized Miniflare instances and CI has an explicit test-step deadline.
+
+- Miniflare CI run 46002237270: 374/375 passed; all SQL tests pass (24 reads/0 writes per idle poll both empty and after 150 operations; lifecycle 190–194 reads and 70–75 writes total, Activity 108 reads/0 writes per 100 entries). Preserve responsive approvals during first 30s of Agents view. Add read-only indexed idle fast path with explicit dirty/active/outbox/expiry/retention/alarm checks; tighten idle budget to 10 reads. No production deployment until full green CI.

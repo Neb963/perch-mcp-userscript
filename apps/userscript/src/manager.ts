@@ -1354,6 +1354,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     // Never overlap requests: a stalled gateway must not pile up polling
     // calls, reorder snapshots or amplify its own outage.
     let approvalFailures = 0;
+    const approvalWatchStarted = Date.now();
     const pollApprovals = async () => {
       if (own !== generation || destroyed || !opened || tab !== "Agents") return;
       approvalRefreshTimer = undefined;
@@ -1369,7 +1370,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       if (own !== generation || destroyed || !opened || tab !== "Agents") return;
       const delay = approvalFailures
         ? Math.min(60000,4000*2**Math.min(approvalFailures,4))
-        : pendingApprovalCount ? 4000 : 15000;
+        : pendingApprovalCount || Date.now()-approvalWatchStarted < 30000 ? 4000 : 15000;
       approvalRefreshTimer = setTimeout(() => void pollApprovals(), delay);
       (approvalRefreshTimer as unknown as { unref?: () => void }).unref?.();
     };

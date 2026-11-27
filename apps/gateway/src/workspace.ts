@@ -147,15 +147,16 @@ export class Workspace {
   }
   private async fetchMetered(request: Request): Promise<Response> {
     let response: Response;
+    const maintenance = { settled: false };
     try {
-      response = await this.route(request);
+      response = await this.route(request, maintenance);
     } catch (error) {
       response = errorResponse(error);
     }
     // Invalid public requests must not amplify maintenance work. An alarm or
     // next authorized request drains any pending canonical terminal state.
     const path = new URL(request.url).pathname;
-    if (path !== "/internal/sql-usage" && (response.ok || path.startsWith("/internal/"))) {
+    if (!maintenance.settled && path !== "/internal/sql-usage" && (response.ok || path.startsWith("/internal/"))) {
       try {await this.drainTerminalOutbox();}
       catch {console.error(JSON.stringify({kind:"workspace-maintenance-deferred"}));}
     }
@@ -383,7 +384,33 @@ export class Workspace {
         : { data: op.result }),
     };
   }
-  private async route(request: Request): Promise<Response> {
+  /** Read-only shortcut; never reconcile, authorize or dispatch from a derived snapshot.
+   * Dirty records, active work, outbox, expired deadlines, missing alarm or
+   * retention backlog fall through to the normal bounded maintenance path. */
+  private async idlePollState(): Promise<{ lastActivityAt: number } | undefined> {
+    const row = this.db.query<{ operationDue: number | null; maintenanceDue: number | null; lastActivity: number | null }>(
+      `SELECT (SELECT due FROM operation_index_v1 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS operationDue,
+        (SELECT due FROM workspace_maintenance_v1 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS maintenanceDue,
+        (SELECT terminal FROM operation_index_v1 ORDER BY terminal DESC LIMIT 1) AS lastActivity
+       FROM operation_index_state_v1 WHERE id=1 AND eligible<=1000
+        AND NOT EXISTS(SELECT 1 FROM operation_dirty_v1 LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_dirty_v1 LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM operation_index_v1 WHERE active=1 LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM operation_index_v1 WHERE pending=1 LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM records WHERE key IN ('outbox-backoff','outbox-retry-at') LIMIT 1)`
+    )[0];
+    if(!row)return undefined;
+    const due=Math.min(row.operationDue??Infinity,row.maintenanceDue??Infinity);
+    if(due<=Date.now())return undefined;
+    if(Number.isFinite(due)){
+      const alarm=await this.state.storage.getAlarm();
+      // Never replace an alarm using a potentially stale snapshot after await.
+      // A missing/late alarm is repaired by ordinary maintenance instead.
+      if(alarm===null||alarm<=Date.now()||alarm>due+1000||due<=Date.now())return undefined;
+    }
+    return {lastActivityAt:row.lastActivity??0};
+  }
+  private async route(request: Request, maintenance: {settled:boolean}): Promise<Response> {
     const path = new URL(request.url).pathname,
       b = await parseBody(request);
     if (path === "/internal/sql-usage") return json(this.db.snapshotUsage());
@@ -701,6 +728,14 @@ export class Workspace {
         refreshed.claimedAt ??= Date.now();
         refreshed.expiresAt = l.expiresAt = Date.now() + 180000;
         this.db.put("lease", refreshed);
+      }
+      const idle=await this.idlePollState();
+      if(idle){
+        // No work was eligible at the snapshot. A concurrent admission is
+        // independently persisted and observed by the next ordinary poll.
+        maintenance.settled=true;
+        const idleFor=Date.now()-Math.max(refreshed.claimedAt??Date.now(),idle.lastActivityAt);
+        return json({operations:[],expiresAt:l.expiresAt,idleWaitMs:idleFor>=120000?15000:5000});
       }
       this.expire();
       if(this.journal.running())return json({operations:[],expiresAt:l.expiresAt,idleWaitMs:5000});

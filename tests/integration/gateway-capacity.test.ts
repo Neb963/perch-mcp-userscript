@@ -493,7 +493,7 @@ test("SQL cursor budgets do not scale with terminal history while idle or active
     assert.ok(registryLast.reads<=registryFirst.reads+20,"Registry ordinary operation cost must not scale with history");
     assert.ok(lastCycle.reads<=firstCycle.reads+20, "ordinary cycle history must not amplify reads");
     assert.ok(idleAfter.reads<=idleBefore.reads+10, "idle history must not amplify reads");
-    assert.ok(idleAfter.reads<=30 && active.reads<=40 && status.reads<=35);
+    assert.ok(idleAfter.reads<=10 && active.reads<=40 && status.reads<=35);
     assert.ok(idleAfter.writes<=2 && active.writes<=2 && invalid.writes===0);
     assert.ok(invalid.reads<=5);
   } finally {await h.close();}
