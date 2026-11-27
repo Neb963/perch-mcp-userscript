@@ -150,7 +150,9 @@ function degraded(traceId: string, reason: RegistryFailureReason, dimension: Quo
       'REGISTRY_SCHEMA_INCOMPATIBLE', 'REGISTRY_CONFIGURATION_INVALID',
       'REGISTRY_STORAGE_CORRUPT',
     ].includes(reason), traceId, version: VERSION, reason, stage, signal,
-    ...(reason === "REGISTRY_QUOTA" ? { quotaDimension: dimension } : {}) },
+    ...(reason === "REGISTRY_QUOTA" ? { quotaDimension: dimension } : {}),
+    ...(reason === "REGISTRY_QUOTA" && (dimension==="ROWS_READ"||dimension==="ROWS_WRITTEN")
+      ? {connectivityRetryAfterSeconds:300} : {}) },
     {status: 503, headers: {'Cache-Control':'no-store'}});
 }
 

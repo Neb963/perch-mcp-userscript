@@ -182,3 +182,20 @@ test('gateway 500 and bootstrap failures persist across reload without retaining
   assert.ok(history.some(e=>e.code==='WORKSPACE_LOOKUP:INTERNAL_ERROR'&&e.method==='STATE'));
   assert.doesNotMatch(JSON.stringify(history),/DO-NOT-STORE-TOKEN/);
 });
+
+test("explicit provider SQL quota hint slows connectivity only; successful health clears it",async()=>{
+  let calls=0;
+  const fetcher=(async()=>{
+    calls++;
+    if(calls===1)return Response.json({adminCredential:"admin",executionCredential:"execution"});
+    if(calls===2)return Response.json({code:"GATEWAY_DEGRADED",connectivityRetryAfterSeconds:300},{status:503});
+    return Response.json({ok:true});
+  }) as typeof fetch;
+  const transport=new GatewayTransport(new MemoryStore(),fetcher);
+  await transport.pair("https://perch.example.workers.dev","a".repeat(64));
+  await assert.rejects(transport.request("GET","/api/v1/admin/state"),(error:unknown)=> typeof error==="object" && error!==null && "connectivityRetryAfterSeconds" in error && error.connectivityRetryAfterSeconds===300);
+  assert.ok(transport.connectivityRetryDelayMs()>299000);
+  assert.equal(calls,2);
+  await transport.health();
+  assert.equal(transport.connectivityRetryDelayMs(),0);
+});

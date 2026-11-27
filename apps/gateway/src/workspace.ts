@@ -330,12 +330,11 @@ export class Workspace {
       for (const {key} of this.journal.excessRetention()) this.db.delete(key);
     });
   }
-  private async lease(
-    request: Request,
+  private lease(
+    hash: string,
     b: Record<string, unknown>,
     terminalOnly = false,
-  ): Promise<Lease> {
-    const hash = await digest(bearer(request));
+  ): Lease {
     let l = this.db.get<Lease>("lease");
     if (
       terminalOnly &&
@@ -675,8 +674,10 @@ export class Workspace {
       }
       return json(this.summary(op));
     }
-    const l = await this.lease(
-      request,
+    // Hash asynchronously before reading and validating the current lease.
+    // There is no asynchronous gap between the validated read and poll renewal.
+    const l = this.lease(
+      await digest(bearer(request)),
       b,
       path === "/api/v1/tab/reply" && b.phase !== "RUNNING",
     );
@@ -719,11 +720,7 @@ export class Workspace {
     if (path === "/api/v1/tab/poll") {
       // Recheck registry policy through an execution credential-independent lease revision probe at dispatch.
       // Never sleep inside a Durable Object. The outer Worker paces empty responses.
-      const refreshed = this.db.get<Lease>("lease");
-      if (!refreshed || refreshed.epoch !== l.epoch ||
-          refreshed.tabInstanceId !== l.tabInstanceId || refreshed.expiresAt <= Date.now())
-        throw new ApiError("STALE_EPOCH", "Lease changed during polling.", 409);
-      l.expiresAt = refreshed.expiresAt;
+      const refreshed = l;
       if (l.expiresAt - Date.now() <= 120000 || !refreshed.claimedAt) {
         refreshed.claimedAt ??= Date.now();
         refreshed.expiresAt = l.expiresAt = Date.now() + 180000;

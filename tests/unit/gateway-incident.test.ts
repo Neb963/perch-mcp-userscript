@@ -97,3 +97,15 @@ test("generic limit errors are not evidence of account quota exhaustion", async(
   const upstream=await probeRegistryHealth(async()=>Response.json({}, {status:500,headers:{"X-Perch-Registry-Stage":"CORE_READ","X-Perch-Registry-Signal":"sqlite database error"}}));
   assert.equal((await upstream.response.json() as {stage:string}).stage,"CORE_READ");
 });
+
+test("exact provider quota signature emits connectivity-only delay, not mutation retry permission",async()=>{
+  const {errorResponse}=await import("../../apps/gateway/src/common.js");
+  const r=errorResponse(new Error("exceeded allowed rows read in durable objects free tier"));
+  assert.equal(r.status,503);
+  const b=await r.json() as Record<string,unknown>;
+  assert.equal(b.connectivityRetryAfterSeconds,300);
+  assert.equal(b.retryable,false);
+  assert.equal(b.code,"GATEWAY_DEGRADED");
+  const generic=await errorResponse(new Error("limit exceeded")).json() as Record<string,unknown>;
+  assert.equal(generic.connectivityRetryAfterSeconds,undefined);
+});

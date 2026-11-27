@@ -81,7 +81,7 @@ async function start(): Promise<void> {
   function retryNativeBootstrap():void{
     if(closing || bootstrapTimer || !transport.configuration().paired)return;
     const base=Math.min(60000,2000*2**Math.min(bootstrapRetryAttempt++,5));
-    const delay=base+Math.floor(Math.random()*Math.min(1000,base/4));
+    const delay=Math.max(transport.connectivityRetryDelayMs(),base+Math.floor(Math.random()*Math.min(1000,base/4)));
     bootstrapTimer=setTimeout(()=>{
       bootstrapTimer=undefined;
       if(controller.diagnostics().leasePresent)return;
@@ -157,7 +157,7 @@ async function start(): Promise<void> {
   function scheduleReconnect(expedite=false): void {
     if(closing || !reconnectWorkspace || reconnectTimer) return;
     const capturedWorkspace=reconnectWorkspace,epoch=manualConnectionEpoch;
-    const delay=expedite?250:Math.min(60000,1000*2**Math.min(reconnectAttempt++,6));
+    const delay=Math.max(transport.connectivityRetryDelayMs(),expedite?250:Math.min(60000,1000*2**Math.min(reconnectAttempt++,6)));
     reconnectTimer=setTimeout(async()=>{
       reconnectTimer=undefined;
       if(closing || epoch!==manualConnectionEpoch ||
@@ -349,6 +349,7 @@ async function start(): Promise<void> {
   async function resumeBoundEditor(): Promise<void> {
     if (initializationError || !transport.configuration().paired || closing ||
         bootstrapRunning || controller.diagnostics().leasePresent)return;
+    if(transport.connectivityRetryDelayMs()>0){retryNativeBootstrap();return;}
     bootstrapRunning=true;
     const epoch = manualConnectionEpoch;
     bootstrapPhase='NATIVE_EDITOR';bootstrapCode=null;bootstrapWorkspace=null;

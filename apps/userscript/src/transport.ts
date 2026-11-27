@@ -15,6 +15,7 @@ export class TransportError extends Error {
     message: string,
     readonly status = 0,
     readonly traceId?: string,
+    readonly connectivityRetryAfterSeconds?: number,
   ) {
     super(message);
     this.name = "TransportError";
@@ -59,6 +60,8 @@ export function gatewayOrigin(value: string): string {
 }
 /** Isolated-context fetch; redirect:error prevents credential forwarding BEFORE any redirect. */
 export class GatewayTransport {
+  private retryConnectivityAt = 0;
+  connectivityRetryDelayMs(): number { return Math.max(0,this.retryConnectivityAt-Date.now()); }
   private readonly recent: TransportDiagnostic[] = [];
   private readonly preservedFailures: TransportDiagnostic[] = [];
   private persistence: Promise<void> = Promise.resolve();
@@ -156,6 +159,7 @@ export class GatewayTransport {
       throw new TransportError("AUTH_REQUIRED", "Pair a gateway first.");
     const target=gatewayOrigin(origin);
     const response=await this.send(target, "GET", "/health");
+    if(target===this.pairing?.origin)this.retryConnectivityAt=0;
     if(target===this.pairing?.origin && response && typeof response==='object') {
       const value=(response as Record<string,unknown>).providerWritesEnabled;
       const nativeActions=(response as Record<string,unknown>).nativeActionsEnabled;
@@ -502,11 +506,18 @@ export class GatewayTransport {
       const traceId = typeof data === "object" && data !== null &&
         "traceId" in data && typeof data.traceId === "string" &&
         /^[0-9a-f-]{36}$/.test(data.traceId) ? data.traceId : undefined;
+      const retry = response.status===503 && code==="GATEWAY_DEGRADED" &&
+        typeof data==="object" && data!==null && "connectivityRetryAfterSeconds" in data &&
+        data.connectivityRetryAfterSeconds===300 ? 300 : undefined;
+      if(retry && origin===this.pairing?.origin)
+        this.retryConnectivityAt=Math.max(this.retryConnectivityAt,Date.now()+retry*1000);
       throw new TransportError(
         code,
-        `Gateway rejected the request (${code}). Refresh authoritative state before retrying.`,
+        retry ? "Daily gateway SQL allowance exhausted. Automatic connectivity retries are paused for up to five minutes."
+          : `Gateway rejected the request (${code}). Refresh authoritative state before retrying.`,
         response.status,
         traceId,
+        retry,
       );
     }
     return data;
