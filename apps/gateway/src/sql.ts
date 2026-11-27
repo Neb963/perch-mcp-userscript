@@ -44,7 +44,7 @@ export class SqlRecords {
 
   enableJournalIdleInvalidation(): void {
     // Persist in SQLite, so even previous binaries or direct SQL writes invalidate the hint.
-    for (const [event, row] of [["INSERT", "NEW"], ["DELETE", "OLD"], ["UPDATE", "NEW"]]) {
+    for (const [event, row] of [["INSERT", "NEW"], ["DELETE", "OLD"], ["UPDATE", "NEW"]] as const) {
       this.storage.sql.exec(`CREATE TRIGGER IF NOT EXISTS journal_idle_${event.toLowerCase()} AFTER ${event} ON records
         WHEN ${row}.key LIKE 'operation/%'${event === "UPDATE" ? " OR OLD.key LIKE 'operation/%'" : ""}
         BEGIN DELETE FROM records WHERE key='workspace-journal-idle/v1'; END`);
