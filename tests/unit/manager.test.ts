@@ -323,7 +323,7 @@ test('Blocked Reconnect opens Recovery instead of stranding the operator at TAB_
  }:delegate(method,path,body);
  await f.handle.open('Workspaces');
  click(f.root,'Reconnect');
- await until(()=>/Another document.s lease is active/.test(f.root.textContent??''));
+ await until(()=>/Another editor has the lease/.test(f.root.textContent??''));
  assert.match(f.root.textContent??'',/Recovery/);
  assert.match(f.root.textContent??'',/Reconnect blocked \(TAB_BUSY\)/);
 });
