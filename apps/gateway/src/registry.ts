@@ -356,13 +356,16 @@ export class Registry {
     }
     if (path === "/internal/config") {
       const c = this.core();
+      const scope = request.method === "POST" ? await request.json() as {agentId?:unknown} : undefined;
+      if (scope && (typeof scope.agentId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(scope.agentId)))
+        throw new ApiError("INVALID_INPUT","Invalid internal configuration scope.",400);
+      const keys = scope ? ["agent/"+scope.agentId] : this.db.keys("agent/");
       return json({
         issuer: c.issuer,
         paired: c.paired,
-        resources: this.db
-          .keys("agent/")
-          .map((k) => this.db.get<AgentRecord>(k))
-          .filter((a) => !a.suspended)
+        resources: keys
+          .map((k) => this.db.get<AgentRecord|undefined>(k))
+          .filter((a):a is AgentRecord => !!a && !a.suspended)
           .map((a) => a.endpoint),
         version: VERSION,
         schemaVersion: 1,

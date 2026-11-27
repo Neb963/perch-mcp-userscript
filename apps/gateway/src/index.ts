@@ -536,7 +536,13 @@ async function route(
     ) as unknown as Response;
     return path === "/api/v1/tab/poll" ? paceIdlePoll(response, waitMs) : response;
   }
-  const config = await rpc<Configuration>(registry(env), "/internal/config");
+  const match =
+    /^\/(?:\.well-known\/oauth-protected-resource\/)?mcp\/([a-zA-Z0-9_-]+)$/.exec(
+      path,
+    );
+  const config = await rpc<Configuration>(
+    registry(env), "/internal/config", match ? {agentId:match[1]} : undefined,
+  );
   if (!config.issuer || u.origin !== config.issuer)
     throw new ApiError(
       "SETUP_REQUIRED",
@@ -777,10 +783,6 @@ async function route(
     }
     return callbackRedirect(completed.redirectTo);
   }
-  const match =
-    /^\/(?:\.well-known\/oauth-protected-resource\/)?mcp\/([a-zA-Z0-9_-]+)$/.exec(
-      path,
-    );
   if (match) {
     const agentId = match[1]!,
       resource = config.issuer + "/mcp/" + agentId;

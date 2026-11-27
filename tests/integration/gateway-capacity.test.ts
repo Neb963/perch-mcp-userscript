@@ -518,3 +518,19 @@ test("Registry Activity reads only one page and preserves unresolved overlay",as
     assert.equal((next.items as unknown[]).length,50);
   }finally{await h.close();}
 });
+
+test("MCP configuration is scoped to exactly one Agent without scanning others", async()=>{
+  const h=await createCapacityHarness(20);
+  try {
+    const f=h.fixtures[0]!;
+    const usage=async()=>await h.internal(h.registry,"/internal/sql-usage",{}) as unknown as {reads:number;writes:number};
+    const before=await usage();
+    const scoped=await h.internal(h.registry,"/internal/config",{agentId:f.agentId});
+    const after=await usage();
+    assert.deepEqual(scoped.resources,["https://capacity.test/mcp/"+f.agentId]);
+    assert.ok(after.reads-before.reads<=8);
+    assert.equal(after.writes-before.writes,0);
+    const unknown=await h.internal(h.registry,"/internal/config",{agentId:"nonexistent"});
+    assert.deepEqual(unknown.resources,[]);
+  } finally {await h.close();}
+});
