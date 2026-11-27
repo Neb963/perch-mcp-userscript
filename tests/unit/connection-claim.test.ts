@@ -75,3 +75,46 @@ test('Stop during an in-flight claim fences late lease and releases it without r
  assert.equal(releases.length,1);
  assert.equal(releases[0]!.credential,'late-secret');
 });
+
+test('gateway 500 during a valid lease degrades heartbeat without permanently blocking the agent',async()=>{
+ const f=fixture();
+ const lease={workspaceId:'w',epoch:1,bindingRevision:1,
+   tabInstanceId:f.controller.tabInstanceId,leaseCredential:'fixture-only',
+   expiresAt:Date.now()+120000,permissions:['READ_SOURCE']};
+ const internal=f.controller as unknown as {
+   lease:typeof lease;stopped:boolean;renew:(v:typeof lease)=>Promise<void>;
+ };
+ internal.lease=lease;internal.stopped=false;
+ f.transport.tab=async()=>{throw new TransportError('INTERNAL_ERROR','synthetic registry outage',500);};
+ await internal.renew(lease);
+ assert.equal(f.controller.diagnostics().connection,'degraded');
+ assert.equal(f.controller.diagnostics().stopped,false);
+ assert.equal(f.controller.diagnostics().leasePresent,true);
+ lease.expiresAt=Date.now()-1;
+ await internal.renew(lease);
+ assert.equal(f.controller.diagnostics().connection,'offline',
+   'expiry during a gateway outage must initiate reconnect, not require operator recovery');
+});
+
+test('HTTP 500 during read-only poll retries the same lease, without a second claim or effect replay',async()=>{
+ const f=fixture();
+ const lease={workspaceId:'w',epoch:1,bindingRevision:1,
+   tabInstanceId:f.controller.tabInstanceId,leaseCredential:'fixture-only',
+   expiresAt:Date.now()+120000,permissions:['READ_SOURCE']};
+ const internal=f.controller as unknown as {
+   lease:typeof lease;stopped:boolean;poll:()=>Promise<void>;
+ };
+ internal.lease=lease;internal.stopped=false;
+ let requests=0;
+ f.transport.tab=async(path)=>{
+   assert.equal(path,'/api/v1/tab/poll');
+   requests++;
+   if(requests===1)throw new TransportError('INTERNAL_ERROR','synthetic outage',500);
+   internal.stopped=true;
+   return {operations:[],expiresAt:lease.expiresAt};
+ };
+ await internal.poll();
+ assert.equal(requests,2);
+ assert.ok(f.states.some(s=>s.connection==='degraded'));
+ assert.equal(f.paths.includes('/api/v1/tab/claim'),false);
+});

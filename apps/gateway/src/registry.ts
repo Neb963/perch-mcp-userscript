@@ -24,6 +24,7 @@ import {
   type Env,
 } from "./common.js";
 import { SqlRecords } from "./sql.js";
+import { incident, persistIncident } from "./incident.js";
 import { requiresGeneratorReservation } from "../../../packages/contracts/src/effect-policy.js";
 import { resourceAdmin, resourceTool } from "./resources.js";
 export interface WorkspaceRecord {
@@ -226,15 +227,21 @@ export class Registry {
     try {
       return await this.route(request);
     } catch (error) {
-      return errorResponse(
+      const traceId = crypto.randomUUID();
+      const response = errorResponse(
         error instanceof ResourceError
-          ? new ApiError(
-              error.code,
-              error.message,
-              error.code === "RESOURCE_NOT_FOUND" ? 404 : 409,
-            )
+          ? new ApiError(error.code, error.message,
+              error.code === "RESOURCE_NOT_FOUND" ? 404 : 409)
           : error,
+        traceId,
       );
+      if (response.status >= 500) {
+        const event = incident("registry", new URL(request.url).pathname, response.status, error, traceId);
+        // Preserve the root error even when Registry admin/diagnostics is unavailable.
+        console.error(JSON.stringify({ kind: "perch-mcp-registry-exception", ...event }));
+        await persistIncident(this.env, event);
+      }
+      return response;
     }
   }
   private async route(request: Request): Promise<Response> {

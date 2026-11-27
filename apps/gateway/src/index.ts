@@ -1,4 +1,5 @@
 import { projectMcpImages, type McpImageBlock } from "./mcp-media.js";
+import { incident, reportIncident, probeRegistryHealth } from "./incident.js";
 import {
   OAuthAuthorizationServer,
   OAuthResourceServer,
@@ -37,7 +38,7 @@ import {
   type Env,
 } from "./common.js";
 import type { AuthProps, WorkspaceRecord, AgentRecord } from "./registry.js";
-import type { ExecutionContext } from "@cloudflare/workers-types";
+import type { ExecutionContext, ScheduledController } from "@cloudflare/workers-types";
 export { Registry } from "./registry.js";
 export { Workspace } from "./workspace.js";
 interface Configuration {
@@ -447,10 +448,18 @@ async function route(
 ): Promise<Response> {
   const u = new URL(request.url),
     path = u.pathname;
-  if (path === "/health")
-    return registry(env).fetch(
+  // Liveness must remain available when the Registry Durable Object is failing.
+  if (path === "/live")
+    return json({ ok: true, version: VERSION, role: "worker-liveness" });
+  if (path === "/health") {
+    const probe = await probeRegistryHealth(() => registry(env).fetch(
       new Request("https://internal/internal/health") as never,
-    ) as unknown as Promise<Response>;
+    ) as unknown as Promise<Response>);
+    if (probe.failure?.error)
+      reportIncident(env, ctx, incident("worker", "/health", 503,
+        probe.failure.error, probe.failure.traceId));
+    return probe.response;
+  }
   if (path === "/setup")
     return html(
       "<h1>Perch MCP gateway</h1><p>Install the userscript in Firefox with Violentmonkey. Open its Settings, enter this gateway origin and the dashboard bootstrap secret. The URL grants no access.</p><p>This candidate requires the live acceptance checklist before a full release.</p>",
@@ -849,6 +858,13 @@ export default {
       if (request.method === "OPTIONS")
         return cors(new Response(null, { status: 204 }), request, env, issuer);
       const response = await route(request, env, ctx);
+      if (response.status >= 500) {
+        const body = await response.clone().json().catch(() => null) as
+          { traceId?: unknown } | null;
+        const traceId = typeof body?.traceId === "string" ? body.traceId : crypto.randomUUID();
+        reportIncident(env, ctx, incident("worker", new URL(request.url).pathname,
+          response.status, undefined, traceId));
+      }
       auditOAuth(
         request, env, ctx, response.status,
         response.headers.get("X-Perch-OAuth-Outcome") ??
@@ -862,6 +878,9 @@ export default {
     } catch (error) {
       const traceId = crypto.randomUUID();
       const response = errorResponse(error, traceId);
+      if (response.status >= 500)
+        reportIncident(env, ctx, incident("worker", new URL(request.url).pathname,
+          response.status, error, traceId));
       auditOAuth(
         request, env, ctx, response.status,
         error instanceof ApiError ? error.code : "INTERNAL_ERROR",
@@ -869,5 +888,16 @@ export default {
       );
       return cors(response, request, env, issuer);
     }
+  },
+  scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): void {
+    // Independent five-minute health probe; does not claim leases or run tools.
+    ctx.waitUntil((async () => {
+      const probe = await probeRegistryHealth(() => registry(env).fetch(
+        new Request("https://internal/internal/health") as never,
+      ) as unknown as Promise<Response>);
+      if (!probe.failure) return;
+      reportIncident(env, ctx, incident("scheduled", "/health", probe.response.status,
+        probe.failure.error, probe.failure.traceId));
+    })());
   },
 };

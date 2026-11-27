@@ -1,3 +1,4 @@
+import { isRetryableGatewayFailure } from "./connection-failures.js";
 import { uploadImageResult } from "./image-transfer.js";
 import {
   errorCodes,
@@ -336,7 +337,7 @@ export class BrowserController {
       this.lastFailureCode = code;
       // The poll request also refreshes the same lease. A transient failed
       // heartbeat is not proof of lease revocation or loss of connection.
-      const temporary = ["GATEWAY_TIMEOUT", "GATEWAY_UNAVAILABLE"].includes(code);
+      const temporary = isRetryableGatewayFailure(code);
       if (temporary && lease.expiresAt > Date.now() + 1000) {
         this.updateStatus({
           connection: "degraded", workspace: lease.workspaceId,
@@ -350,8 +351,10 @@ export class BrowserController {
       if (this.heartbeat) clearInterval(this.heartbeat);
       this.heartbeat = undefined;
       this.updateStatus({
-        connection: "blocked", workspace: lease.workspaceId,
-        reason: `Lease renewal rejected (${code}). Inspect pending effects before reconnecting.`,
+        connection: temporary ? "offline" : "blocked", workspace: lease.workspaceId,
+        reason: temporary
+          ? `Gateway outage (${code}); lease expired. Connection recovery will run without replaying effects.`
+          : `Lease renewal rejected (${code}). Inspect pending effects before reconnecting.`,
       });
     } finally {
       this.renewalInFlight = false;
@@ -586,7 +589,7 @@ export class BrowserController {
         // current lease never issues a new Workspace claim or duplicates an
         // operation ACK. Only transient network failures are retried here.
         if (
-          !["GATEWAY_TIMEOUT", "GATEWAY_UNAVAILABLE"].includes(code) ||
+          !isRetryableGatewayFailure(code) ||
           Date.now() + 1500 >= lease.expiresAt
         ) throw error;
         this.updateStatus({

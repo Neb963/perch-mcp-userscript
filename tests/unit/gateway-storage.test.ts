@@ -449,3 +449,14 @@ test('read-only Workspace Recovery distinguishes active lease, running and uncer
    assert.equal(result.blockingOperations.length,0);
  } finally{f.db.close();}
 });
+
+test("corrupt SQLite record is reported without replacing canonical state", () => {
+  const f=fixture();
+  try {
+    const records=new SqlRecords(f.storage);
+    f.storage.sql.exec("INSERT INTO records(key,part,value) VALUES(?,?,?)", "core", 0, "{invalid-json");
+    assert.throws(()=>records.get("core"),/SQLITE_RECORD_CORRUPT/);
+    const untouched=f.storage.sql.exec<{value:string}>("SELECT value FROM records WHERE key=?", "core").toArray();
+    assert.equal(untouched[0]?.value, "{invalid-json");
+  } finally {f.db.close();}
+});

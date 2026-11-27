@@ -165,3 +165,20 @@ test("gateway request deadlines exceed the 25-second Worker idle poll, including
     AbortSignal.timeout = original;
   }
 });
+
+test('gateway 500 and bootstrap failures persist across reload without retaining credentials',async()=>{
+  const store=new MemoryStore();
+  const fail=(async()=>Response.json({code:'INTERNAL_ERROR',message:'DO-NOT-STORE-TOKEN'},
+    {status:500})) as typeof fetch;
+  const first=new GatewayTransport(store,fail);
+  await assert.rejects(first.health('https://perch.example.workers.dev'),
+    (e:unknown)=>e instanceof Error&&e.message.includes('INTERNAL_ERROR')&&!e.message.includes('DO-NOT-STORE-TOKEN'));
+  first.recordBootstrapFailure('WORKSPACE_LOOKUP','INTERNAL_ERROR');
+  await new Promise(resolve=>setTimeout(resolve,10));
+  const second=new GatewayTransport(store,fail);
+  await second.initialize();
+  const history=second.diagnostics().preservedFailures;
+  assert.ok(history.some(e=>e.code==='INTERNAL_ERROR'&&e.status===500));
+  assert.ok(history.some(e=>e.code==='WORKSPACE_LOOKUP:INTERNAL_ERROR'&&e.method==='STATE'));
+  assert.doesNotMatch(JSON.stringify(history),/DO-NOT-STORE-TOKEN/);
+});

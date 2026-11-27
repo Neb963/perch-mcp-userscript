@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "apps/userscript/**"
+      - "apps/gateway/**"
       - "packages/**"
       - "tests/**"
       - "scripts/**"

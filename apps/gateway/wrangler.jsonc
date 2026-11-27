@@ -21,5 +21,6 @@
     "ALLOWED_ORIGINS": "https://perchance.org",
   },
   "secrets": { "required": ["BOOTSTRAP_SECRET"] },
-  "observability": { "enabled": false },
+  "observability": { "enabled": true, "redact_query_string": true, "logs": { "enabled": true, "head_sampling_rate": 1, "invocation_logs": true } },
+  "triggers": { "crons": ["*/5 * * * *"] },
 }
