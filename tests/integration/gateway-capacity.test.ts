@@ -453,3 +453,37 @@ test("credential recovery retains inert identity evidence so an older held write
     await h.close();
   }
 });
+
+test("SQL cursor budgets do not scale with terminal history while idle or active", async () => {
+  const h = await createCapacityHarness(1);
+  try {
+    const f = h.fixtures[0]!;
+    const stub = h.wns.get(h.wns.idFromName(f.workspaceId));
+    const usage = async () => await h.internal(stub,"/internal/sql-usage",{}) as unknown as {reads:number;writes:number;unmetered:number;statements:number};
+    const measure = async (fn:()=>Promise<unknown>) => {
+      const before=await usage(); await fn(); const after=await usage();
+      assert.equal(after.unmetered,0,"real SQL cursors must be metered");
+      // The same instance must serve both samples; do not mistake an eviction for a reduction.
+      assert.ok(after.statements>=before.statements);
+      return {reads:after.reads-before.reads,writes:after.writes-before.writes};
+    };
+    const idle=()=>h.browser(f,"poll",{waitMs:0});
+    const idleBefore=await measure(idle);
+    for(let n=0;n<150;n++)await h.cycle(f);
+    const idleAfter=await measure(idle);
+    const admitted=await h.admit(f);
+    await h.browser(f,"poll",{waitMs:0});
+    await h.browser(f,"reply",{operationId:admitted.operationId,phase:"RUNNING"});
+    const active=await measure(idle);
+    const status=await measure(()=>h.status(f,String(admitted.operationId)));
+    const invalid=await measure(async()=> {
+      const r=await stub.fetch("https://internal/api/v1/tab/poll",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer invalid"},body:JSON.stringify({workspaceId:f.workspaceId,epoch:f.lease.epoch,tabInstanceId:f.lease.tabInstanceId,waitMs:0})});
+      assert.equal(r.status,409);
+    });
+    console.log(JSON.stringify({kind:"sql-budget",idleBefore,idleAfter,active,status,invalid}));
+    assert.ok(idleAfter.reads<=idleBefore.reads+10, "idle history must not amplify reads");
+    assert.ok(idleAfter.reads<=30 && active.reads<=40 && status.reads<=35);
+    assert.ok(idleAfter.writes<=2 && active.writes<=2 && invalid.writes===0);
+    assert.ok(invalid.reads<=5);
+  } finally {await h.close();}
+});

@@ -500,7 +500,7 @@ test("idle Workspace maintenance neither recreates backoff nor rewrites schema",
   } finally { f.db.close(); }
 });
 
-test("idle journal survives cold starts and invalidates on every operation mutation", async () => {
+test("indexed journal survives cold starts and reconciles legacy writes without history scans", async () => {
   const local = fixture();
   try {
     const records = new SqlRecords(local.storage);
@@ -520,11 +520,11 @@ test("idle journal survives cold starts and invalidates on every operation mutat
       throw new Error("rollback");
     }));
     assert.equal(local.storage.sql.exec("SELECT key FROM operation_dirty_v1").toArray().length, 0);
-    // An older binary issuing raw SQL also invalidates the persisted hint.
+    // An older binary issuing raw SQL marks exactly the changed key dirty.
     local.storage.sql.exec("INSERT INTO records (key, part, value) VALUES (?, ?, ?)", "operation/fixture-operation", 0, JSON.stringify(opFixture()));
     assert.equal(local.storage.sql.exec("SELECT key FROM operation_dirty_v1").toArray().length, 1);
     await new Workspace(local.state, env).alarm();
     assert.equal(records.get<{phase:string}>("operation/fixture-operation")?.phase, "UNKNOWN");
-    assert.ok(local.counts.operationScans > baseline);
+    assert.equal(local.counts.operationScans, baseline);
   } finally { local.db.close(); }
 });
