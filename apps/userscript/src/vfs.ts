@@ -40,7 +40,8 @@ export class VirtualFileSystem {
     const unresolved = await this.unresolved();
     const nativePaths = new Set(writes.map(w=>w.path));
     const conflicting = unresolved.filter(j=>j.kind!=='IMPORT' &&
-      (j.kind==='SAVE' || j.paths.some(path=>nativePaths.has(path))));
+      ((j.kind==='SAVE' && writes.some(w=>!w.path.startsWith('scratch/'))) ||
+       j.paths.some(path=>nativePaths.has(path))));
     if (conflicting.length) throw new BrowserError('NATIVE_CONFLICT',
       `A recent source operation may still be settling (${conflicting.map(j=>j.paths.join(', ')).join('; ')}). `+
       'Refresh Workspace status and retry after the native editor has settled.',
