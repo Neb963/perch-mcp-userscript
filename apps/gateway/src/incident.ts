@@ -49,7 +49,7 @@ function cause(error: unknown): { errorClass: string; causeClass: string; site: 
 }
 export function incident(
   area: IncidentArea, path: string, status: number, error?: unknown,
-  traceId = crypto.randomUUID(), now = Date.now(),
+  traceId: string = crypto.randomUUID(), now = Date.now(),
 ): Incident {
   return { schemaVersion: 1, at: now, version: VERSION,
     traceId: TRACE.test(traceId) ? traceId : crypto.randomUUID(),
