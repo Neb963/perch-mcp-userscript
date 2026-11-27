@@ -15,15 +15,15 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 |---|---|---|---|
 | V00 | v0.2.0 | Baseline, authority amendment, full disposition, offline reproduction or explicit gap | Verified locally |
 | V01 | V00 | Connector-level Grant, strict version coexistence, indexed discovery and explicit Target | Foundation verified; catalog gated |
-| V02 | V01 | Durable fenced transition, exact management receipts and original-scope result ACL | Gateway verified; manager integration pending |
-| V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | Core and lease integration verified; operator archive UI pending |
-| V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | Primitives verified; wire integration pending |
-| V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Scoped execution verified; grouped publication and expanded integration pending |
-| V06 | V05 | Preview freshness, diagnostics, viewport, actual-pixel feasibility and verified Save | Pending |
+| V02 | V01 | Durable fenced transition, exact management receipts and original-scope result ACL | Gateway and manager basic paths verified |
+| V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | Core and lease integration verified; exact operator quarantine export coverage open |
+| V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | Filesystem and scoped wire paths verified in local fixtures |
+| V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Scoped execution and grouped publication verified; retrieval and fault coverage incomplete |
+| V06 | V05 | Preview freshness, diagnostics, viewport, actual-pixel feasibility and verified Save | Offline branches verified; OWNER capture and provider gates open |
 | V07 | V01–V06 | Exact v2 catalog, archive/export compatibility, retirement and agent knowledge | v2 catalog and knowledge verified; compatibility retirement deferred |
 | V08 | V02–V07 | Manager, compatible migration/rollback and one-click rebind | Bundled manager and upgrade verified; OWNER rollout deferred |
-| V09 | V01–V08 | Native/legacy workload, capacity, OAuth and fault measurements | In progress |
-| V10 | V00–V09 | Exact-head offline qualification, artifacts and unmerged PR | Pending |
+| V09 | V01–V08 | Native/legacy workload, capacity, OAuth and fault measurements | Benchmarks recorded; lifecycle target missed |
+| V10 | V00–V09 | Exact-head offline qualification, artifacts and unmerged PR | In progress |
 
 ### V00 evidence
 
@@ -126,6 +126,18 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 - Measure v2 production SDK ingress and private dispatch lifecycle in local workerd with metered SQL, Worker/DO, alarm and KV usage. Compare legacy/native with the v0.2 replay and use the actual workload denominator when projecting traffic.
 - Run discovery at multiple Connector and Workspace counts, and report exact target-versus-measured status. Retain the current OAuth TTL and disabled admission estimate if the full budget and interoperability trade-offs remain unverified.
 - Record raw measurements, account quota assumptions, nondeterministic timing and owner-only billing/hibernation evidence. Results remain local observations.
+
+### V09 evidence
+
+- Clean workerd replays recorded 12 measurements each for native and legacy storage. Native full read uses 225–227 SQL reads and 53–57 writes. Legacy uses 280–300 reads and 80–89 writes. The 120/40 goal is unmet. The ten-file write uses 90% fewer rows than ten separate lifecycles in both modes. Indexed discovery has no SQL writes at 1–50 assigned Workspaces.
+- The pinned SDK passed five local refresh rotations at two KV puts per rotation. The capacity report models alternate TTLs and retains the 900 s default. These measurements do not establish actual account-wide billing or physical browser hibernation behavior. No optional admission estimates were enabled.
+- Coherent adjacent write/delete/rename staging and explicit previous-step base have focused fixture coverage. The final exact-tree qualification follows the V10 plan.
+
+### V10 plan
+
+- Qualify the clean remote PR-head tree with locked install, strict typecheck, full offline tests, clean artifact build, exact digest verification and local Wrangler dry-run only.
+- Package matching userscript TXT/JS, Worker, source, candidate, agent knowledge, release metadata and checksums. Preserve historical v0.2 evidence and release gates.
+- Publish the unmerged development PR with exact head and acceptance matrix. Distinguish owner-only gates and remaining offline evidence gaps. No production, preview, deployment or merge.
 
 ## Historical v0.1–v0.2.0 implementation ledger
 

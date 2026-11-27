@@ -1197,7 +1197,7 @@ export class Registry {
       revision(body.expectedRevision,a.revision);
       revision(body.expectedWorkspaceRevision,w.revision);
       if (a.contractVersion!==undefined || a.suspended || a.workspaceId!==w.id || w.agentId!==a.id ||
-          w.transition?.id!==key || w.transition.requestHash!==requestHash || w.epoch!==before.epoch ||
+          w.transition?.id!==key || w.transition.requestHash!==requestHash || w.transition.aborting || w.epoch!==before.epoch ||
           w.bindingRevision!==before.bindingRevision || !w.binding ||
           this.catalog.bindingBlocked(w.id) || this.db.get('reservation/'+w.binding.generatorId))
         throw new ApiError('TRANSITION_BLOCKED','Matching v1 scope did not remain settled.',409);
@@ -1252,10 +1252,11 @@ export class Registry {
     };
     const started = this.db.transaction(() => {
       const core = this.auth(authHash);
-      this.requireDevelopmentContract(core);
+      if (this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true')
+        throw new ApiError('UPGRADE_REQUIRED','The v2 assignment contract is disabled.',409);
       const receipt = prior();
       if (receipt) return { receipt } as const;
-      const w = requireAssignment(this.getWorkspace(workspaceId));
+      const w = this.getWorkspace(workspaceId);
       revision(body.expectedRevision, w.revision);
       if (!w.transition || w.transition.id !== transitionId)
         throw new ApiError('NOT_FOUND', 'Transition is unavailable.', 404);
@@ -1276,10 +1277,11 @@ export class Registry {
     });
     return this.db.transaction(() => {
       const core = this.auth(authHash);
-      this.requireDevelopmentContract(core);
+      if (this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true')
+        throw new ApiError('UPGRADE_REQUIRED','The v2 assignment contract is disabled.',409);
       const receipt = prior();
       if (receipt) return receipt.result;
-      const w = requireAssignment(this.getWorkspace(workspaceId));
+      const w = this.getWorkspace(workspaceId);
       if (w.transition?.id !== transitionId || !w.transition.aborting ||
           w.epoch !== current.epoch || w.bindingRevision !== current.bindingRevision)
         throw new ApiError('TRANSITION_BLOCKED', 'Transition fence changed.', 409);
@@ -1703,11 +1705,12 @@ export class Registry {
     const connectorEdit = /^\/api\/v1\/admin\/connectors\/([A-Za-z0-9_-]+)$/.exec(path);
     if (connectorEdit) {
       this.requireDevelopmentContract(c);
-      fields(b, ['expectedRevision', 'label', 'suspended']);
+      fields(b, ['expectedRevision', 'label', 'suspended', 'permissionCeiling']);
       const connector = this.getAgent(connectorEdit[1]!);
       if (connector.contractVersion !== 2) throw new ApiError('UPGRADE_REQUIRED', 'Connector still uses v1.', 409);
       revision(b.expectedRevision, connector.revision);
       if (b.label !== undefined) connector.label = str(b.label, 'label');
+      if (b.permissionCeiling !== undefined) connector.permissionCeiling = permissionCeiling(b.permissionCeiling);
       if (b.suspended !== undefined) {
         if (typeof b.suspended !== 'boolean') throw new ApiError('INVALID_INPUT', 'suspended must be boolean.');
         connector.suspended = b.suspended;

@@ -1,10 +1,21 @@
 import { filesystemV2Schemas, type FilesystemArgs, type FilesystemToolV2 } from '../../../packages/contracts/src/filesystem-v2.js';
 import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, digest, equalBytes, utf8,
   type FileWrite } from './native-types.js';
-import type { VirtualFileSystem } from './vfs.js';
+import type { VirtualFileSystem, WorkspaceSnapshot } from './vfs.js';
 
 type Preconditions = { expectedSourceRevision?: string; expectedLocalRevision?: string };
 interface FileCondition { ifSha256?: string; ifAbsent?: true }
+type MutationName='write'|'delete'|'rename';
+type MutationArgs=(Preconditions & {files: Array<FileCondition & {path:string;encoding:'utf8'|'base64';content:string}>}) |
+  FilesystemArgs<'delete'> | FilesystemArgs<'rename'>;
+type MutationAction={tool:MutationName;args:MutationArgs & {base?:'previous'}};
+interface MutationStage {
+  nativeBefore: WorkspaceSnapshot | null;
+  local: Awaited<ReturnType<VirtualFileSystem['localView']>>;
+  changes: Map<string,FileWrite>;
+}
+const actionPaths=(args:MutationArgs):string[]=>'files' in args ? args.files.map(file=>file.path) :
+  'paths' in args ? args.paths.map(item=>item.path) : args.moves.flatMap(move=>[move.from,move.to]);
 interface Metadata {path: string; bytes: number | null; sha256: string | null}
 export interface FilesystemCallScope {
   target: string;
@@ -178,23 +189,45 @@ export class FilesystemV2 {
     return {files, namespaces: ['src', 'scratch', 'imports'], sourceRevision: {value: null, verified: false},
       localRevision: local.revision, nextCursor: selected.length > limit ? fingerprint + '|' + files.at(-1)!.path : null};
   }
-  async publishWrites(args: Parameters<FilesystemV2['mutate']>[1], scope: FilesystemCallScope) {
+  async publishWrites(args: MutationArgs, scope: FilesystemCallScope) {
     return this.mutate('write', args, scope);
   }
-  private async mutate(name: 'write' | 'delete' | 'rename',
-    args: (Preconditions & {files: Array<FileCondition & {path: string; encoding: 'utf8' | 'base64'; content: string}>}) |
-      FilesystemArgs<'delete'> | FilesystemArgs<'rename'>, scope: FilesystemCallScope) {
-    const paths = 'files' in args ? args.files.map(file => file.path) :
-      'paths' in args ? args.paths.map(item => item.path) : args.moves.flatMap(move => [move.from, move.to]);
+  async publishCoherent(actions: readonly MutationAction[], scope: FilesystemCallScope) {
+    const native = actions.some(({args})=>args.expectedSourceRevision || actionPaths(args).some(nativePath));
+    const local = await this.vfs.localView();
+    const stage: MutationStage = {nativeBefore:native?await this.vfs.snapshot():null,local,changes:new Map()};
+    const perAction = [];
+    for (const step of actions) {
+      const {base,...rest}=step.args;
+      if (base && stage.changes.size===0) throw new BrowserError('INVALID_INPUT','Previous mutation state is unavailable.');
+      const args = base ? {...rest,expectedSourceRevision:stage.nativeBefore?.nativeRevision,
+        expectedLocalRevision:local.revision.value} as MutationArgs : rest as MutationArgs;
+      perAction.push(await this.mutate(step.tool,args,scope,stage));
+    }
+    const writes = [...stage.changes.values()];
+    const written = writes.filter(write=>write.bytes!==null);
+    const removed: FileWrite[] = [];
+    for (const write of writes.filter(write=>write.bytes===null)) {
+      const present=nativePath(write.path)?Object.hasOwn(stage.nativeBefore?.files??{},write.path):local.files.some(file=>file.path===write.path);
+      if (present) removed.push(write);
+    }
+    const result = written.length || removed.length ? await this.publishPlan('batch',[...written,...removed],stage.nativeBefore,local.revision.value,scope)
+      : {status:'SUCCEEDED',committed:[]};
+    return {result,perAction};
+  }
+  private async mutate(name: MutationName, args: MutationArgs, scope: FilesystemCallScope, stage?: MutationStage) {
+    const paths=actionPaths(args);
     requireDistinctPaths(paths);
     const native = paths.some(nativePath);
-    const local = await this.vfs.localView();
-    const before = native || args.expectedSourceRevision ? await this.vfs.snapshot() : null;
+    const local = stage?.local ?? await this.vfs.localView();
+    const before = stage ? stage.nativeBefore : native || args.expectedSourceRevision ? await this.vfs.snapshot() : null;
     if (args.expectedSourceRevision && args.expectedSourceRevision !== before?.nativeRevision)
       throw new BrowserError('STALE_REVISION', 'Native source revision changed.');
     if (args.expectedLocalRevision && args.expectedLocalRevision !== local.revision.value)
       throw new BrowserError('STALE_REVISION', 'Private file revision changed.');
     const current = async (path: string) => {
+      const staged=stage?.changes.get(path);
+      if (staged) return staged.bytes ?? undefined;
       if (nativePath(path)) return before?.files[path];
       if (!local.files.some(file => file.path === path)) return undefined;
       return local.read(path);
@@ -240,21 +273,31 @@ export class FilesystemV2 {
       }
     }
     const complete = new Set([...Object.keys(before?.files ?? {}), ...local.files.map(file => file.path)]);
-    for (const write of writes) {
+    for (const write of [...stage?.changes.values() ?? [],...writes]) {
       if (write.bytes === null) complete.delete(write.path);
       else complete.add(write.path);
     }
     requireNoPrefixConflicts([...complete]);
+    if (stage) {
+      for (const write of writes) stage.changes.set(write.path,write);
+      return {status:'STAGED', paths:writes.map(write=>write.path)};
+    }
+    return this.publishPlan(name,writes,before,local.revision.value,scope);
+  }
+  private async publishPlan(name: string,writes:FileWrite[],before:WorkspaceSnapshot|null,localRevisionValue:string,scope:FilesystemCallScope) {
+    const native = writes.some(write=>nativePath(write.path));
     const writeDigests = await Promise.all(writes.map(async write => [write.path, write.bytes === null ? null : await digest(write.bytes)]));
-    const writeSetDigest = await digest(JSON.stringify([name, before?.nativeRevision ?? null, local.revision.value, writeDigests]));
+    const writeSetDigest = await digest(JSON.stringify([name, before?.nativeRevision ?? null, localRevisionValue, writeDigests]));
     await scope.authorizePublication({digest: writeSetDigest, paths: writes.map(write => write.path),
-      expectedSourceRevision: before?.nativeRevision, expectedLocalRevision: local.revision.value});
+      expectedSourceRevision: before?.nativeRevision, expectedLocalRevision: localRevisionValue});
     await scope.assertCurrent();
     if (!native) {
-      const localRevision = await this.vfs.writeLocalBatch(writes, local.revision.value, scope.operationId);
+      const localRevision = await this.vfs.writeLocalBatch(writes, localRevisionValue, scope.operationId);
       return {status: 'SUCCEEDED', committed: writes.map(write => write.path), localRevision};
     }
-    return this.vfs.writeBatch(writes, before!.revision, scope.operationId);
+    const result = await this.vfs.writeBatch(writes,before!.revision,scope.operationId);
+    return {...result,sourceRevision:{value:result.nativeRevision??null,verified:!!result.nativeRevision},
+      ...(result.status==='SUCCEEDED'?{localRevision:(await this.vfs.localView()).revision}:{})};
   }
   private async transfer(args: Exclude<FilesystemArgs<'write'>, {mode?: 'inline'}>, scope: FilesystemCallScope) {
     const namespace = this.vfs.scope;

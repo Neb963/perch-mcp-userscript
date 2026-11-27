@@ -468,9 +468,8 @@ export class Workspace {
       operationId: op.operationId,
       ...(op.target ? {contractVersion: 2, target: op.target, operationKey: op.operationKey,
         traceId: op.traceId, serverTimeMs: Date.now(), phase: op.phase,
-        effectState: ((op.result as {effectState?: string} | undefined)?.effectState === 'VERIFIED') ? 'KNOWN' :
-          op.phase === 'UNKNOWN' ? 'UNKNOWN' : op.phase === 'PARTIAL' ? 'PARTIAL' :
-          op.phase === 'SUCCEEDED' ? 'KNOWN' : 'NONE',
+        effectState: op.phase === 'UNKNOWN' ? 'UNKNOWN' : op.phase === 'PARTIAL' ? 'PARTIAL' :
+          op.phase === 'SUCCEEDED' && op.mutating ? 'KNOWN' : 'NONE',
         ...(op.cancelRequested ? {cancelRequested: true} : {})} : {}),
       status: op.phase,
       workspaceId: op.workspaceId,

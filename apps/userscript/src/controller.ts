@@ -824,19 +824,21 @@ export class BrowserController {
     try {
       const data = await (this.tools?.callDevelopment ? this.tools.callDevelopment(context) : executeDevelopment(context));
       const reported = data as {status?:string};
-      const status = reported?.status === 'PARTIAL' || reported?.status === 'UNKNOWN' || reported?.status==='REJECTED' ? reported.status : 'SUCCEEDED';
-      const effectState = status==='PARTIAL'?'PARTIAL':status==='UNKNOWN'?'POSSIBLE':status==='REJECTED'?'NONE':'VERIFIED';
+      const status = reported?.status === 'PARTIAL' || reported?.status === 'UNKNOWN' || (reported?.status==='REJECTED' || reported?.status==='CANCELLED') ? reported.status : 'SUCCEEDED';
+      const effectState = status==='PARTIAL'?'PARTIAL':status==='UNKNOWN'?'POSSIBLE':status==='REJECTED'||status==='CANCELLED'?'NONE':'VERIFIED';
       result = {operationId,status,effectState,data:new TextEncoder().encode(JSON.stringify(data)).length <= 240_000 ?
         data : {resultAvailability:'TOO_LARGE'}};
-      if (status!=='SUCCEEDED') result.error = {code:status==='PARTIAL'?'PARTIAL_EFFECT':status==='UNKNOWN'?'EFFECT_UNKNOWN':'PROVIDER_REJECTED',
+      if (status!=='SUCCEEDED') result.error = {code:status==='PARTIAL'?'PARTIAL_EFFECT':status==='UNKNOWN'?'EFFECT_UNKNOWN':status==='CANCELLED'?'CANCELLED':'PROVIDER_REJECTED',
         message:'Inspect exact operation or step evidence.',retryable:false,recovery:'Reconcile recorded effects before another mutation.'};
     } catch (error) {
       const fault = error as {code?:string;effectState?:string};
       const code = errorCodes.includes(fault.code as (typeof errorCodes)[number]) ? fault.code! : 'PROVIDER_REJECTED';
       const unknown = fault.effectState==='UNKNOWN' || code==='EFFECT_UNKNOWN';
-      const status = fault.effectState==='PARTIAL'?'PARTIAL':unknown?'UNKNOWN':'REJECTED';
+      const status = fault.effectState==='PARTIAL'?'PARTIAL':unknown?'UNKNOWN':code==='CANCELLED'?'CANCELLED':'REJECTED';
+      const detail = envelope.tool==='capture_page_image' && code==='UNSUPPORTED_INTERFACE' && error instanceof BrowserError
+        ? error.message : 'Scoped operation stopped at '+code+'.';
       result = {operationId,status,effectState:status==='PARTIAL'?'PARTIAL':unknown?'POSSIBLE':'NONE',
-        error:{code,message:'Scoped operation stopped at '+code+'.',retryable:false,
+        error:{code,message:detail,retryable:false,
           recovery:'Inspect operation status and reconcile before retrying an effect.'}};
     }
     intent.status=String(result.status);

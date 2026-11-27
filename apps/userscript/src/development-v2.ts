@@ -219,8 +219,36 @@ export async function executeDevelopment(context: DevelopmentContext, engine?: C
   const actions = (args as unknown as BatchArgumentsV2).actions;
   const steps: Record<string,unknown>[] = [];
   let committed = false;
-  for (const [index,action] of actions.entries()) {
+  const isMutation=(action:BatchArgumentsV2['actions'][number]):action is Extract<BatchArgumentsV2['actions'][number],{tool:'write'|'delete'|'rename'}> =>
+    action.tool==='write'||action.tool==='delete'||action.tool==='rename';
+  for (let index=0;index<actions.length;index++) {
+    const action=actions[index]!;
     try {
+      if (isMutation(action)) {
+        const begin=index;
+        const group=[action];
+        for (let scan=index+1;scan<actions.length;scan++) {
+          const candidate=actions[scan]!;
+          if (!isMutation(candidate)) break;
+          group.push(candidate);
+        }
+        if (group.length>1) {
+          await context.recordStep({index:begin,tool:action.tool,status:'RUNNING',effectState:'NONE'});
+          const publication=await fs.publishCoherent(group,scope);
+          const status=publication.result.status;
+          for (const [offset,step] of group.entries()) {
+            const position=begin+offset;
+            const effectState=status==='SUCCEEDED'?'KNOWN':status;
+            await context.recordStep({index:position,tool:step.tool,status,effectState});
+            steps.push({index:position,id:step.id,tool:step.tool,status,
+              ...(status==='SUCCEEDED'?{staged:publication.perAction[offset]}:{committedPaths:publication.result.committed})});
+          }
+          index+=group.length-1;
+          if (status!=='SUCCEEDED') return {status:committed?'PARTIAL':status,steps,skipped:actions.length-index-1};
+          committed=true;
+          continue;
+        }
+      }
       await context.recordStep({index,tool:action.tool,status:'RUNNING',effectState:'NONE'});
       const result = await run(action.tool,action.args);
       const current = result as {status?: string} | null;
@@ -239,8 +267,9 @@ export async function executeDevelopment(context: DevelopmentContext, engine?: C
       const unknown = error instanceof ExecutionError && error.effectState === 'UNKNOWN' ||
         error instanceof BrowserError && error.code === 'EFFECT_UNKNOWN';
       const partial = error instanceof ExecutionError && error.effectState === 'PARTIAL';
-      const status = committed || partial ? 'PARTIAL' : unknown ? 'UNKNOWN' : 'REJECTED';
-      await context.recordStep({index,tool:action.tool,status,effectState:status==='REJECTED'?'NONE':status});
+      const status = committed || partial ? 'PARTIAL' : unknown ? 'UNKNOWN' :
+        known && error.code==='CANCELLED'?'CANCELLED':'REJECTED';
+      await context.recordStep({index,tool:action.tool,status,effectState:status==='REJECTED'||status==='CANCELLED'?'NONE':status});
       steps.push({index,id:action.id,tool:action.tool,status,code:known?error.code:'PROVIDER_REJECTED'});
       return {status,steps,skipped:actions.length - index - 1};
     }

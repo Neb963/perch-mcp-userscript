@@ -66,8 +66,9 @@ function action<N extends string, T extends z.ZodType>(tool: N, args: T) {
 }
 const batchArguments = z.strictObject({
   actions: z.array(z.discriminatedUnion('tool', [
-    action('read', browserToolSchemas.read), action('write', filesystemInlineWriteSchema),
-    action('delete', browserToolSchemas.delete), action('rename', browserToolSchemas.rename),
+    action('read', browserToolSchemas.read), action('write', filesystemInlineWriteSchema.extend({base:z.literal('previous').optional()})),
+    action('delete', browserToolSchemas.delete.extend({base:z.literal('previous').optional()})),
+    action('rename', browserToolSchemas.rename.extend({base:z.literal('previous').optional()})),
     action('list_files', browserToolSchemas.list_files), action('page_eval', browserToolSchemas.page_eval),
     action('page_refresh', browserToolSchemas.page_refresh), action('preview_diagnostics', browserToolSchemas.preview_diagnostics),
     action('set_viewport_size', browserToolSchemas.set_viewport_size), action('capture_page_image', browserToolSchemas.capture_page_image),
@@ -76,7 +77,9 @@ const batchArguments = z.strictObject({
     action('fetch_generator', browserToolSchemas.fetch_generator), action('generator_info', browserToolSchemas.generator_info),
   ])).min(1).max(32).refine(actions => {
     const ids = actions.flatMap(step => step.id ? [step.id] : []);
-    return ids.length === new Set(ids).size && actions.filter(step=>step.tool==='capture_page_image').length <= 4;
+    return ids.length === new Set(ids).size && actions.filter(step=>step.tool==='capture_page_image').length <= 4 &&
+      actions.every((step,index)=>!('base' in step.args) || step.args.base===undefined ||
+        (index>0 && ['write','delete','rename'].includes(actions[index-1]!.tool)));
   }),
   timeoutMs: ms,
 });
@@ -169,7 +172,7 @@ const descriptions: Record<DevelopmentTool, string> = {
   delete:'Delete exact src or scratch files.', rename:'Move files without overwriting an existing destination.',
   list_files:'List selected metadata without reading content.', page_eval:'Run JavaScript in the scoped preview.',
   page_refresh:'Refresh the preview of the intended native source.', preview_diagnostics:'Read bounded diagnostics for one preview epoch.',
-  set_viewport_size:'Resize or reset preview layout.', capture_page_image:'Capture actual verified preview pixels when a permitted interface is available.',
+  set_viewport_size:'Resize or reset preview layout.', capture_page_image:'Capture actual verified preview pixels. This userscript build has no supported exact preview-surface interface and returns UNSUPPORTED_INTERFACE.',
   execute_js:'Run isolated QuickJS with declared file access and staged writes.',
   fetch_url:'Retrieve bounded public HTTPS responses into governed scratch paths.',
   fetch_generator:'Import verified public generator revisions.', generator_info:'Inspect identity and optionally read independently persisted source.',

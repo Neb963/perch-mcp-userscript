@@ -67,6 +67,25 @@ try {
       assert.equal((result.workspaces as unknown[]).length,count);
     });
   }
+  if (process.env.BENCHMARK_MULTI_CONNECTOR === 'true') {
+    const clients: {agent:string;token:string}[]=[];
+    for (const count of [10,20]) {
+      await measure('connector-issuance',count,async()=>{
+        for (let i=clients.length;i<count;i++) {
+          const state=await h.get(admin+'/state');
+          const connector=await h.request(admin+'/connectors',{expectedRevision:state.revision,label:'Connector '+i});
+          const agent=String(connector.id);
+          const token=await issueSyntheticToken(h,{...fixture,agentId:agent});
+          clients.push({agent,token});
+        }
+      });
+      await measure('connector-discovery',count,async()=>{
+        const discovered=await Promise.all(clients.map(({agent,token})=>
+          syntheticMcp(h,{...fixture,agentId:agent},token,'workspace_status',{})));
+        assert.ok(discovered.every(result=>Array.isArray(result.workspaces)&&result.workspaces.length===0));
+      });
+    }
+  }
   const report={mode:native?'native':'legacy',
     sourceCommit:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),
     sourceDirty:execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim().length>0,

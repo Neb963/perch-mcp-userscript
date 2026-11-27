@@ -271,6 +271,8 @@ export async function createCapacityHarness(
     cycle,
     request,
     executionRequest: (path: string, body: unknown) => request(path, body, execution),
+    syntheticPairing: () => ({schemaVersion:1,origin:base,browserInstallationId:'capacity-browser',
+      adminCredential:admin,executionCredential:execution}),
     get,
     reclaim,
     internal,

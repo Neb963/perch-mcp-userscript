@@ -1,3 +1,4 @@
+import { v2Permissions, v2DefaultPermissions } from '../../../packages/contracts/src/target.js';
 import { managerStyles } from "./manager.css";
 import { validatePublicFetchUrl } from "./public-fetch.js";
 export interface ManagerIdentity {
@@ -828,10 +829,10 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       if (name==='Library') b.hidden=state.assignmentContractVersion===2;
     }
   }
-  function permissionEditor(parent: HTMLElement, values: string[]) {
+  function permissionEditor(parent: HTMLElement, values: readonly string[], allowed: readonly string[] = PERMISSIONS) {
     const box = el("div", undefined, "permissions");
     const checks = new Map<string, HTMLInputElement>();
-    for (const permission of PERMISSIONS) {
+    for (const permission of allowed) {
       const l = el("label"),
         cb = el("input");
       cb.type = "checkbox";
@@ -1010,6 +1011,16 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             {expectedRevision:w.revision,paused:!w.paused});
           if (own===generation) await refresh();
         }));
+        const policies=el('details');
+        policies.append(el('summary','Permissions'));
+        const values=permissionEditor(policies,Array.isArray(w.permissions)?w.permissions as string[]:[],v2Permissions);
+        policies.append(button('Save Workspace permissions',async()=>{
+          await client.request('PATCH',`${ADMIN}/workspaces/${encodeURIComponent(id)}`,{
+            expectedRevision:w.revision,permissions:values(),
+          });
+          if (own===generation) await refresh();
+        }));
+        td.append(policies);
         const other=choices.filter(item=>item.id!==w.connectorId);
         if (other.length) {
           const chosen=select('Destination Connector',other.map(item=>({value:str(item.id),label:str(item.label)})));
@@ -1312,15 +1323,18 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           .map((w) => ({ value: str(w.id), label: str(w.label) })),
       );
     name.input.maxLength = 80;
+    const ceilingPanel=el('details');
+    ceilingPanel.append(el('summary','Permission ceiling'));
+    const newCeiling=permissionEditor(ceilingPanel,v2DefaultPermissions,v2Permissions);
     row.append(
       name.label,
-      ...(v2 ? [] : [target.label]),
+      ...(v2 ? [ceilingPanel] : [target.label]),
       button(v2?"Create Connector":"Create Agent", async () => {
         if (!name.input.value.trim() || !v2 && !target.input.value)
           throw new Error(v2?"Enter a Connector name.":"Enter a name and select an unassigned Workspace.");
         await client.request("POST", `${ADMIN}/${v2?'connectors':'agents'}`, {
           label: name.input.value.trim(),
-          ...(v2 ? {expectedRevision:state.revision} : {workspaceId:target.input.value}),
+          ...(v2 ? {expectedRevision:state.revision,permissionCeiling:newCeiling()} : {workspaceId:target.input.value}),
         });
         await refresh();
       }),
@@ -1335,6 +1349,18 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           render(a, td) {
             p(str(a.label), td);
             p(str(a.id), td, "muted");
+            if (a.contractVersion===2) {
+              const settings=el('details');
+              settings.append(el('summary','Permission ceiling'));
+              const permissions=permissionEditor(settings,Array.isArray(a.permissionCeiling)?a.permissionCeiling as string[]:[],v2Permissions);
+              settings.append(button('Save Connector ceiling',async()=>{
+                await client.request('PATCH',`${ADMIN}/connectors/${encodeURIComponent(str(a.id))}`,{
+                  expectedRevision:a.revision,permissionCeiling:permissions(),
+                });
+                if (own===generation) await refresh();
+              }));
+              td.append(settings);
+            }
             const legacyWorkspace=workspaces.items.find(w=>w.id===a.workspaceId);
             if (v2 && a.contractVersion===1 && legacyWorkspace?.binding)
               td.append(button('Upgrade to v2',()=>confirmAction('Preserve this Binding and require new OAuth consent on the same endpoint?',async()=>{

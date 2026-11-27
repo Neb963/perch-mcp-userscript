@@ -236,7 +236,8 @@ export class VirtualFileSystem {
             journal.inspectedRevision=actual.revision;
             await this.store.set(key,journal);
             void this.serial(() => this.trim()).catch(()=>undefined); // Cleanup must not falsify success.
-            return {status:'SUCCEEDED',revision:actual.revision,committed:writes.map(w=>w.path)};
+            return {status:'SUCCEEDED',revision:actual.revision,committed:writes.map(w=>w.path),
+              ...(this.scope?{nativeRevision:actual.nativeRevision}:{})};
           }
         } catch { /* Retain the original UNKNOWN/PARTIAL without losing the journal. */ }
       }
@@ -268,7 +269,8 @@ export class VirtualFileSystem {
       journal.resolvedAt=Date.now();
       await this.store.set(key, journal);
       void this.serial(() => this.trim()).catch(()=>undefined); // Housekeeping never turns a verified write UNKNOWN.
-      return { status: 'SUCCEEDED', revision: after.revision, committed: writes.map(w => w.path) };
+      return { status: 'SUCCEEDED', revision: after.revision, committed: writes.map(w => w.path),
+        ...(this.scope?{nativeRevision:after.nativeRevision}:{}) };
     } catch (error) {
       journal.state = nativeWrites.length ? 'PARTIAL' : 'UNKNOWN';
       await this.store.set(key,journal);

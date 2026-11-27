@@ -64,10 +64,19 @@ test('Invalid batch tail has zero effects. Valid batch reports partial on a fail
   const f=await fixture('batch',{actions:[first,{tool:'read',args:{files:[{path:'../../outside'}]}}]});
   await assert.rejects(executeDevelopment(f.context),/Invalid v2/);
   assert.deepEqual(f.permits,[]);
-  const valid=await fixture('batch',{actions:[first,{tool:'delete',args:{paths:[{path:'scratch/input',ifSha256:await digest('wrong')}]}}]});
+  const valid=await fixture('batch',{actions:[first,{tool:'read',args:{files:[{path:'scratch/new'}]}},
+    {tool:'delete',args:{paths:[{path:'scratch/input',ifSha256:await digest('wrong')}]}}]});
   const partial=await executeDevelopment(valid.context) as {status:string;steps:unknown[]};
   assert.equal(partial.status,'PARTIAL');
-  assert.equal(partial.steps.length,2);
+  assert.equal(partial.steps.length,3);
+  const grouped=await fixture('batch',{actions:[first,{tool:'write',args:{base:'previous',files:[
+    {path:'scratch/new',encoding:'utf8',content:'updated'},
+  ]}}]});
+  const published=await executeDevelopment(grouped.context) as {status:string;steps:unknown[]};
+  assert.equal(published.status,'SUCCEEDED');
+  assert.equal(published.steps.length,2);
+  assert.deepEqual(grouped.permits,['source-publication']);
+  assert.equal(new TextDecoder().decode(await (await grouped.vfs.localView()).read('scratch/new')),'updated');
 });
 
 test('actual-pixel capture reports an unavailable interface and opens no surface',async()=>{
