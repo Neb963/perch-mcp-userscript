@@ -1,4 +1,21 @@
-# Protocol and persistence supplement — v1 design
+# Protocol and persistence
+
+[Implementation specification §§2–4](v0.3/PERCH-MCP-V0.3-IMPLEMENTATION-SPEC.md#2-connector-authorization-and-assignment-contract) defines the normative v2 authorization and operation wire contract. The tables and routes below this summary describe the legacy contract and v0.2.0 storage. New management interfaces belong behind the existing admin credential and v2 activation gate.
+
+| Boundary | v2 required behavior |
+|---|---|
+| OAuth admission | Exact issuer, resource audience, Connector, client, Grant and credential epoch. Select wire contract from trusted authority and reject version mismatches. |
+| Discovery | Page the authenticated Connector's Assignment index. Report stale observations explicitly. Permit zero assignments. |
+| Target resolution | Parse and re-encode `w2.<workspaceId>.<assignmentGeneration>.<bindingGeneration>`. Foreign and missing both return `TARGET_NOT_FOUND`. A proven owned stale Target returns `STALE_TARGET`. |
+| Admission | Enforce current permission intersection and exact request digest. Mutating or effectful calls supply a timestamped `k2` Operation key. Same key and digest returns the same receipt. Expired unseen keys cannot start an Operation. |
+| Dispatch | Check fresh scoped DispatchPermit, lease, Binding and writer authority. Existing held evidence survives revoke or timeout. |
+| Status or cancel | Require initiating Grant, Connector, current Assignment and Binding generations and relevant current permissions. A paused/offline Workspace can still expose an authorized retained receipt. |
+| Management transition | Fence admission first. Verify settlement and destination. Publish Assignment, generations, affected index and exact receipt by CAS. Preserve old draft, unknown effects and reservations. |
+| Browser version skew | Return `UPGRADE_REQUIRED` for incompatible execution. Legacy Grant readers remain fixed to their original binding. Never reinterpret a failed v2 request as v1. |
+
+The migration retains independent legacy, prepare and native storage modes and marker fences. Keep the v2 activation decision separate from native storage cutover. After authority changes, rollback requires a compatible reader and must not resurrect old Grants, Targets or provider effects.
+
+## Historical v1 protocol and v0.2.0 compatibility details
 
 Normative supplement to DESIGN.md and TOOLS.md. Runtime candidate implementation and verification status are recorded in RELEASE_VERIFICATION.md and todo.md. Values are proposed initial defaults; change only through versioned configuration and tests. Security policy cannot be weakened by Resource content.
 

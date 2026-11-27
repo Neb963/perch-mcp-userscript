@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { zipSync } from "fflate";
 import ts from "typescript";
+import { buildAgentKnowledge } from "./agent-knowledge.js";
 execFileSync(process.execPath, ["packages/resources/generate-defaults.mjs"], {
   stdio: "inherit",
 });
@@ -104,12 +105,13 @@ await cp("docs/optimization/STORAGE-MIGRATION.md", "dist/cloudflare/docs/optimiz
 await cp("apps/gateway/.dev.vars.example", "dist/cloudflare/.dev.vars.example");
 await writeFile(
   "dist/STATUS.txt",
-  "VERIFICATION CANDIDATE — NOT A FULL-PARITY RELEASE. Read docs/RELEASE_VERIFICATION.md before installation. Production provider mutations and unverified preview capabilities remain gated.\n",
+  "OFFLINE DEVELOPMENT VERIFICATION CANDIDATE. Read OPERATOR-ACCEPTANCE.md and docs/verification/v0.3/ACCEPTANCE.md before installation. Capture and external acceptance gates remain open.\n",
 );
 const packageInfo = JSON.parse(await readFile("package.json", "utf8"));
 const sourceTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
   encoding: "utf8",
 }).trim();
+await buildAgentKnowledge("dist", packageInfo.version, sourceTree);
 await writeFile(
   "dist/RELEASE.json",
   JSON.stringify(
@@ -216,7 +218,7 @@ await writeFile("dist/perch-mcp-candidate.zip", zipSync(archive, zipOptions));
 await writeFile("dist/SHA256SUMS.txt", archive["SHA256SUMS.txt"]!);
 // External manifest includes the enclosing archive; the archive cannot hash itself.
 const downloads = ["perch-mcp.user.txt","perch-mcp.user.js","perch-mcp-cloudflare.zip",
-  "perch-mcp-source.zip","perch-mcp-candidate.zip","RELEASE.json","OPERATOR-ACCEPTANCE.md"];
+  "perch-mcp-source.zip","perch-mcp-candidate.zip","perch-agent-knowledge.zip","RELEASE.json","OPERATOR-ACCEPTANCE.md"];
 const downloadChecksums: string[] = [];
 for (const name of downloads) downloadChecksums.push(
   createHash("sha256").update(await readFile("dist/"+name)).digest("hex")+"  "+name);

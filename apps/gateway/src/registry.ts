@@ -1,5 +1,5 @@
 import { withSqlUsage } from "./sql-meter.js";
-import { validateRegistryCore } from "./registry-core.js";
+import { validateRegistryCore, type RegistryCore } from "./registry-core.js";
 import { appendOAuthDiagnostic, readOAuthDiagnostics } from "./oauth-diagnostics.js";
 import { resourceStorageMaintenance, resourceStorageNeedsMaintenance, resourceStorageStatus, resourceLibraryIsNative, resourceLibraryRevision } from "./resource-storage.js";
 import { ResourceError } from "../../../packages/resource-library/src/index.js";
@@ -24,6 +24,8 @@ import {
   randomSecret,
   revision,
   str,
+  workspace,
+  rpc,
   type Binding,
   type Env,
 } from "./common.js";
@@ -32,7 +34,27 @@ import { RegistryIndex } from "./registry-index.js";
 import { incident, incidentSummary, persistIncident, registryFailureReason, registryQuotaDimension, registryFailureSignal } from "./incident.js";
 import { requiresGeneratorReservation } from "../../../packages/contracts/src/effect-policy.js";
 import { resourceAdmin, resourceTool } from "./resources.js";
+import {
+  assignmentCount, changeAssignmentIndex, discoverAssignments, initializeAssignments, permissionCeiling,
+  projectAssignment, requireAssignment, resolveTarget,
+} from './assignments.js';
+import { segmentRequestSchema, type SegmentRequest } from '../../../packages/contracts/src/operations-v2.js';
+import { nextGeneration, v2DefaultPermissions, workspaceStatusV2Schema } from '../../../packages/contracts/src/target.js';
+
+import {
+  bindingOwnerKey, bindingProofKey, matchBindingTransition, parseTransitionInput,
+  type BindingAction, type EditorProof, type TransitionInput, type WorkspaceTransition,
+} from './binding-transition.js';
+
 export interface WorkspaceRecord {
+  contractVersion?: 2;
+  connectorId?: string | null;
+  assignmentGeneration?: number;
+  bindingGeneration?: number;
+  permissionRevision?: number;
+  transition?: WorkspaceTransition;
+  transitionSerial?: number;
+  observation?: { epoch: number; dirty: boolean | null; observedAt: number };
   id: string;
   label: string;
   revision: number;
@@ -45,6 +67,8 @@ export interface WorkspaceRecord {
   epoch: number;
 }
 export interface AgentRecord {
+  contractVersion?: 2;
+  permissionCeiling?: string[];
   id: string;
   label: string;
   workspaceId: string;
@@ -53,6 +77,9 @@ export interface AgentRecord {
   endpoint: string;
 }
 export interface GrantRecord {
+  contractVersion?: 2;
+  audience?: string;
+  credentialEpoch?: number;
   id: string;
   agentId: string;
   workspaceId: string;
@@ -64,6 +91,10 @@ export interface GrantRecord {
   revision: number;
 }
 interface Approval {
+  contractVersion?: 2;
+  connectorRevision?: number;
+  credentialEpoch?: number;
+  audience?: string;
   id: string;
   code: string;
   kind: "oauth" | "effect";
@@ -92,20 +123,12 @@ interface Approval {
     sourceRevision?: string;
   };
 }
-interface Core {
-  schemaVersion: 1 | 2;
-  revision: number;
-  policyRevision: number;
-  paused: boolean;
-  issuer: string | null;
-  paired: boolean;
-  adminHash?: string;
-  executionHash?: string;
-  browserInstallationId?: string;
-  recoveryHash?: string;
-  credentialEpoch: number;
-}
+type Core = RegistryCore;
 export interface AuthProps {
+  contractVersion?: 2;
+  audience?: string;
+  clientId?: string;
+  credentialEpoch?: number;
   grantId: string;
   agentId: string;
   workspaceId: string;
@@ -144,12 +167,6 @@ export class Registry {
       credentialEpoch: 1,
     } : stored;
     validateRegistryCore(c);
-    if (c.schemaVersion !== 1 && c.schemaVersion !== 2)
-      throw new ApiError(
-        "INCOMPATIBLE_VERSION",
-        "Registry schema is newer than this Worker; restore a compatible version.",
-        409,
-      );
     return c;
   }
   private cleanup(): void {
@@ -235,7 +252,7 @@ export class Registry {
     return {activity,resources};
   }
   private bump(c: Core): void {
-    c.revision++;
+    c.revision = nextGeneration(c.revision);
     this.db.put("core", c);
   }
   private getWorkspace(workspaceId: string): WorkspaceRecord {
@@ -472,10 +489,16 @@ export class Registry {
               binding: w.binding,
               bindingRevision: w.bindingRevision,
             };
+          if (w.contractVersion === 2) {
+            if (w.binding) this.db.delete(bindingOwnerKey(w.binding.generatorId));
+            w.bindingGeneration = nextGeneration(requireAssignment(w).bindingGeneration);
+            delete w.transition;
+            delete w.observation;
+          }
           w.binding = null;
-          w.bindingRevision++;
-          w.epoch++;
-          w.revision++;
+          w.bindingRevision = nextGeneration(w.bindingRevision);
+          w.epoch = nextGeneration(w.epoch);
+          w.revision = nextGeneration(w.revision);
           w.paused = true;
           this.db.put(key, w);
           this.revokeWorkspace(w.id);
@@ -497,28 +520,35 @@ export class Registry {
           "INVALID_INPUT",
           "Validated OAuth request required.",
         );
-      const a = this.db
-        .keys("agent/")
-        .map((k) => this.db.get<AgentRecord>(k))
-        .find((a) => a.endpoint === auth.resource && !a.suspended);
-      if (!a) throw new ApiError("INVALID_TARGET", "Unknown Agent resource.");
-      const w = this.getWorkspace(a.workspaceId);
-      if (!w.binding)
+      const baseline = this.core();
+      const prefix = baseline.issuer + '/mcp/';
+      if (!auth.resource.startsWith(prefix)) throw new ApiError('INVALID_TARGET', 'Unknown Connector resource.');
+      const a = this.db.get<AgentRecord | undefined>('agent/' + id(auth.resource.slice(prefix.length)));
+      if (!a || a.endpoint !== auth.resource || a.suspended)
+        throw new ApiError('INVALID_TARGET', 'Unknown Connector resource.');
+      const isV2 = a.contractVersion === 2;
+      const w = isV2 ? null : this.getWorkspace(a.workspaceId);
+      if (isV2) this.requireDevelopmentContract(baseline);
+      if (w && !w.binding)
         throw new ApiError(
           "BINDING_MISMATCH",
           "Attach the Workspace before authorization.",
           409,
         );
-      if (w.paused || this.core().paused)
+      if (w?.paused || baseline.paused)
         throw new ApiError("PAUSED", "Execution is paused.", 403);
+      const ceiling = isV2 ? permissionCeiling(a.permissionCeiling) : w!.permissions;
       const handle = randomSecret(),
         handleHash = await digest(handle),
         requestDigest = await digest(
           canonical({
             request: auth,
-            bindingRevision: w.bindingRevision,
-            permissions: w.permissions,
-            policyRevision: this.core().policyRevision,
+            contractVersion: isV2 ? 2 : 1,
+            bindingRevision: w?.bindingRevision ?? 0,
+            connectorRevision: a.revision,
+            credentialEpoch: baseline.credentialEpoch,
+            permissions: ceiling,
+            policyRevision: baseline.policyRevision,
           }),
         ),
         approvalId = crypto.randomUUID();
@@ -528,21 +558,24 @@ export class Registry {
         kind: "oauth",
         digest: requestDigest,
         agentId: a.id,
-        workspaceId: w.id,
+        workspaceId: w?.id ?? '',
+        ...(isV2 ? { contractVersion: 2 as const, connectorRevision: a.revision,
+          credentialEpoch: baseline.credentialEpoch, audience: a.endpoint } : {}),
         clientId: String(auth.clientId),
         redirectUri: String(auth.redirectUri),
         scope: Array.isArray(auth.scope) ? (auth.scope as string[]) : [],
         expiresAt: Date.now() + 300000,
         state: "pending",
         revision: 1,
-        bindingRevision: w.bindingRevision,
-        permissionSnapshot: [...w.permissions],
-        policyRevision: this.core().policyRevision,
+        bindingRevision: w?.bindingRevision ?? 0,
+        permissionSnapshot: [...ceiling],
+        policyRevision: baseline.policyRevision,
         request: auth,
         handleHash,
       };
       this.db.transaction(() => {
         const c = this.core();
+        this.verifyApprovalScope(approval, c);
         this.cleanup();
         if (
           this.catalog.approvalFull(Date.now())
@@ -560,7 +593,9 @@ export class Registry {
         code: approval.code,
         handle,
         agentLabel: a.label,
-        workspaceLabel: w.label,
+        workspaceLabel: w?.label ?? null,
+        contractVersion: isV2 ? 2 : 1,
+        permissionCeiling: isV2 ? ceiling : undefined,
         clientId: approval.clientId,
         redirectUri: approval.redirectUri,
         scope: approval.scope,
@@ -599,22 +634,8 @@ export class Registry {
             return { state: a.completionFailed ? "failed" : a.completionGrantId ? "processing" : "consumed" };
           }
           if (a.state !== "approved") return { state: a.state };
-          const w = this.getWorkspace(a.workspaceId),
-            agent = this.getAgent(a.agentId);
-          if (
-            !w.binding ||
-            w.paused ||
-            agent.suspended ||
-            this.core().paused ||
-            w.bindingRevision !== a.bindingRevision ||
-            canonical(w.permissions) !== canonical(a.permissionSnapshot) ||
-            this.core().policyRevision !== a.policyRevision
-          )
-            throw new ApiError(
-              "REVOKED",
-              "Workspace is unavailable for authorization.",
-              403,
-            );
+          const c = this.core();
+          this.verifyApprovalScope(a, c);
           this.cleanup();
           if (
             this.catalog.count("grant") >=
@@ -629,8 +650,10 @@ export class Registry {
             id: crypto.randomUUID(),
             agentId: a.agentId,
             workspaceId: a.workspaceId,
-            bindingRevision: w.bindingRevision,
-            permissions: [...w.permissions],
+            bindingRevision: a.bindingRevision,
+            permissions: [...a.permissionSnapshot],
+            ...(a.contractVersion === 2 ? { contractVersion: 2 as const,
+              audience: a.audience, credentialEpoch: a.credentialEpoch } : {}),
             state: "active",
             clientId: a.clientId,
             expiresAt: Date.now() + 30 * 86400000,
@@ -649,6 +672,8 @@ export class Registry {
               agentId: g.agentId,
               workspaceId: g.workspaceId,
               bindingRevision: g.bindingRevision,
+              ...(g.contractVersion === 2 ? { contractVersion: 2 as const,
+                audience: g.audience, clientId: g.clientId, credentialEpoch: g.credentialEpoch } : {}),
             },
           };
         }),
@@ -724,6 +749,8 @@ export class Registry {
     }
     if (path === "/internal/resource-tool") {
       const b = await parseBody(request);
+      if ((b.props as AuthProps | undefined)?.contractVersion === 2)
+        throw new ApiError('NOT_FOUND', 'Resource tools are unavailable under the development contract.', 404);
       const authorized = this.authorize(b);
       return json(
         await resourceTool(
@@ -739,7 +766,52 @@ export class Registry {
     }
     if (path === "/internal/authorize") {
       const b = await parseBody(request);
+      if ((b.props as AuthProps | undefined)?.contractVersion === 2 && b.target === undefined)
+        return json(this.db.transaction(() => {
+          const { agent, grant } = this.authenticateConnector(b);
+          return { agent, grant };
+        }));
       return json(this.db.transaction(() => this.authorize(b)));
+    }
+    if (path === "/internal/v2/discover") {
+      const b = await parseBody(request);
+      const parsed = workspaceStatusV2Schema.safeParse(b.args);
+      if (!parsed.success) throw new ApiError("INVALID_INPUT", "Invalid workspace_status arguments.");
+      const args = parsed.data;
+      return json(this.db.transaction(() => {
+        const { agent, grant } = this.authenticateConnector(b);
+        const common = { contractVersion: 2, connectorId: agent.id, serverTimeMs: Date.now() };
+        if (args.target === undefined)
+          return { ...common, ...discoverAssignments(this.db, agent.id, grant.permissions, args.limit ?? 50, args.cursor) };
+        const w = resolveTarget(this.db, agent.id, args.target);
+        if (args.verifySource)
+          throw new ApiError("UPGRADE_REQUIRED", "Verified browser source is unavailable during contract preparation.", 409);
+        return { ...common, ...projectAssignment(w, grant.permissions), sourceRevision: null,
+          localRevision: null, previewRevision: null, savedRevision: null };
+      }));
+    }
+    if (path === '/api/v1/tab/rebind-proof') {
+      if (request.method !== 'POST') throw new ApiError('INVALID_INPUT', 'POST required.', 405);
+      const body = await parseBody(request, 4096);
+      fields(body, ['workspaceId', 'expectedRevision', 'binding', 'tabInstanceId', 'adapterVersion']);
+      id(body.tabInstanceId, 'tabInstanceId');
+      if (body.adapterVersion !== '2') throw new ApiError('UPGRADE_REQUIRED', 'Adapter protocol version 2 required.', 409);
+      const hash = await digest(bearer(request));
+      const proof = Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+      const proofDigest = await digest(proof);
+      const candidate = binding(body.binding);
+      return json(this.db.transaction(() => {
+        const core = this.auth(hash, true);
+        this.requireDevelopmentContract(core);
+        const w = requireAssignment(this.getWorkspace(id(body.workspaceId)));
+        revision(body.expectedRevision, w.revision);
+        if (candidate.browserInstallationId !== core.browserInstallationId)
+          throw new ApiError('BINDING_MISMATCH', 'Destination editor installation differs.', 409);
+        const row: EditorProof = { digest: proofDigest, binding: candidate, workspaceRevision: w.revision,
+          credentialEpoch: core.credentialEpoch, expiresAt: Date.now() + 30_000 };
+        this.db.put(bindingProofKey(w.id), row);
+        return { proof, expiresAt: row.expiresAt };
+      }));
     }
     if (path === "/internal/lease-check") {
       const b = await parseBody(request),
@@ -754,6 +826,18 @@ export class Registry {
         !w.binding
       )
         throw new ApiError("REVOKED", "Lease binding or policy changed.", 403);
+      if (w.contractVersion === 2) {
+        this.requireDevelopmentContract(c);
+        if (b.adapterVersion !== '2') throw new ApiError('UPGRADE_REQUIRED', 'Adapter protocol version 2 required.', 409);
+        if (b.dirty === null || typeof b.dirty === 'boolean') {
+          const now = Date.now();
+          if (!w.observation || w.observation.epoch !== w.epoch ||
+              w.observation.dirty !== b.dirty || w.observation.observedAt + 60_000 <= now) {
+            w.observation = { epoch: w.epoch, dirty: b.dirty, observedAt: now };
+            this.db.put('workspace/' + w.id, w);
+          }
+        }
+      }
       return json({ permissions: w.permissions });
     }
     if (path === "/internal/claim") {
@@ -767,6 +851,15 @@ export class Registry {
             w = this.getWorkspace(workspaceId);
           if (c.paused || w.paused)
             throw new ApiError("PAUSED", "Execution is paused.", 403);
+          if (w.transition) throw new ApiError('TRANSITION_BLOCKED', 'Workspace transition is pending.', 409);
+          if (w.contractVersion === 2) {
+            this.requireDevelopmentContract(c);
+            requireAssignment(w);
+            if (b.adapterVersion !== '2')
+              throw new ApiError('UPGRADE_REQUIRED', 'Adapter protocol version 2 required.', 409);
+          } else if (b.adapterVersion === '2') {
+            throw new ApiError('UPGRADE_REQUIRED', 'Workspace uses adapter protocol version 1.', 409);
+          }
           if (
             !w.binding ||
             canonical(w.binding) !== canonical(proposed) ||
@@ -801,6 +894,29 @@ export class Registry {
           return { workspace: w, credentialEpoch: c.credentialEpoch };
         }),
       );
+    }
+    if (path === '/internal/v2/segment') {
+      const b = await parseBody(request, 8192);
+      const parsed = segmentRequestSchema.safeParse(b.segment);
+      if (!parsed.success || (b.props as AuthProps | undefined)?.contractVersion !== 2)
+        throw new ApiError('INVALID_INPUT', 'Exact v2 segment required.');
+      const segment = parsed.data;
+      return json(this.db.transaction(() => {
+        const {workspace: w, grant} = this.authorize(b);
+        const operationId = id(b.operationId);
+        const key = 'permit/' + operationId;
+        const parent = this.db.get<{workspaceId: string; epoch: number; state: string; target?: string;
+          grantId?: string; segments?: SegmentRequest[]} | undefined>(key);
+        if (!parent || parent.state !== 'consumed' || parent.workspaceId !== w.id || parent.grantId !== grant.id ||
+            parent.target !== b.target || parent.epoch !== w.epoch || b.epoch !== w.epoch ||
+            b.bindingRevision !== w.bindingRevision)
+          throw new ApiError('STALE_EPOCH', 'Segment has no current consumed parent authority.', 409);
+        const previous = parent.segments ?? [];
+        if (segment.sequence !== previous.length || previous.length >= 128)
+          throw new ApiError('CONFLICT', 'Segment permit is already consumed or out of sequence.', 409);
+        this.db.put(key, {...parent, segments: [...previous, segment]});
+        return {operationId, sequence: segment.sequence, digest: segment.digest, expiresAt: Date.now() + 5000};
+      }));
     }
     if (path === "/internal/dispatch") {
       const b = await parseBody(request);
@@ -839,6 +955,7 @@ export class Registry {
             epoch: w.epoch,
             createdAt: Date.now(),
             state: "consumed",
+            ...(result.grant.contractVersion === 2 ? {target: b.target, grantId: result.grant.id} : {}),
           });
           if (requiresGeneratorReservation(String(b.tool ?? ''), b.mutating === true) && w.binding) {
             const key = "reservation/" + w.binding.generatorId,
@@ -871,9 +988,10 @@ export class Registry {
       return json(
         this.db.transaction(() => {
           const w = this.getWorkspace(id(b.workspaceId));
-          if (b.expectedEpoch !== w.epoch)
-            throw new ApiError("STALE_EPOCH", "Epoch changed.", 409);
-          w.epoch++;
+          if (b.expectedEpoch !== w.epoch || w.transition ||
+              (b.expectedBindingRevision !== undefined && b.expectedBindingRevision !== w.bindingRevision))
+            throw new ApiError("STALE_EPOCH", "Epoch or Binding changed.", 409);
+          w.epoch = nextGeneration(w.epoch);
           this.db.put("workspace/" + w.id, w);
           return { epoch: w.epoch };
         }),
@@ -965,7 +1083,7 @@ export class Registry {
       });
     if (request.method === "GET") return this.readAdmin(path, url);
     const expectedMethod =
-      /^\/api\/v1\/admin\/(workspaces|agents)\/[^/]+$/.test(path)
+      /^\/api\/v1\/admin\/(workspaces|agents|connectors)\/[^/]+$/.test(path)
         ? "PATCH"
         : "POST";
     if (request.method !== expectedMethod)
@@ -975,6 +1093,21 @@ export class Registry {
       requestHash = await digest(
         canonical({ path, method: request.method, body: b }),
       );
+    const upgrade = request.method === 'POST' && /^\/api\/v1\/admin\/connectors\/([A-Za-z0-9_-]{1,128})\/upgrade$/.exec(path);
+    if (upgrade) {
+      this.assertManagementKey(key);
+      return json(await this.upgradeConnector(hash,path,upgrade[1]!,key,requestHash,b));
+    }
+    const abort = request.method === 'POST' && /^\/api\/v1\/admin\/workspaces\/([A-Za-z0-9_-]{1,128})\/abort-transition$/.exec(path);
+    if (abort) {
+      this.assertManagementKey(key);
+      return json(await this.abortBindingChange(hash, abort[1]!, key, requestHash, b));
+    }
+    const action = request.method === 'POST' ? matchBindingTransition(path) : null;
+    if (action && this.getWorkspace(action.workspaceId).contractVersion === 2) {
+      this.assertManagementKey(key);
+      return json(await this.changeBinding(hash, path, action.workspaceId, action.action, key, requestHash, b));
+    }
     return this.db.transaction(() => {
       const c = this.auth(hash),
         idem = this.db.get<{ hash: string; result: unknown; expires: number }>(
@@ -1009,17 +1142,320 @@ export class Registry {
       return json(result);
     });
   }
+  private async upgradeConnector(authHash: string, path: string, connectorId: string, key: string, requestHash: string,
+      body: Record<string,unknown>): Promise<unknown> {
+    fields(body,['expectedRevision','expectedWorkspaceRevision','acknowledgeReauthorization']);
+    if (body.acknowledgeReauthorization !== true)
+      throw new ApiError('APPROVAL_REQUIRED','Confirm replacement of the fixed-scope v1 Grant.',409);
+    if (this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true')
+      throw new ApiError('UPGRADE_REQUIRED','The v2 assignment contract is disabled.',409);
+    const resultKey='idempotency/'+key;
+    const previous=()=>{
+      const receipt=this.db.get<{hash:string;result:unknown;expires:number}|undefined>(resultKey);
+      if (!receipt || receipt.expires<=Date.now()) return undefined;
+      if (receipt.hash!==requestHash) throw new ApiError('IDEMPOTENCY_CONFLICT','Management key belongs to a different request.',409);
+      return receipt;
+    };
+    const started=this.db.transaction(()=>{
+      const core=this.auth(authHash);
+      const receipt=previous();
+      if (receipt) return {receipt} as const;
+      const a=this.getAgent(connectorId);
+      if (a.contractVersion!==undefined || a.suspended)
+        throw new ApiError('CONFLICT','Connector is not an active fixed-scope v1 Connector.',409);
+      const w=this.getWorkspace(a.workspaceId);
+      if (w.contractVersion!==undefined || w.agentId!==a.id || !w.binding)
+        throw new ApiError('BINDING_MISMATCH','A matching existing v1 Binding is required.',409);
+      revision(body.expectedRevision,a.revision);
+      revision(body.expectedWorkspaceRevision,w.revision);
+      if (w.transition && (w.transition.id!==key || w.transition.requestHash!==requestHash || w.transition.path!==path))
+        throw new ApiError('TRANSITION_BLOCKED','A different Workspace transition is pending.',409);
+      if (!w.transition) {
+        if (this.catalog.bindingBlocked(w.id) || this.db.get('reservation/'+w.binding.generatorId))
+          throw new ApiError('TRANSITION_BLOCKED','Settle old dispatched effects before Connector upgrade.',409);
+        this.cleanup();
+        if (this.catalog.count('idempotency')>=1024) throw new ApiError('QUOTA_EXCEEDED','Management idempotency budget reached.',429);
+        if (w.binding.browserInstallationId!==core.browserInstallationId)
+          throw new ApiError('BINDING_MISMATCH','Legacy Binding belongs to a different installation.',409);
+        w.transitionSerial=nextGeneration(w.transitionSerial??0);
+        w.transition={id:key,requestHash,path,startedAt:Date.now(),serial:w.transitionSerial};
+        this.db.put('workspace/'+w.id,w);
+      }
+      return {current:w} as const;
+    });
+    if ('receipt' in started && started.receipt) return started.receipt.result;
+    const before=started.current!;
+    await rpc(workspace(this.env,before.id),'/internal/settle-transition',{
+      workspaceId:before.id,transitionId:key,serial:before.transition!.serial,
+      epoch:before.epoch,bindingRevision:before.bindingRevision,
+    });
+    return this.db.transaction(()=>{
+      const core=this.auth(authHash);
+      const receipt=previous();
+      if (receipt) return receipt.result;
+      const a=this.getAgent(connectorId),w=this.getWorkspace(before.id);
+      revision(body.expectedRevision,a.revision);
+      revision(body.expectedWorkspaceRevision,w.revision);
+      if (a.contractVersion!==undefined || a.suspended || a.workspaceId!==w.id || w.agentId!==a.id ||
+          w.transition?.id!==key || w.transition.requestHash!==requestHash || w.transition.aborting || w.epoch!==before.epoch ||
+          w.bindingRevision!==before.bindingRevision || !w.binding ||
+          this.catalog.bindingBlocked(w.id) || this.db.get('reservation/'+w.binding.generatorId))
+        throw new ApiError('TRANSITION_BLOCKED','Matching v1 scope did not remain settled.',409);
+      const bindingOwner=this.db.get<{workspaceId:string}|undefined>(bindingOwnerKey(w.binding.generatorId));
+      if (bindingOwner && bindingOwner.workspaceId!==w.id)
+        throw new ApiError('TAB_BUSY','Another v2 Workspace owns this Generator.',409);
+      const retainedPermissions=w.permissions.filter(permission=>permission!=='READ_RESOURCES' &&
+        !['CREATE','RENAME','DUPLICATE','LISTING','DELETE','MEDIA','UPLOAD_PUBLIC','PRODUCTION_READ','PRODUCTION_RESTORE','EXPORT_ARTIFACT'].includes(permission));
+      w.permissions=permissionCeiling(retainedPermissions);
+      w.contractVersion=2;
+      w.connectorId=a.id;
+      w.assignmentGeneration=1;
+      w.bindingGeneration=nextGeneration(w.bindingRevision);
+      w.bindingRevision=w.bindingGeneration;
+      w.epoch=nextGeneration(w.epoch);
+      w.revision=nextGeneration(w.revision);
+      w.permissionRevision=1;
+      delete w.transition;
+      delete w.agentId;
+      a.contractVersion=2;
+      a.workspaceId='';
+      a.revision=nextGeneration(a.revision);
+      a.permissionCeiling=w.permissions;
+      initializeAssignments(this.db,a.id);
+      changeAssignmentIndex(this.db,a.id,w.id,true);
+      this.revokeWorkspace(w.id);
+      this.db.put(bindingOwnerKey(w.binding.generatorId),{workspaceId:w.id});
+      this.db.put('workspace/'+w.id,w);
+      this.db.put('agent/'+a.id,a);
+      core.schemaVersion=3;
+      core.assignmentContractVersion=2;
+      const result={connector:a,workspace:w,reauthorizationRequired:true};
+      this.db.put(resultKey,{hash:requestHash,result,expires:Date.now()+86_400_000});
+      this.bump(core);
+      return result;
+    });
+  }
+  private assertManagementKey(key: string): void {
+    if (!/^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.test(key))
+      throw new ApiError('INVALID_INPUT', 'Use a randomly generated management key.');
+  }
+  private async abortBindingChange(authHash: string, workspaceId: string, key: string, requestHash: string,
+    body: Record<string, unknown>): Promise<unknown> {
+    fields(body, ['expectedRevision', 'transitionId']);
+    const transitionId = id(body.transitionId, 'transitionId');
+    const resultKey = 'idempotency/' + key;
+    const prior = () => {
+      const receipt = this.db.get<{hash: string; result: unknown; expires: number} | undefined>(resultKey);
+      if (!receipt || receipt.expires <= Date.now()) return undefined;
+      if (receipt.hash !== requestHash) throw new ApiError('IDEMPOTENCY_CONFLICT', 'Management key belongs to a different request.', 409);
+      return receipt;
+    };
+    const started = this.db.transaction(() => {
+      const core = this.auth(authHash);
+      if (this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true')
+        throw new ApiError('UPGRADE_REQUIRED','The v2 assignment contract is disabled.',409);
+      const receipt = prior();
+      if (receipt) return { receipt } as const;
+      const w = this.getWorkspace(workspaceId);
+      revision(body.expectedRevision, w.revision);
+      if (!w.transition || w.transition.id !== transitionId)
+        throw new ApiError('NOT_FOUND', 'Transition is unavailable.', 404);
+      if (!w.transition.aborting) {
+        this.cleanup();
+        if (this.catalog.count('idempotency') >= 1024)
+          throw new ApiError('QUOTA_EXCEEDED', 'Management idempotency budget reached.', 429);
+        w.transition.aborting = true;
+        this.db.put('workspace/' + w.id, w);
+      }
+      return { current: w } as const;
+    });
+    if ('receipt' in started && started.receipt) return started.receipt.result;
+    const current = started.current!;
+    await rpc(workspace(this.env, workspaceId), '/internal/settle-transition', {
+      workspaceId, transitionId, serial: current.transition!.serial, abort: true,
+      epoch: current.epoch, bindingRevision: current.bindingRevision,
+    });
+    return this.db.transaction(() => {
+      const core = this.auth(authHash);
+      if (this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true')
+        throw new ApiError('UPGRADE_REQUIRED','The v2 assignment contract is disabled.',409);
+      const receipt = prior();
+      if (receipt) return receipt.result;
+      const w = this.getWorkspace(workspaceId);
+      if (w.transition?.id !== transitionId || !w.transition.aborting ||
+          w.epoch !== current.epoch || w.bindingRevision !== current.bindingRevision)
+        throw new ApiError('TRANSITION_BLOCKED', 'Transition fence changed.', 409);
+      if (this.catalog.bindingBlocked(w.id) || (w.binding && this.db.get('reservation/' + w.binding.generatorId)))
+        throw new ApiError('TRANSITION_BLOCKED', 'Reconcile the existing effect before cancelling the transition.', 409);
+      delete w.transition;
+      w.revision = nextGeneration(w.revision);
+      this.db.put('workspace/' + w.id, w);
+      this.db.put(resultKey, { hash: requestHash, result: w, expires: Date.now() + 86_400_000 });
+      this.bump(core);
+      return w;
+    });
+  }
+  private validateTransition(w: WorkspaceRecord, action: BindingAction, input: TransitionInput, c: Core): void {
+    const current = requireAssignment(w);
+    revision(input.expectedRevision, current.revision);
+    if (current.connectorId)
+      revision(input.expectedConnectorRevision, this.getAgent(current.connectorId).revision);
+    else if (input.expectedConnectorRevision !== undefined)
+      throw new ApiError('INVALID_INPUT', 'Workspace has no current Connector.');
+    if (action === 'assign' && current.connectorId)
+      throw new ApiError('CONFLICT', 'Workspace already has a Connector.', 409);
+    if ((action === 'transfer' || action === 'unassign') && !current.connectorId)
+      throw new ApiError('CONFLICT', 'Workspace has no assigned Connector.', 409);
+    if (input.connectorId) {
+      const target = this.getAgent(input.connectorId);
+      if (target.contractVersion !== 2 || target.suspended || target.id === current.connectorId)
+        throw new ApiError('SCOPE_DENIED', 'Destination Connector is unavailable.', 403);
+      revision(input.expectedDestinationConnectorRevision, target.revision);
+    }
+    if (input.retainBinding && (!current.binding || canonical(input.binding) !== canonical(current.binding)))
+      throw new ApiError('BINDING_MISMATCH', 'Retained Binding must match the verified editor.', 409);
+    if (input.binding && input.binding.browserInstallationId !== c.browserInstallationId)
+      throw new ApiError('BINDING_MISMATCH', 'Destination editor installation differs.', 409);
+    if (input.binding) {
+      const generatorId = input.binding.generatorId;
+      const owner = this.db.get<{workspaceId: string} | undefined>(bindingOwnerKey(generatorId));
+      const reservation = this.db.get<{workspaceId: string} | undefined>('reservation/' + generatorId);
+      if ((owner && owner.workspaceId !== current.id) || (reservation && reservation.workspaceId !== current.id))
+        throw new ApiError('TAB_BUSY', 'Destination Generator is already reserved.', 409);
+      // Existing v1 bindings predate the owner record. Inspect bounded
+      // management pages before first publication; dispatch never scans them.
+      for (let offset = 0; offset < 1000; offset += 100) {
+        const keys = this.catalog.page('workspace', offset, Date.now());
+        for (const key of keys) {
+          const other = this.db.get<WorkspaceRecord>(key);
+          if (other.id !== current.id && other.binding?.generatorId === generatorId)
+            throw new ApiError('TAB_BUSY', 'Destination Generator is already bound.', 409);
+        }
+        if (keys.length < 100) break;
+        if (offset === 900)
+          throw new ApiError('LIMIT_EXCEEDED', 'Cannot verify all existing Generator bindings.', 409);
+      }
+    }
+  }
+  private async changeBinding(
+    authHash: string, path: string, workspaceId: string, action: BindingAction, key: string,
+    requestHash: string, body: Record<string, unknown>,
+  ): Promise<unknown> {
+    const input = parseTransitionInput(action, body);
+    const proofDigest = input.bindingProof ? await digest(input.bindingProof) : undefined;
+    const resultKey = 'idempotency/' + key;
+    const priorReceipt = () => {
+      const receipt = this.db.get<{hash: string; result: unknown; expires: number} | undefined>(resultKey);
+      if (!receipt || receipt.expires <= Date.now()) return undefined;
+      if (receipt.hash !== requestHash)
+        throw new ApiError('IDEMPOTENCY_CONFLICT', 'Management key belongs to a different request.', 409);
+      return receipt;
+    };
+    const started = this.db.transaction(() => {
+      const core = this.auth(authHash);
+      this.requireDevelopmentContract(core);
+      const receipt = priorReceipt();
+      if (receipt) return { receipt } as const;
+      const current = requireAssignment(this.getWorkspace(workspaceId));
+      if (current.transition) {
+        if (current.transition.aborting)
+          throw new ApiError('TRANSITION_BLOCKED', 'Transition cancellation is awaiting settlement.', 409);
+        if (current.transition.id !== key || current.transition.path !== path)
+          throw new ApiError('TRANSITION_BLOCKED', 'Another transition is awaiting reconciliation.', 409);
+        if (current.transition.requestHash !== requestHash)
+          throw new ApiError('IDEMPOTENCY_CONFLICT', 'Management key belongs to a different transition.', 409);
+        return { current } as const;
+      }
+      this.validateTransition(current, action, input, core);
+      if (current.binding && !input.acknowledgeDirty &&
+          !(current.observation?.epoch === current.epoch && current.observation.dirty === false &&
+            current.observation.observedAt + 60_000 > Date.now()))
+        throw new ApiError('APPROVAL_REQUIRED', 'Confirm leaving the current draft in place.', 409);
+      if (input.binding) {
+        const proof = this.db.get<EditorProof | undefined>(bindingProofKey(current.id));
+        if (!proof || proof.digest !== proofDigest || proof.expiresAt <= Date.now() ||
+            proof.credentialEpoch !== core.credentialEpoch || proof.workspaceRevision !== current.revision ||
+            canonical(proof.binding) !== canonical(input.binding))
+          throw new ApiError('BINDING_MISMATCH', 'Destination editor proof expired or changed.', 409);
+      }
+      this.cleanup();
+      if (this.catalog.count('idempotency') >= 1024)
+        throw new ApiError('QUOTA_EXCEEDED', 'Management idempotency budget reached.', 429);
+      current.transitionSerial = nextGeneration(current.transitionSerial ?? 0);
+      current.transition = { id: key, requestHash, path, startedAt: Date.now(), serial: current.transitionSerial };
+      this.db.put('workspace/' + current.id, current);
+      return { current } as const;
+    });
+    if ('receipt' in started && started.receipt) return started.receipt.result;
+    const current = started.current!;
+    await rpc(workspace(this.env, workspaceId), '/internal/settle-transition', {
+      workspaceId, transitionId: key, serial: current.transition!.serial,
+      epoch: current.epoch, bindingRevision: current.bindingRevision,
+    });
+    return this.db.transaction(() => {
+      const core = this.auth(authHash);
+      this.requireDevelopmentContract(core);
+      const receipt = priorReceipt();
+      if (receipt) return receipt.result;
+      const latest = requireAssignment(this.getWorkspace(workspaceId));
+      if (latest.transition?.id !== key || latest.transition.requestHash !== requestHash || latest.transition.aborting ||
+          latest.epoch !== current.epoch || latest.bindingRevision !== current.bindingRevision)
+        throw new ApiError('TRANSITION_BLOCKED', 'Transition fence changed.', 409);
+      this.validateTransition(latest, action, input, core);
+      if (this.catalog.bindingBlocked(latest.id) ||
+          (latest.binding && this.db.get('reservation/' + latest.binding.generatorId)))
+        throw new ApiError('TRANSITION_BLOCKED', 'Reconcile the exact old effect before retrying this transition.', 409);
+      const previousBinding = latest.binding;
+      const previousConnector = latest.connectorId;
+      if (action === 'assign' || action === 'transfer') latest.connectorId = input.connectorId!;
+      if (action === 'unassign') latest.connectorId = null;
+      if (action === 'rebind') latest.binding = input.binding!;
+      if (action === 'detach' || action === 'unassign' || (action === 'transfer' && !input.retainBinding))
+        latest.binding = null;
+      if (previousConnector !== latest.connectorId) {
+        if (previousConnector) changeAssignmentIndex(this.db, previousConnector, latest.id, false);
+        if (latest.connectorId) changeAssignmentIndex(this.db, latest.connectorId, latest.id, true);
+        latest.assignmentGeneration = nextGeneration(latest.assignmentGeneration);
+      }
+      if (previousBinding && previousBinding.generatorId !== latest.binding?.generatorId)
+        this.db.delete(bindingOwnerKey(previousBinding.generatorId));
+      if (latest.binding) this.db.put(bindingOwnerKey(latest.binding.generatorId), { workspaceId });
+      latest.bindingGeneration = nextGeneration(latest.bindingGeneration);
+      latest.bindingRevision = latest.bindingGeneration;
+      latest.epoch = nextGeneration(latest.epoch);
+      latest.revision = nextGeneration(latest.revision);
+      delete latest.observation;
+      delete latest.transition;
+      delete latest.recoveryBinding;
+      this.db.delete(bindingProofKey(latest.id));
+      this.db.put('workspace/' + latest.id, latest);
+      this.db.put(resultKey, { hash: requestHash, result: latest, expires: Date.now() + 86_400_000 });
+      this.bump(core);
+      return latest;
+    });
+  }
   private authorize(b: Record<string, unknown>): {
     workspace: WorkspaceRecord;
     grant: GrantRecord;
     agent: AgentRecord;
+    policyRevision?: number;
   } {
     const props = b.props as AuthProps;
-    if (!props)
+    if (props?.contractVersion === 2) {
+      const { agent, grant, core } = this.authenticateConnector(b);
+      const w = resolveTarget(this.db, agent.id, b.target);
+      if (w.transition && b.resultAccess !== true)
+        throw new ApiError('TRANSITION_BLOCKED', 'Workspace is changing its Binding or Assignment.', 409);
+      if ((core.paused || w.paused) && b.resultAccess !== true)
+        throw new ApiError('PAUSED', 'Execution is paused.', 403);
+      this.requireToolPermissions(b, w, grant);
+      return { workspace: w, grant, agent, policyRevision: core.policyRevision };
+    }
+    if (!props || props.contractVersion !== undefined || b.target !== undefined)
       throw new ApiError("AUTH_REQUIRED", "Grant context required.", 401);
     const c = this.core(),
       g = this.db.get<GrantRecord>("grant/" + id(props.grantId));
-    if (!g || g.state !== "active" || g.expiresAt <= Date.now())
+    if (!g || g.contractVersion !== undefined || g.state !== "active" || g.expiresAt <= Date.now())
       throw new ApiError("REVOKED", "Grant is revoked or expired.", 403);
     const a = this.getAgent(g.agentId),
       w = this.getWorkspace(g.workspaceId);
@@ -1032,7 +1468,10 @@ export class Registry {
       props.bindingRevision !== w.bindingRevision ||
       g.bindingRevision !== w.bindingRevision ||
       a.workspaceId !== w.id ||
+      a.contractVersion !== undefined ||
+      w.contractVersion !== undefined ||
       a.suspended ||
+      w.transition ||
       !w.binding
     )
       throw new ApiError(
@@ -1040,6 +1479,10 @@ export class Registry {
         "Assignment, binding or execution policy changed.",
         403,
       );
+    this.requireToolPermissions(b, w, g);
+    return { workspace: w, grant: g, agent: a };
+  }
+  private requireToolPermissions(b: Record<string, unknown>, w: WorkspaceRecord, g: GrantRecord): void {
     const needed = Array.isArray(b.permissions) ? b.permissions : [];
     if (
       !needed.every(
@@ -1075,7 +1518,53 @@ export class Registry {
         "External provider effects remain disabled until live adapter acceptance.",
         409,
       );
-    return { workspace: w, grant: g, agent: a };
+  }
+  private requireDevelopmentContract(core: Core): void {
+    if (this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true' || core.assignmentContractVersion !== 2)
+      throw new ApiError('UPGRADE_REQUIRED', 'The v2 assignment contract is disabled.', 409);
+  }
+  private authenticateConnector(b: Record<string, unknown>): { agent: AgentRecord; grant: GrantRecord; core: Core } {
+    const props = b.props as AuthProps | undefined;
+    const core = this.core();
+    this.requireDevelopmentContract(core);
+    if (!props || props.contractVersion !== 2)
+      throw new ApiError('AUTH_REQUIRED', 'A v2 Grant is required.', 401);
+    const grant = this.db.get<GrantRecord | undefined>('grant/' + id(props.grantId));
+    if (!grant || grant.contractVersion !== 2 || grant.state !== 'active' ||
+        !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= Date.now() ||
+        grant.agentId !== props.agentId || grant.agentId !== b.agentId ||
+        grant.credentialEpoch !== core.credentialEpoch || grant.credentialEpoch !== props.credentialEpoch ||
+        grant.clientId !== props.clientId || grant.audience !== props.audience ||
+        (b.authenticatedClientId !== undefined && b.authenticatedClientId !== grant.clientId) ||
+        (b.resource !== undefined && b.resource !== grant.audience) ||
+        props.workspaceId !== '' || props.bindingRevision !== 0 ||
+        grant.workspaceId !== '' || grant.bindingRevision !== 0)
+      throw new ApiError('REVOKED', 'Connector Grant is unavailable.', 403);
+    const agent = this.getAgent(grant.agentId);
+    if (agent.contractVersion !== 2 || agent.suspended || agent.endpoint !== grant.audience ||
+        agent.endpoint !== core.issuer + '/mcp/' + agent.id)
+      throw new ApiError('REVOKED', 'Connector Grant is unavailable.', 403);
+    const ceiling = permissionCeiling(agent.permissionCeiling);
+    const granted = permissionCeiling(grant.permissions);
+    return { agent, grant: { ...grant, permissions: granted.filter((value) => ceiling.includes(value)) }, core };
+  }
+  private verifyApprovalScope(approval: Approval, core: Core): void {
+    const connector = this.getAgent(approval.agentId);
+    let matches = false;
+    if (approval.contractVersion === 2 && connector.contractVersion === 2) {
+      this.requireDevelopmentContract(core);
+      matches = connector.endpoint === approval.audience &&
+        connector.revision === approval.connectorRevision &&
+        core.credentialEpoch === approval.credentialEpoch &&
+        canonical(permissionCeiling(connector.permissionCeiling)) === canonical(approval.permissionSnapshot);
+    } else if (approval.contractVersion === undefined && connector.contractVersion === undefined) {
+      const w = this.getWorkspace(approval.workspaceId);
+      matches = !!w.binding && !w.paused && !w.transition && w.contractVersion === undefined &&
+        w.id === connector.workspaceId && w.bindingRevision === approval.bindingRevision &&
+        canonical(w.permissions) === canonical(approval.permissionSnapshot);
+    }
+    if (!matches || connector.suspended || core.paused || core.policyRevision !== approval.policyRevision)
+      throw new ApiError('REVOKED', 'Connector approval no longer matches current authorization.', 403);
   }
   private async readAdmin(path: string, url: URL): Promise<Response> {
     // OAuth, Workspace and credential management must not materialize, clone,
@@ -1097,6 +1586,7 @@ export class Registry {
       return json({
         revision: c.revision,
         policyRevision: c.policyRevision,
+        ...(this.env.DEVELOPMENT_CONTRACT_V2_ENABLED === 'true' ? { assignmentContractVersion: 2 } : {}),
         paused: c.paused,
         paired: c.paired,
         version: VERSION,
@@ -1122,6 +1612,26 @@ export class Registry {
         workspaces: this.catalog.count("workspace"),
         agents: this.catalog.count("agent"),
       });
+    if (path === prefix + 'connectors') {
+      if (this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true')
+        throw new ApiError('UPGRADE_REQUIRED', 'The v2 assignment contract is disabled.', 409);
+      const offset = Number(url.searchParams.get('cursor') ?? 0);
+      if (!Number.isSafeInteger(offset) || offset < 0)
+        throw new ApiError('INVALID_INPUT', 'Invalid Connector cursor.');
+      const keys = this.catalog.page('agent', offset, Date.now());
+      const items = keys.map((key) => this.db.get<AgentRecord>(key)).map((connector) => ({
+        ...connector,
+        contractVersion: connector.contractVersion ?? 1,
+        assignmentCount: connector.contractVersion === 2 ? assignmentCount(this.db, connector.id) : 1,
+      }));
+      return json({ items, cursor: keys.length === 100 ? String(offset + 100) : null, revision: c.revision });
+    }
+    const receipt = /^\/api\/v1\/admin\/receipts\/([a-z0-9-]{32,36})$/.exec(path);
+    if (receipt) {
+      const row = this.db.get<{result: unknown; expires: number} | undefined>('idempotency/' + receipt[1]);
+      if (!row || row.expires <= Date.now()) throw new ApiError('NOT_FOUND', 'Management receipt unavailable.', 404);
+      return json({ result: row.result });
+    }
     const entity =
       /^\/api\/v1\/admin\/(workspaces|agents)\/([a-zA-Z0-9_-]+)$/.exec(path);
     if (entity)
@@ -1144,7 +1654,7 @@ export class Registry {
       const items = this.catalog.page(list.slice(0,-1) as "workspace"|"agent"|"grant"|"approval",offset,Date.now())
         .map((k) => this.db.get<Record<string, unknown>>(k))
         .map((v) => {
-          const { handleHash: _, request: __, ...safe } = v;
+          const { handleHash: _, request: __, completionRedirect: ___, ...safe } = v;
           return safe;
         });
       return json({
@@ -1173,11 +1683,52 @@ export class Registry {
       fields(b,["expectedRevision"]);revision(b.expectedRevision,c.revision);
       return this.advanceStorage();
     }
+    if (path === prefix + 'connectors') {
+      if (this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true')
+        throw new ApiError('UPGRADE_REQUIRED', 'The v2 assignment contract is disabled.', 409);
+      fields(b, ['expectedRevision', 'label', 'permissionCeiling']);
+      revision(b.expectedRevision, c.revision);
+      if (this.catalog.count('agent') >= 50)
+        throw new ApiError('QUOTA_EXCEEDED', 'Connector count exceeds installation budget.', 429);
+      const connectorId = crypto.randomUUID();
+      const connector: AgentRecord = {
+        id: connectorId, label: str(b.label, 'label'), revision: 1, suspended: false,
+        endpoint: c.issuer + '/mcp/' + connectorId, workspaceId: '', contractVersion: 2,
+        permissionCeiling: permissionCeiling(b.permissionCeiling ?? v2DefaultPermissions),
+      };
+      initializeAssignments(this.db, connectorId);
+      this.db.put('agent/' + connectorId, connector);
+      c.schemaVersion = 3;
+      c.assignmentContractVersion = 2;
+      return { ...connector, assignmentCount: 0 };
+    }
+    const connectorEdit = /^\/api\/v1\/admin\/connectors\/([A-Za-z0-9_-]+)$/.exec(path);
+    if (connectorEdit) {
+      this.requireDevelopmentContract(c);
+      fields(b, ['expectedRevision', 'label', 'suspended', 'permissionCeiling']);
+      const connector = this.getAgent(connectorEdit[1]!);
+      if (connector.contractVersion !== 2) throw new ApiError('UPGRADE_REQUIRED', 'Connector still uses v1.', 409);
+      revision(b.expectedRevision, connector.revision);
+      if (b.label !== undefined) connector.label = str(b.label, 'label');
+      if (b.permissionCeiling !== undefined) connector.permissionCeiling = permissionCeiling(b.permissionCeiling);
+      if (b.suspended !== undefined) {
+        if (typeof b.suspended !== 'boolean') throw new ApiError('INVALID_INPUT', 'suspended must be boolean.');
+        connector.suspended = b.suspended;
+      }
+      connector.revision = nextGeneration(connector.revision);
+      this.db.put('agent/' + connector.id, connector);
+      return { ...connector, assignmentCount: assignmentCount(this.db, connector.id) };
+    }
     if (path === prefix + "workspaces") {
-      fields(b, ["label", "permissions"]);
+      fields(b, ["label", "permissions", "contractVersion", "connectorId", "expectedConnectorRevision"]);
+      const isV2 = b.contractVersion === 2;
+      if (!isV2 && (b.contractVersion !== undefined || b.connectorId !== undefined || b.expectedConnectorRevision !== undefined))
+        throw new ApiError('INVALID_INPUT', 'Assignment fields require contractVersion 2.');
+      if (isV2 && this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true')
+        throw new ApiError('UPGRADE_REQUIRED','The v2 assignment contract is disabled.',409);
       if (
         this.catalog.count("workspace") >=
-        configuredBudget(this.env.REGISTRY_WORKSPACE_BUDGET, 1000)
+        configuredBudget(this.env.REGISTRY_WORKSPACE_BUDGET, isV2 ? 50 : 1000)
       )
         throw new ApiError(
           "QUOTA_EXCEEDED",
@@ -1189,7 +1740,7 @@ export class Registry {
         label: str(b.label, "label"),
         revision: 1,
         bindingRevision: 0,
-        permissions:
+        permissions: isV2 ? permissionCeiling(b.permissions ?? v2DefaultPermissions) :
           b.permissions === undefined
             ? [...DEFAULT_PERMISSIONS]
             : permissions(b.permissions),
@@ -1197,13 +1748,33 @@ export class Registry {
         binding: null,
         epoch: 0,
       };
+      if (isV2) {
+        c.schemaVersion=3;
+        c.assignmentContractVersion=2;
+        w.contractVersion = 2;
+        w.connectorId = null;
+        w.assignmentGeneration = 0;
+        w.bindingGeneration = 0;
+        w.permissionRevision = 1;
+        if (b.connectorId !== undefined) {
+          const connector = this.getAgent(id(b.connectorId));
+          if (connector.contractVersion !== 2 || connector.suspended)
+            throw new ApiError('SCOPE_DENIED', 'Connector is unavailable for assignment.', 403);
+          revision(b.expectedConnectorRevision, connector.revision);
+          changeAssignmentIndex(this.db, connector.id, w.id, true);
+          w.connectorId = connector.id;
+          w.assignmentGeneration = 1;
+        } else if (b.expectedConnectorRevision !== undefined) {
+          throw new ApiError('INVALID_INPUT', 'Connector revision requires a Connector.');
+        }
+      }
       this.db.put("workspace/" + w.id, w);
       return w;
     }
     if (path === prefix + "agents") {
       fields(b, ["label", "workspaceId"]);
       const w = this.getWorkspace(id(b.workspaceId));
-      if (w.agentId)
+      if (w.agentId || w.contractVersion !== undefined)
         throw new ApiError("CONFLICT", "Workspace already has an Agent.", 409);
       const a: AgentRecord = {
         id: crypto.randomUUID(),
@@ -1329,6 +1900,10 @@ export class Registry {
       );
     if (m) {
       const w = this.getWorkspace(m[1]!);
+      if (m[2] && w.contractVersion === 2)
+        throw new ApiError('UPGRADE_REQUIRED', 'Use the v2 binding transition for this Workspace.', 409);
+      if (w.transition)
+        throw new ApiError('TRANSITION_BLOCKED', 'Workspace transition is awaiting reconciliation.', 409);
       revision(b.expectedRevision, w.revision);
       if (
         m[2] &&
@@ -1367,7 +1942,8 @@ export class Registry {
         const reservation = this.db.get<{ workspaceId: string }>(
           "reservation/" + proposed.generatorId,
         );
-        if (reservation && reservation.workspaceId !== w.id)
+        const owner = this.db.get<{ workspaceId: string }>(bindingOwnerKey(proposed.generatorId));
+        if ((reservation && reservation.workspaceId !== w.id) || (owner && owner.workspaceId !== w.id))
           throw new ApiError(
             "TAB_BUSY",
             "Generator has an unresolved writer.",
@@ -1393,8 +1969,13 @@ export class Registry {
           w.paused = b.paused;
         }
         if (b.permissions !== undefined) {
-          w.permissions = permissions(b.permissions);
-          this.revokeWorkspace(w.id);
+          if (w.contractVersion === 2) {
+            w.permissions = permissionCeiling(b.permissions);
+            w.permissionRevision = nextGeneration(w.permissionRevision ?? 1);
+          } else {
+            w.permissions = permissions(b.permissions);
+            this.revokeWorkspace(w.id);
+          }
         }
       }
       w.revision++;
@@ -1405,6 +1986,8 @@ export class Registry {
     if (m) {
       fields(b, ["expectedRevision", "label", "suspended"]);
       const a = this.getAgent(m[1]!);
+      if (a.contractVersion !== undefined)
+        throw new ApiError('UPGRADE_REQUIRED', 'Use Connector management for this record.', 409);
       revision(b.expectedRevision, a.revision);
       if (b.label !== undefined) a.label = str(b.label, "label");
       if (b.suspended !== undefined) {
@@ -1443,20 +2026,14 @@ export class Registry {
           "Approval changed, expired or consumed.",
           409,
         );
-      const target = this.getWorkspace(a.workspaceId);
-      if (
-        b.decision === "approve" &&
-        (target.bindingRevision !== a.bindingRevision ||
-          canonical(target.permissions) !== canonical(a.permissionSnapshot) ||
-          c.policyRevision !== a.policyRevision ||
-          target.paused ||
-          c.paused)
-      )
-        throw new ApiError(
-          "APPROVAL_REQUIRED",
-          "Binding or policy changed after request creation; restart authorization.",
-          409,
-        );
+      if (b.decision === "approve") {
+        try { this.verifyApprovalScope(a, c); }
+        catch (error) {
+          if (error instanceof ApiError && [403, 404, 409].includes(error.status))
+            throw new ApiError('APPROVAL_REQUIRED', 'Connector or policy changed; restart authorization.', 409);
+          throw error;
+        }
+      }
       if (!["approve", "deny"].includes(String(b.decision)))
         throw new ApiError(
           "INVALID_INPUT",
@@ -1465,7 +2042,7 @@ export class Registry {
       a.state = b.decision === "approve" ? "approved" : "denied";
       a.revision++;
       this.db.put("approval/" + a.id, a);
-      const { handleHash: _, request: __, ...safe } = a;
+      const { handleHash: _, request: __, completionRedirect: ___, ...safe } = a;
       return safe;
     }
     throw new ApiError("NOT_FOUND", "Route not found.", 404);

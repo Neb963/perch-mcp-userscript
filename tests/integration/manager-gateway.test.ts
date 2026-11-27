@@ -132,3 +132,55 @@ test('manager journeys execute against real local Worker: pair, attach, Agent, R
         await rm(dir, { recursive: true, force: true });
     }
 });
+
+test('bundled manager shows 30 scoped Workspaces and rebinds a clean Workspace with one action', {timeout: 30000},async()=>{
+    const {createCapacityHarness}=await import('./gateway-capacity-harness.js');
+    const h=await createCapacityHarness(0,{DEVELOPMENT_CONTRACT_V2_ENABLED:'true'});
+    const dom = new JSDOM('<!doctype html><body></body>', {url:'https://perchance.org/new#edit',runScripts:'outside-only'});
+    try {
+      const admin='/api/v1/admin';
+      const workspaces=[];
+      for (let i=0;i<30;i++) workspaces.push(await h.request(admin+'/workspaces',{contractVersion:2,label:'Scoped '+String(i).padStart(2,'0')}));
+      const old=workspaces[0]!;
+      const w=admin+'/workspaces/'+old.id;
+      const oldBinding={generatorId:'old',slug:'old',draftId:'',browserInstallationId:'capacity-browser'};
+      const proof=await h.executionRequest('/api/v1/tab/rebind-proof',{workspaceId:old.id,expectedRevision:old.revision,binding:oldBinding,
+        tabInstanceId:'old-doc',adapterVersion:'2'});
+      const bound=await h.request(w+'/rebind',{expectedRevision:old.revision,binding:oldBinding,bindingProof:proof.proof});
+      const lease=await h.executionRequest('/api/v1/tab/claim',{workspaceId:old.id,binding:oldBinding,
+        tabInstanceId:'old-doc',adapterVersion:'2'});
+      await h.request('/api/v1/tab/heartbeat',{workspaceId:old.id,epoch:lease.epoch,tabInstanceId:'old-doc',dirty:false},String(lease.leaseCredential));
+      const compiled=await build({stdin:{contents:'export {mountManager} from "./apps/userscript/src/manager.ts";',resolveDir:process.cwd()},
+        bundle:true,write:false,platform:'browser',format:'iife',globalName:'FixtureManager',target:'firefox128'});
+      Object.assign(dom.window,{TextEncoder,TextDecoder});
+      dom.window.eval(compiled.outputFiles[0]!.text);
+      const mount=(dom.window as unknown as {FixtureManager:{mountManager:typeof mountManager}}).FixtureManager.mountManager;
+      let attached: Record<string,unknown>|undefined, changed=0;
+      const newBinding={generatorId:'new',slug:'new',draftId:'',browserInstallationId:'capacity-browser'};
+      const client: ManagerClient={
+        configuration:()=>({origin:'https://capacity.test',paired:true,browserInstallationId:'capacity-browser'}),
+        request:async (method,path,body,options)=>{
+          if (method==='GET') return h.get(path);
+          if (path===w+'/rebind') changed++;
+          return h.request(path,body,undefined,method,options?.idempotencyKey);
+        },
+        bindingProof:(workspace,binding)=>h.executionRequest('/api/v1/tab/rebind-proof',{workspaceId:workspace.id,
+          expectedRevision:workspace.revision,binding,tabInstanceId:'test-tab',adapterVersion:'2'}),
+        health:async()=>({schemaVersion:1}),pair:async()=>undefined,
+        currentIdentity:async()=>newBinding,probe:async()=>({ready:true,identity:newBinding}),
+        attach:async workspace=>{attached=workspace;},copy:async()=>undefined,download:()=>undefined,
+      };
+      const manager=mount({document:dom.window.document,version:'0.3.0',client,synthetic:true});
+      const root=dom.window.document.querySelector('[data-perch-mcp-manager]')!.shadowRoot!;
+      await manager.open('Workspaces');
+      assert.equal(root.querySelectorAll('tbody tr').length,30);
+      assert.ok([...root.querySelectorAll('button')].some(button=>button.textContent==='Connectors'));
+      assert.equal([...root.querySelectorAll('button')].find(button=>button.textContent==='Library')?.hidden,true);
+      click(root,'Reassign to this tab');
+      await until(()=>attached?.bindingGeneration===Number(bound.bindingGeneration)+1);
+      assert.equal(changed,1);
+      assert.deepEqual(attached?.binding,newBinding);
+      assert.ok(![...root.querySelectorAll('button')].some(button=>button.textContent==='Confirm'));
+      manager.destroy();
+    } finally {dom.window.close();await h.close();}
+});

@@ -1,3 +1,4 @@
+import { exportWorkspaceEvidence } from './binding-storage.js';
 import { APP_VERSION } from "../../../packages/contracts/src/index.js";
 import { NativeAdapter } from "./adapter.js";
 import { LiveLifecycleReadback, NativeLifecycle } from "./lifecycle.js";
@@ -141,7 +142,10 @@ async function start(): Promise<void> {
         throw Object.assign(new Error('Connection request was superseded by Stop or a newer request.'),{code:'CONNECTION_CANCELLED'});
       const held = controller.diagnostics();
       if ((held.connection === "connected" || held.connection === "degraded") &&
-          held.workspaceId === workspace.id && held.leasePresent) return;
+          held.workspaceId === workspace.id && held.leasePresent &&
+          (workspace.contractVersion !== 2 ||
+            held.bindingGeneration === workspace.bindingGeneration &&
+            held.assignmentGeneration === workspace.assignmentGeneration)) return;
       if (typeof GM_info === "undefined" || GM_info.injectInto !== "content")
         throw new Error("Verified isolated Violentmonkey content injection is required.");
       const health = await transport.health() as { schemaVersion?: number };
@@ -218,7 +222,11 @@ async function start(): Promise<void> {
     else if(bootstrapTimer){clearTimeout(bootstrapTimer);bootstrapTimer=undefined;void resumeBoundEditor();}
   });
   const client: ManagerClient = {
-    request: (method, path, body) => transport.request(method, path, body),
+    request: (method, path, body, options) => transport.request(method, path, body, options),
+    bindingProof: async (workspace, binding) => transport.tab('/api/v1/tab/rebind-proof',{
+      workspaceId:workspace.id,expectedRevision:workspace.revision,binding,tabInstanceId:controller.tabInstanceId,
+      adapterVersion:'2',
+    }),
     health: (origin) => transport.health(origin),
     diagnostics: () => ({
       ...transport.diagnostics(),
@@ -319,6 +327,7 @@ async function start(): Promise<void> {
     sourceBackup: () => controller.sourceBackup(),
     reconcileOperation: (operation) => controller.reconcileOperation(operation),
     localRecovery: workspaceId => controller.localRecovery(workspaceId),
+    exportWorkspaceEvidence: workspaceId => exportWorkspaceEvidence(store,workspaceId),
     resolveLocalHold: (workspaceId,journalId,expectedRevision,evidence) =>
       controller.resolveLocalHold(workspaceId,journalId,expectedRevision,evidence),
     restoreSourceBackup: (backup) => controller.restoreSourceBackup(backup),

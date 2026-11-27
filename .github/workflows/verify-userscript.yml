@@ -59,6 +59,8 @@ jobs:
             dist/OPERATOR-ACCEPTANCE.md
             dist/perch-mcp.user.txt
             dist/perch-mcp-source.zip
+            dist/perch-agent-knowledge.zip
+            dist/perch-agent-knowledge/
             dist/perch-mcp.user.js
             dist/perch-mcp-cloudflare.zip
             dist/SHA256SUMS.txt

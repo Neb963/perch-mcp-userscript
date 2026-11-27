@@ -1,4 +1,24 @@
-# Perch MCP — client specification v0.1
+# Perch MCP v0.3 client specification
+
+The accepted [v0.3 implementation specification](docs/v0.3/PERCH-MCP-V0.3-IMPLEMENTATION-SPEC.md) controls v0.3 requirements and acceptance. The [design proposal](docs/v0.3/PERCH-MCP-V0.3-DESIGN-PROPOSAL.md) records research and trade-offs. Historical references below describe the v0.1 and v0.2.0 lineage. The v0.3 contract applies only when the corresponding implementation is verified and the Operator activates it.
+
+Perch MCP provides remote Perchance development from one Firefox/Violentmonkey userscript and one Cloudflare Worker deployment. One OAuth Connector can authorize multiple explicitly assigned Workspaces, each assigned to at most one Connector. Every execution call uses an explicit Target. The Registry derives authorization from the active Grant and current Assignment and Binding. The browser executes only within the verified lease and native identity. Same-Connector conversations share OAuth authority. Use separate Connectors when tasks require isolation.
+
+The public v2 contract contains 19 tools for filesystem, preview, compute, retrieval, status, Save, cancellation and batching. The agent uses a versioned local knowledge package. Native generator lifecycle stays with the Operator in Perchance. Source edits remain unsaved until an authorized explicit Save with independent stored-source verification. Preserve unresolved effects and the existing compatibility readers, operator recovery, Activity, BLOB transport and HTTP authority with optional advisory push.
+
+| Earlier requirement | v0.3 decision |
+|---|---|
+| C01–C03 | Preserve single userscript and Worker, dashboard setup, secure pairing and credential separation. |
+| C04–C06 | Use Connector Grant and exclusive per-Workspace assignment. An eligible v2 rebind advances Binding generation and Epoch and keeps the Connector Grant. A legacy Grant stays fixed to its old Binding. |
+| C07–C10 | Preserve native draft and exact binary file handling, verified preview, isolated compute, bounded public retrieval and explicit verified Save under the new tool and revision contracts. |
+| C11–C12 | Supersede full Helper parity. Retire external media, public asset upload, production-state access and model-facing generator lifecycle, attachment and legacy helper tools. Preserve real preview capture as a capability gate. |
+| C13–C15, C21 | Deliver eleven existing domain skills and guidance as agent-local files. Retire active Resource library seeding, retrieval, editor, assignment and import. Preserve operator-only export and recovery for existing data. |
+| C16–C17 | Preserve independent execution, bounded admission and actionable redacted diagnostics. Measure separate Connector and Workspace costs. |
+| C18–C20 | Preserve non-secret backups and recovery, safe compatible upgrades, explicit pause/revoke and truthful cancellation. Resource export covers legacy/native authoritative revisions and customizations. |
+
+Completion follows A01–A34 plus the Operator gates in the [implementation specification](docs/v0.3/PERCH-MCP-V0.3-IMPLEMENTATION-SPEC.md#12-acceptance-matrix-minimum-tests-all-offline-unless-marked-owner). Capture must report `UNSUPPORTED_INTERFACE` when exact preview pixels cannot be verified. This remains an unmet capability gate even when an offline candidate is deliverable.
+
+## Historical v0.1 client specification
 
 Status: accepted v0.1 contract; candidate implementation and external acceptance status are tracked in todo.md and docs/RELEASE_VERIFICATION.md. Unverified platform dependencies remain explicit. Product owner decisions: single Firefox/Violentmonkey userscript + Cloudflare Worker; no local bridge/Tailscale; per-tab agent isolation; OAuth managed in userscript; editable/importable/exportable skills, workflows, instructions and documentation; full functional parity except platform reporting. Web UI AI clients are the target; operator reports testing custom connectors in ChatGPT, Claude and Gemini. Their exact tool/media/OAuth behaviors still require interoperability tests. No OpenCode dependency.
 

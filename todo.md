@@ -1,5 +1,147 @@
 # Implementation ledger
 
+## V00–V10 development contract (2026-11-27)
+
+Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179db13df0112c15f7e7942dca198e7d0486dbe`, equal to the merged v0.2.0 qualification head `3fd1e48630737a1defd96484a3af3d3d881c84a1`. The working branch is `development/v0.3.0`. Use local synthetic fixtures and local workerd. Production and preview calls, deployment, real browser/provider tests, production readiness dispatch and merging are operator-only.
+
+### V00 plan and verification
+
+1. Verify the actual base, PR #23, qualification run and workflow triggers. Use the v0.2.0 runtime/contracts and generated catalog as the inventory source.
+2. Bring the accepted v0.3 implementation contract into repository authority and mark earlier Helper parity and Resource implementation documents as historical. Publish complete per-tool disposition, permission changes and baseline source boundaries, including retention/export obligations.
+3. Establish the phase and evidence ledger. Re-run the locked baseline suite and representative local v0.2 benchmark if available, and record measured differences or exact reproduction blockers. Preserve the full historical evidence.
+4. Check document links, catalog/permission coverage and unchanged runtime. Commit the verified authority amendment before v2 runtime work. Keep v2 admission gated until the migration, version skew and activation checks pass.
+
+| Phase | Depends on | Exit gate | Status |
+|---|---|---|---|
+| V00 | v0.2.0 | Baseline, authority amendment, full disposition, offline reproduction or explicit gap | Verified locally |
+| V01 | V00 | Connector-level Grant, strict version coexistence, indexed discovery and explicit Target | Foundation and local SDK catalog verified; rollout gated |
+| V02 | V01 | Durable fenced transition, exact management receipts and original-scope result ACL | Gateway and manager basic paths verified |
+| V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | Core and lease integration verified; exact operator quarantine export verified |
+| V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | Filesystem and scoped wire paths verified in local fixtures |
+| V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Scoped execution and grouped publication verified; retrieval and fault coverage incomplete |
+| V06 | V05 | Preview freshness, diagnostics, viewport, actual-pixel feasibility and verified Save | Offline branches verified; OWNER capture and provider gates open |
+| V07 | V01–V06 | Exact v2 catalog, archive/export compatibility, retirement and agent knowledge | v2 catalog and knowledge verified; compatibility retirement deferred |
+| V08 | V02–V07 | Manager, compatible migration/rollback and one-click rebind | Bundled manager and upgrade verified; OWNER rollout deferred |
+| V09 | V01–V08 | Native/legacy workload, capacity, OAuth and fault measurements | Benchmarks recorded; lifecycle target missed |
+| V10 | V00–V09 | Exact-head offline qualification, artifacts and unmerged PR | Exact-head qualification in release outputs |
+
+### V00 evidence
+
+- Matching merge and tested trees were verified against GitHub main, PR #23 and offline workflow run [46029453050](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46029453050). The production readiness workflow is main-only or manual. The pull-request workflow is offline and checks exact head. Operator confirmation is the evidence for disabled Cloudflare previews.
+- Locked install and local typecheck succeeded. Baseline offline suite passed 553 of 553 with Node 24.22.3 and npm 11.19.1. Both clean-source Miniflare benchmark runs reproduced the measured v0.2.0 SQL rows. The native mode measured 177–182 reads and 51–52 writes. Legacy mode measured 232–255 reads and 78–87 writes. See [raw replay evidence](docs/verification/v0.3-baseline/).
+- The v0.3 contract and [tool disposition](docs/v0.3/TOOL-DISPOSITION.md) supersede full Helper parity. Retirement preserves legacy/canonical readers and unsettled evidence. This checkpoint changes documentation only.
+
+### V01 plan
+
+- Define a strict shared Target, versioned Grant and explicit permission-ceiling fields. Require canonical Target encoding, checked generations and exact Connector/client/audience/credential epoch.
+- Keep existing v1 tokens and OAuth approval semantics for unchanged fixed assignments. Build a gated v2 Connector consent and scoped discovery path over a bounded, transactionally maintained assignment index. Exercise empty, paused and offline discovery, denied foreign Targets and stale owned Targets, with loopback tests.
+- Do not expose the new public catalog or dispatch v2 effects while any implementation dependency remains open. Preserve current core markers and use a separately tested schema fence where v2 authority is written.
+
+### V01 evidence
+
+- Locked baseline dependencies, strict typecheck, and 555 of 555 offline tests passed. Local workerd fixtures verify one Connector with two assigned slots, an independent Connector, empty discovery, exact audience and client checks, foreign/stale Target denial, cursor scope, legacy continuation and real SDK PKCE consent. Public v2 tool listing remains disabled until the catalog and execution path are complete.
+- New assignment authority is explicit core schema 3 with an assignment marker. The v0.2 Registry rejects schema 3. Compatible readers retain canonical Activity and Resource markers. OAuth approval listings omit sealed callback URLs, which can contain authorization codes.
+
+### V02 plan
+
+- Use persisted Registry transition intent and exact management receipt. Check operator CAS, canonical native identity, installation proof and old draft acknowledgement. Change Binding/Assignment generations and indexed ownership in one transaction only after Workspace settlement.
+- Freeze old admissions/dispatch at Registry and persist a Workspace admission fence. Queue cancellation must prove no dispatch. Active effect, unresolved notice or pending receipt holds the transition. Renew/reply and claim must not transfer an old lease.
+- Authorize v2 result and cancel by exact initiating Grant and Target with current tool permissions, independent of browser lease. Test replay, stale revisions, stale scopes, cross-Connector denial, and delayed dispatch in local workerd. Keep catalog disabled.
+
+### V02 evidence
+
+- The Registry persists the transition before checking the Workspace journal. The Workspace fences admissions/dispatched work, cancels proven undispatched queue entries and drains terminal receipts. The Registry rechecks authority and publishes the new generations, owner index and exact receipt together.
+- Focused typecheck and 14 offline tests passed, including local workerd coverage for dirty acknowledgement, duplicate claims, old adapter rejection, a transition blocked by dispatched work, exact Grant result access, stale Target/lease rejection, replay and transfer.
+- The gateway issues a short-lived installation-authenticated destination proof. Userscript manager integration, in-flight UI and full version-skew acceptance remain V08 work. V2 MCP ingress stays gated.
+
+### V03 plan
+
+- Derive a private namespace from installation, Workspace, assignment, Binding and exact native identity. Use separate epoch writers and retain legacy Workspace-only records for operator quarantine.
+- Store checkpoint and local file bytes as verified content-addressed chunks. Persist staged roots before the pointer, verify readback, protect active/held roots and enforce physical capacity. Test exact binary bytes, deduplication, partial persistence, stale epoch and bounded cleanup.
+- Integrate lease-based opening, scope operation receipts, and preserve exact offline recovery paths. Do not admit a v2 operation through a legacy local namespace.
+
+### V03 evidence
+
+- Scoped store uses exact Binding and independent Epoch namespaces. Checkpoints deduplicate content-addressed chunks within an Epoch. Mutable pointers are read back and uncertain publication roots remain reachable. Same-Binding reconnect copies the prior verified local manifest only after earlier local journals and publication records are settled. Untagged v0.2 bytes stay quarantined.
+- Strict typecheck and 72 focused offline tests passed, including exact binary/empty files, lost pointer acknowledgement, stale writer fence, physical budget, staged-root retention and the 32-chunk GC cap. The controller claims a matching adapter version and opens the scoped store before polling. Operator archive presentation and cross-epoch recovery UI remain integration work.
+
+### V04 plan
+
+- Add strict v2 filesystem schemas, metadata-only manifest and selected-byte native view. Verify PJS/HTML reads and listings avoid unrelated src content. Return bounded byte/line continuations and scope cursors to query and manifest.
+- Apply exact preconditions and complete path/collision preflight to write, delete and rename. Use retained native verification and checkpoints where no native CAS exists. Scope binary transfer stage and completeness to the initiating Grant and current Target.
+- Exercise same-byte-size changes, invalid UTF-8, exact binary and empty bytes, metadata pagination and partial outcomes using synthetic native interfaces. Integrate the shared catalog only after V05–V07.
+
+### V04 evidence
+
+- Typecheck and eight focused tests passed. A synthetic native fixture with 100 src files observed zero src content reads for panel reads and metadata listing, and exactly four content reads for two requested src files. Same-size manual edits invalidate a digest continuation. Invalid UTF-8, long lines, zero bytes, exact preflight, rename and scoped staged binary commit each have a focused fixture.
+- Native mutation still uses full independent verification because the supported interface exposes no comprehensive generation or CAS. V2 MCP dispatch and chained batch publications remain gated until end-to-end integration.
+
+### V05 plan
+
+- Add timestamp-bounded Operation keys with exact scope, digest and retained receipt. Persist them atomically with admission, check retained keys first, and require exact authorization at status/result delivery. Carry versioned tool envelopes and deny legacy child-tool calls for v2.
+- Define the closed batch union and preflight all nested inputs before execution. Preserve declared-action receipts and partial effects. Isolate QuickJS read views and staged publication, then integrate restricted GET/POST and verified public import snapshots.
+- Exercise lost-response replay, altered digest/Grant, expired key, cancellation, permissions and result projection with local workerd. Keep the gated rollout until all 19 tool definitions and compatibility tests are ready.
+
+### V05 evidence
+
+- Six focused tests and typecheck passed. Workerd validates one-use segments, exact Operation key replay/conflict, key expiry and status lookup, and the local OAuth/MCP v2 tool list of 19 names. QuickJS ran 100 reads with one read-view permit. A denied publication left scratch unchanged. The batch fixture validates the entire shape before effects and preserves completed steps after a later failure.
+- A separate execution flag keeps the public v2 catalog opt-in. The waitMs delivery option currently returns the durable handle without waiting. Adjacent general mutation coalescing, public retrieval fault coverage and expanded bundled browser integration were addressed in V09. Provider-specific retrieval fault coverage remains open.
+
+### V06 plan
+
+- Use native source revision for preview and Save. Invalidate applied preview proof on iframe load/replacement or failed refresh. Verify preview epoch, requested freshness and actual viewport geometry, and bound diagnostic entries.
+- Review documented Violentmonkey and Firefox capture capabilities without opening a real browser session. Keep unavailable capture explicit if exact preview-surface proof cannot be established.
+- Require intended native revision, exact independent saved base, fresh authorized dispatch, durable local Save intent and independent persisted-source readback. Test synthetic stale and uncertain cases while preserving the operator-only native provider gate.
+
+### V06 evidence
+
+- Typecheck and 76 focused tests passed. A frame load and failed refresh clear prior applied proof. Native Save is fenced to the native draft and independently verified saved base. It retains a hold on uncertainty. Capture returns UNSUPPORTED_INTERFACE before opening any capture surface.
+- CAPTURE.md records the documented platform limit and evidence required for OWNER-03. Real source, preview and Save remain DEFERRED_OWNER under OWNER-01. No native pixels, actual provider writes or real client render were exercised.
+
+### V07 plan
+
+- Package the 11 checked-in skills, reference and advisory workflow with standalone Markdown install/use guidance and generated exact runtime tool schemas.
+- Gate all public v2 calls by the 19-tool catalog. Keep unchanged legacy Grant readers and operator Resource archive/export. Verify v2 denials and document what must remain during compatibility rollout.
+- Verify package hashes, provenance and standalone file counts. Treat retirement of compatibility v1 runtime and remaining operator end-to-end automation as separate release gates until verified.
+
+### V07 evidence
+
+- The v2 MCP catalog is limited to the 19 generated schemas. Resource/media methods are excluded for v2 callers. Legacy fixed-scope Grant compatibility and operator Resource archive/export retain their existing authority and records.
+- The knowledge package builds exact schema JSON, Markdown tool reference and examples, eleven repository skill files, local instructions, advisory workflow and manifest SHA-256 digests. Local package verification exercised the Worker health and all inner/external digests. The intermediate package was dirty and was used only to verify packaging mechanics.
+- Legacy Resource and paid-media implementations remain for staged v1 compatibility. Do not purge or retire recovery data during v2 preparation. Physical legacy runtime and dependency retirement is still open.
+
+### V08 plan
+
+- Expose a v2 Workspaces and Connectors view only when the gateway reports an explicit compatible assignment contract. Preserve exact previous and intended Binding, native-ready proof, management CAS and idempotent receipt recovery.
+- Keep one click for a clean or unbound Workspace. Require acknowledgement when old draft state is dirty or unknown. Separate assign/rebind, reconnect, pause, detach and transfer.
+- Use the current rendered generation to suppress stale manager responses, and keep conflicts or unresolved effects visible. Test the bundled synthetic UI and document the migration and rollback gates.
+
+### V08 evidence
+
+- Typecheck and 37 focused tests passed. The bundled manager rendered 30 Workspaces in a synthetic document, displayed the v2 navigation, and issued one clean rebind before reconnecting. The real local Worker verified same-endpoint v1 upgrade, v1 token denial and new SDK consent. New tab proof and segment routes pass the actual userscript transport allowlist.
+- The operator migration document covers retained data, pause, version skew, fresh consent and compatible-only rollback. Real Firefox interaction and production verification remain DEFERRED_OWNER. Legacy upgrade requires new consent after the fixed-scope Grant fence commits.
+
+### V09 plan
+
+- Measure v2 production SDK ingress and private dispatch lifecycle in local workerd with metered SQL, Worker/DO, alarm and KV usage. Compare legacy/native with the v0.2 replay and use the actual workload denominator when projecting traffic.
+- Run discovery at multiple Connector and Workspace counts, and report exact target-versus-measured status. Retain the current OAuth TTL and disabled admission estimate if the full budget and interoperability trade-offs remain unverified.
+- Record raw measurements, account quota assumptions, nondeterministic timing and owner-only billing/hibernation evidence. Results remain local observations.
+
+### V09 evidence
+
+- Clean workerd replays recorded 12 measurements each for native and legacy storage. Native full read uses 225–227 SQL reads and 53–57 writes. Legacy uses 280–300 reads and 80–89 writes. The 120/40 goal is unmet. The ten-file write uses 90% fewer rows than ten separate lifecycles in both modes. Indexed discovery has no SQL writes at 1–50 assigned Workspaces.
+- The pinned SDK passed five local refresh rotations at two KV puts per rotation. The capacity report models alternate TTLs and retains the 900 s default. These measurements do not establish actual account-wide billing or physical browser hibernation behavior. No optional admission estimates were enabled.
+- Coherent adjacent write/delete/rename staging and explicit previous-step base have focused fixture coverage. The final exact-tree qualification follows the V10 plan.
+
+### V10 plan
+
+- Qualify the clean remote PR-head tree with locked install, strict typecheck, full offline tests, clean artifact build, exact digest verification and local Wrangler dry-run only.
+- Package matching userscript TXT/JS, Worker, source, candidate, agent knowledge, release metadata and checksums. Preserve historical v0.2 evidence and release gates.
+- Publish the unmerged development PR with exact head and acceptance matrix. Distinguish owner-only gates and remaining offline evidence gaps. No production, preview, deployment or merge.
+- First exact-head suite found a v1 cancellation regression while dispatch authorization awaited. Preserve the v1 cancellation during ADMITTED state and the v2 cooperative signal semantics. Rerun the full exact-head suite and reissue artifacts after the fix.
+
+## Historical v0.1–v0.2.0 implementation ledger
+
 Status: executable verification candidate implemented. Local static/unit/emulator/rendered tests and packaging are in place; full product acceptance remains blocked by the explicitly listed real-browser/cloud/provider gates. No production deployment or live provider mutation has occurred.
 
 | Phase | Dependency | Deliverable / exit criteria | Status |

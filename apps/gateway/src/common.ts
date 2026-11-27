@@ -4,7 +4,7 @@ import type {
   DurableObjectStub,
   KVNamespace,
 } from "@cloudflare/workers-types";
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 export const HAR_NATIVE_ACTIONS: Readonly<Record<string,string>> = Object.freeze({
   save_generator:"SAVE",rename_generator:"RENAME",set_listing:"LISTING",
 });
@@ -296,6 +296,8 @@ export interface Env {
   ELEVENLABS_API_KEY?: string;
   PAID_MEDIA_ENABLED?: string;
   REGISTRY_WORKSPACE_BUDGET?: string;
+  DEVELOPMENT_CONTRACT_V2_ENABLED?: string;
+  DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED?: string;
   REGISTRY_GRANT_BUDGET?: string;
   OAUTH_REGISTRATIONS_PER_HOUR?: string;
 }

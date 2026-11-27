@@ -1,4 +1,10 @@
-# Standalone implementation handoff
+# Perch MCP implementation handoff
+
+Start with [AGENTS.md](../AGENTS.md) and the [v0.3 implementation specification](v0.3/PERCH-MCP-V0.3-IMPLEMENTATION-SPEC.md). Follow the [coding prompt](v0.3/PERCH-MCP-V0.3-CODING-AGENT-PROMPT.md) and the dependency ledger in [todo.md](../todo.md). The [design proposal](v0.3/PERCH-MCP-V0.3-DESIGN-PROPOSAL.md) supplies rationale and risks. The repository includes the eleven existing knowledge sources and the complete v0.2.0 evidence. Prior archive references are provenance.
+
+The runtime baseline remains v0.2.0 through V00. Implement and verify each eligible phase under the scope amendment before activating v2. Source and verification work stay offline. Production, preview, real-browser/provider testing and merging remain Operator-controlled. Preserve exact negative, restart, fencing and migration tests.
+
+## Historical v0.1 handoff
 
 Start here; then read AGENTS.md, CLIENT_SPEC.md, DESIGN.md, PROTOCOL.md, TOOLS.md, TOOL_PARITY_DETAILS.md, PERCHANCE_ADAPTER.md, VIOLENTMONKEY.md, SETUP.md, EVIDENCE.md, PARITY_NOTES.md, TEST_PLAN.md and todo.md. Default skills are in packages/resources/skills. The repository is the complete input; no additional archives are required from the Operator. Historical source citations/hashes are provenance, not files to retrieve from the Operator. Public provider documentation is available via the cited URLs; reverify at implementation time.
 

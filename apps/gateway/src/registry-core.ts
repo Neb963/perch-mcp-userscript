@@ -2,7 +2,8 @@ import { ApiError, origin } from './common.js';
 
 /** Persisted authority shape used by the baseline and the compatible canonical-storage reader. */
 export interface RegistryCore {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
+  assignmentContractVersion?: 2;
   revision: number;
   policyRevision: number;
   paused: boolean;
@@ -27,8 +28,10 @@ export function validateRegistryCore(value: unknown): asserts value is RegistryC
   if (!value || typeof value !== 'object' || Array.isArray(value)) corrupt();
   const core = value as Record<string, unknown>;
   if (!Number.isSafeInteger(core.schemaVersion) || Number(core.schemaVersion) < 1) corrupt();
-  if (core.schemaVersion !== 1 && core.schemaVersion !== 2)
+  if (core.schemaVersion !== 1 && core.schemaVersion !== 2 &&
+      !(core.schemaVersion === 3 && core.assignmentContractVersion === 2))
     throw new ApiError('INCOMPATIBLE_VERSION', 'Registry storage schema is incompatible with this Worker; restore a compatible version.', 409);
+  if (core.schemaVersion !== 3 && core.assignmentContractVersion !== undefined) corrupt();
   for (const field of ['revision', 'policyRevision', 'credentialEpoch'] as const)
     if (typeof core[field] !== 'number' || !Number.isSafeInteger(core[field]) || core[field] < 1) corrupt();
   if (typeof core.paused !== 'boolean' || typeof core.paired !== 'boolean') corrupt();

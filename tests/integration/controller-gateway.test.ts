@@ -220,3 +220,68 @@ test(
     }
   },
 );
+
+test('bundled v2 controller obtains one permit and publishes through the real local MCP and scoped lease', {timeout:30000}, async()=>{
+  const { createCapacityHarness }=await import('./gateway-capacity-harness.js');
+  const { issueSyntheticToken, syntheticMcp }=await import('../fixtures/optimization-client.js');
+  const h=await createCapacityHarness(1,{DEVELOPMENT_CONTRACT_V2_ENABLED:'true',DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED:'true'});
+  const f=h.fixtures[0]!;
+  const admin='/api/v1/admin';
+  const store=new MemoryStore();
+  await store.set('perch:pairing',h.syntheticPairing());
+  await store.set("perch:installation-id","capacity-browser");
+  const transport=new GatewayTransport(store,((url: Parameters<typeof fetch>[0],init?:Parameters<typeof fetch>[1])=>
+    h.mf.dispatchFetch(String(url),init as never)) as unknown as typeof fetch);
+  await transport.initialize();
+  const { default: vm }=await import('node:vm');
+  const bundled=await build({stdin:{contents:`export {BrowserController} from './apps/userscript/src/controller.ts';
+    export {NativeAdapter} from './apps/userscript/src/adapter.ts';`,resolveDir:process.cwd()},
+    bundle:true,write:false,format:'iife',globalName:'V2Fixture',platform:'browser',target:'firefox128'});
+  const realm=vm.createContext({TextEncoder,TextDecoder,crypto,console,fetch:()=>{throw new Error('NO_NETWORK');},
+    setTimeout,clearTimeout,setInterval,clearInterval,AbortController,AbortSignal,structuredClone,atob,btoa,URL,
+    Uint8Array,ArrayBuffer});
+  vm.runInContext(bundled.outputFiles[0]!.text,realm);
+  const {BrowserController:Controller,NativeAdapter:Adapter}=realm.V2Fixture as
+    {BrowserController:typeof BrowserController;NativeAdapter:typeof NativeAdapter};
+  const adapter=new Adapter({
+    app:{data:{generator:{id:f.binding.generatorId!,name:f.binding.slug!}}},
+    modelTextEditor:{state:{readOnly:false},getValue:()=> 'fixture',setValue:()=>undefined},
+    outputTemplateEditor:{state:{readOnly:false},getValue:()=>'',setValue:()=>undefined},
+    srcState:{ready:async()=>undefined,idle:async()=>undefined,getDraftId:()=>'',list:()=>[],
+      readFile:()=>new Uint8Array(),writeFile:()=>undefined,deleteFile:()=>undefined},
+    __editorReady:true,__draftChoiceSettled:true,currentInterfaceMode:'edit',
+    aiAgentActivityState:()=>({active:false,unknown:false,reason:''}),__aiGeneratorGuard:{blocked:()=>false},
+  });
+  const controller=new Controller(adapter,store,transport);
+  try {
+    const current=await h.get(admin+'/workspaces/'+f.workspaceId);
+    const a=await h.get(admin+'/agents/'+f.agentId);
+    const upgraded=await h.request(admin+'/connectors/'+f.agentId+'/upgrade',{
+      expectedRevision:a.revision,expectedWorkspaceRevision:current.revision,acknowledgeReauthorization:true,
+    });
+    const w=upgraded.workspace as Record<string,unknown>;
+    await controller.attach(w);
+    const target='w2.'+w.id+'.'+w.assignmentGeneration+'.'+w.bindingGeneration;
+    const token=await issueSyntheticToken(h,f);
+    const operationKey='k2.'+Date.now()+'.'+crypto.randomUUID();
+    const args={target,operationKey,files:[{path:'scratch/fixture.txt',encoding:'utf8',content:'fixture',ifAbsent:true}]};
+    const admitted=await syntheticMcp(h,f,token,'write',args);
+    assert.ok(admitted.operationId);
+    let last:Record<string,unknown>={};
+    for(let attempt=0;attempt<120;attempt++){
+      last=await syntheticMcp(h,f,token,'operation_status',{target,operationKey});
+      if(last.phase==='SUCCEEDED')break;
+      if(['REJECTED','PARTIAL','UNKNOWN'].includes(String(last.phase)))break;
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    assert.equal(last.phase,'SUCCEEDED',JSON.stringify({last,controller:controller.diagnostics()}));
+    const replay=await syntheticMcp(h,f,token,'write',args);
+    assert.equal(replay.operationId,admitted.operationId);
+    const keys=await store.list();
+    assert.ok(keys.some(key=>key.includes(':binding-v2:')&&key.endsWith(':root:local')));
+    assert.ok(!keys.some(key=>key.startsWith('perch:workspace:'+w.id+':')));
+  } finally {
+    await controller.pause();
+    await h.close();
+  }
+});

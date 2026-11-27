@@ -1,3 +1,6 @@
+import { browserEnvelopeV2, type SegmentRequest } from '../../../packages/contracts/src/operations-v2.js';
+import { parseTarget } from '../../../packages/contracts/src/target.js';
+import { executeDevelopment, type DevelopmentContext } from './development-v2.js';
 import type { NotificationChannel } from "./notifications.js";
 import { isRetryableGatewayFailure } from "./connection-failures.js";
 import { uploadImageResult } from "./image-transfer.js";
@@ -27,6 +30,13 @@ import {
 } from "./native-types.js";
 
 interface Lease {
+  contractVersion?: 2;
+  connectorId?: string | null;
+  assignmentGeneration?: number;
+  bindingGeneration?: number;
+  installationId?: string;
+  generatorId?: string;
+  draftId?: string;
   workspaceId: string;
   epoch: number;
   bindingRevision: number;
@@ -69,6 +79,7 @@ export interface RuntimeContext {
 }
 export interface AdditionalTools {
   dispose?(): void;
+  callDevelopment?(context: DevelopmentContext): Promise<unknown>;
   /** Read-only, no network or source effects; scoped to the bound Workspace. */
   capabilityReport?(context: RuntimeContext): Record<string, unknown>;
   preflightPreview?(context: RuntimeContext): Promise<void>;
@@ -132,6 +143,8 @@ export class BrowserController {
       consecutivePollFailures: this.consecutivePollFailures,
       lastPollSuccessAt: this.lastPollSuccessAt ?? null,
       leasePresent: !!this.lease,
+      bindingGeneration: this.lease?.bindingGeneration ?? null,
+      assignmentGeneration: this.lease?.assignmentGeneration ?? null,
       leaseRemainingMs: this.lease ? Math.max(0, this.lease.expiresAt - Date.now()) : 0,
       stopped: this.stopped,
       notifications: this.push?.diagnostics() ?? {state: "http"},
@@ -173,7 +186,8 @@ export class BrowserController {
       if ((binding as {browserInstallationId?:unknown}).browserInstallationId !== installationId)
         throw Object.assign(new Error("This Workspace belongs to another browser installation. Rebind explicitly to revoke old Grants."),
           {code:"BINDING_MISMATCH"});
-      const candidateVfs = new VirtualFileSystem(this.adapter, this.store, workspaceId);
+      const scoped = workspace.contractVersion === 2;
+      let candidateVfs = scoped ? undefined : new VirtualFileSystem(this.adapter, this.store, workspaceId);
       stage = "LOCAL_JOURNAL";
       this.lastAttachStage = stage;
       // Local intent concerns source writes only. Never fail the entire agent
@@ -182,7 +196,7 @@ export class BrowserController {
       this.localPendingHolds = null;
       this.localRecoveryWarning = null;
       this.sourceReadback = {state:'not-checked'};
-      try { this.localPendingHolds = (await candidateVfs.unresolved()).length; }
+      try { if (candidateVfs) this.localPendingHolds = (await candidateVfs.unresolved()).length; }
       catch (error) {
         this.localRecoveryWarning = error instanceof Error ? error.name : 'LOCAL_STORE_UNAVAILABLE';
       }
@@ -199,12 +213,16 @@ export class BrowserController {
       this.lastAttachStage = stage;
       const claim = (await this.transport.tab("/api/v1/tab/claim", {
         workspaceId, binding: claimBinding, tabInstanceId: this.tabInstanceId,
-        adapterVersion: "1",
+        adapterVersion: scoped ? "2" : "1",
       })) as Lease;
       if (!claim || claim.workspaceId !== workspaceId ||
           claim.tabInstanceId !== this.tabInstanceId ||
           !Number.isInteger(claim.epoch) || claim.epoch < 1 ||
-          !claim.leaseCredential || !Array.isArray(claim.permissions))
+          !claim.leaseCredential || !Array.isArray(claim.permissions) ||
+          (scoped ? claim.contractVersion !== 2 || claim.installationId !== installationId ||
+            claim.generatorId !== identity.generatorId || claim.draftId !== identity.draftId ||
+            claim.assignmentGeneration !== workspace.assignmentGeneration || claim.bindingGeneration !== workspace.bindingGeneration :
+            claim.contractVersion !== undefined))
         throw Object.assign(new Error("Gateway lease response is invalid."),{code:"INVALID_RESPONSE"});
       // Pause/Stop may race a slow claim reply. Never revive the old tab;
       // attempt a best-effort release using only the returned lease secret.
@@ -218,7 +236,34 @@ export class BrowserController {
       this.adapter.bind(identity);
       this.identity = identity;
       this.lease = claim;
-      this.vfs = candidateVfs;
+      if (scoped) {
+        stage = 'BINDING_STORAGE';
+        this.lastAttachStage = stage;
+        try {
+          candidateVfs = await VirtualFileSystem.openBound(this.adapter, this.store, {
+            workspaceId, installationId, assignmentGeneration: claim.assignmentGeneration!,
+            bindingGeneration: claim.bindingGeneration!, epoch: claim.epoch,
+            generatorId: identity.generatorId, draftId: identity.draftId,
+          }, { assertCurrent: async () => {
+            if (this.lease !== claim || claimGeneration !== this.connectionGeneration || claim.expiresAt <= Date.now())
+              throw new BrowserError('STALE_EPOCH', 'Binding storage writer has lost its lease.');
+            await this.adapter.assertIdentity();
+            if (this.lease !== claim || claimGeneration !== this.connectionGeneration || claim.expiresAt <= Date.now())
+              throw new BrowserError('STALE_EPOCH', 'Binding storage writer changed during native identity verification.');
+          } });
+          this.localPendingHolds = (await candidateVfs.unresolved()).length;
+        } catch (error) {
+          if (this.lease === claim) {
+            this.lease = undefined;
+            try { await this.transport.tab('/api/v1/tab/release', this.ids(claim), claim.leaseCredential); }
+            catch { /* The failed lease expires and cannot write. */ }
+          }
+          throw error;
+        }
+        if (this.lease !== claim || claimGeneration !== this.connectionGeneration) return;
+      }
+      const connectedVfs = candidateVfs!;
+      this.vfs = connectedVfs;
       this.source = new SourceTools(this.vfs, this.adapter);
       this.viewportUncertain = false;
       this.stopped = false;
@@ -230,6 +275,7 @@ export class BrowserController {
       this.pollAbort = new AbortController();
       if (claim.notifications?.version === 1 && typeof this.transport.notifications === "function")
         this.push = this.transport.notifications(claim);
+      if (scoped) void this.renew(claim);
       this.heartbeat = setInterval(() => {void this.renew(claim);}, 60000);
       (this.heartbeat as unknown as {unref?:()=>void}).unref?.();
       this.updateStatus({connection:"connected",workspace:workspaceId,dirty:probe.dirty,
@@ -239,7 +285,7 @@ export class BrowserController {
       // turning readback failure into a transport failure. Agent status must be
       // truthful even when a platform-specific source bridge is unavailable.
       this.sourceReadback = {state:'checking'};
-      void candidateVfs.snapshot().then(()=>{
+      void connectedVfs.snapshot().then(()=>{
         if(this.lease!==claim || this.stopped)return;
         this.sourceReadback = {state:'verified'};
       }).catch(error=>{
@@ -253,10 +299,10 @@ export class BrowserController {
       // Reconcile retained local source intents against two independent native
       // snapshots before consulting gateway Activity. Old local UUIDs are not
       // gateway Operation IDs. Neither readback nor storage outages drop the lease.
-      if (this.localPendingHolds) void candidateVfs.reconcileRetained()
-        .then(()=>this.syncResolvedLocal(candidateVfs,workspaceId))
+      if (this.localPendingHolds) void connectedVfs.reconcileRetained()
+        .then(()=>this.syncResolvedLocal(connectedVfs,workspaceId))
         .then(async()=>{
-          const remaining = (await candidateVfs.unresolved()).length;
+          const remaining = (await connectedVfs.unresolved()).length;
           if (this.lease !== claim || this.stopped) return;
           this.localPendingHolds = remaining;
           if (!remaining) this.updateStatus({connection:'connected',workspace:workspaceId,dirty:probe.dirty});
@@ -331,9 +377,15 @@ export class BrowserController {
     if (this.stopped || this.lease !== lease || this.renewalInFlight) return;
     this.renewalInFlight = true;
     try {
+      let observation = {};
+      if (lease.contractVersion === 2) {
+        const current = await this.adapter.probe();
+        observation = {dirty: current.ready && current.identity && this.identity &&
+          equalIdentity(current.identity, this.identity) ? current.dirty ?? null : null};
+      }
       const state = (await this.transport.tab(
         "/api/v1/tab/heartbeat",
-        this.ids(lease),
+        {...this.ids(lease), ...observation},
         lease.leaseCredential,
       )) as { expiresAt: number; permissions: string[]; workAvailable?: boolean };
       if (this.stopped || this.lease !== lease) return;
@@ -387,7 +439,8 @@ export class BrowserController {
     };
   }
   private async backupVfs(): Promise<VirtualFileSystem> {
-    if (this.vfs) return this.vfs;
+    if (this.vfs && (!this.vfs.scope ||
+        (this.lease?.contractVersion === 2 && this.lease.epoch === this.vfs.scope.epoch))) return this.vfs;
     const identity = await this.adapter.identity();
     const scope =
       "backup-" + (await digest(JSON.stringify(identity))).slice(0, 32);
@@ -497,7 +550,7 @@ export class BrowserController {
       (assigned.publicId===undefined || assigned.publicId===nativeIdentity.publicId);
     if(!workspace||!assigned||(!sameIdentity&&!renamedSameGenerator))
       throw new Error('Open the exact assigned Generator and Draft (or the same Generator ID after URL rename) before resolving.');
-    const vfs = new VirtualFileSystem(this.adapter, this.store, workspaceId),
+    const vfs = await this.recoveryVfs(workspace, operation.epoch, operation.bindingRevision, assigned),
       snapshot = await vfs.snapshot();
     const observedDigest = snapshot.revision.split(":")[1];
     const resolution = await this.transport.request(
@@ -519,7 +572,7 @@ export class BrowserController {
     // acknowledged. Other unknown writes/imports are independent holds.
     for (const journal of (await vfs.unresolved()).filter(j=>j.gatewayOperationId===operationId))
       await vfs.acknowledgeReconciliation(journal.id, snapshot.revision);
-    const key = `perch:operation:${workspaceId}:${operationId}`,
+    const key = this.operationPrefix(workspaceId, vfs) + operationId,
       local = await this.store.get<LocalOperation>(key);
     if (local) {
       local.resolvedByOperator = true;
@@ -540,7 +593,7 @@ export class BrowserController {
     if(!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId))throw new Error('Invalid Workspace ID.');
     const w=await this.getRecoveryWorkspace(workspaceId);
     await this.assertRecoveryIdentity(w);
-    const vfs=new VirtualFileSystem(this.adapter,this.store,workspaceId);
+    const vfs = await this.recoveryVfs(w);
     // Read-only native rebase is attempted automatically; this view is only
     // for genuinely recent or unobservable effects.
     await vfs.reconcileRetained().catch(()=>[]);
@@ -564,7 +617,7 @@ export class BrowserController {
     if(this.executing)throw new Error('Wait for the active operation before local reconciliation.');
     const w=await this.getRecoveryWorkspace(workspaceId);
     await this.assertRecoveryIdentity(w);
-    const vfs=new VirtualFileSystem(this.adapter,this.store,workspaceId);
+    const vfs = await this.recoveryVfs(w);
     const snapshot=await vfs.snapshot();
     if(snapshot.revision!==expectedRevision)throw new Error('Native source changed: inspect again before resolution.');
     if(!(await vfs.unresolved()).some(j=>j.id===journalId))
@@ -572,6 +625,27 @@ export class BrowserController {
     // Evidence is a mandatory operator acknowledgement; never stored with
     // private source or repeated to the gateway for this browser-local hold.
     await vfs.acknowledgeReconciliation(journalId,expectedRevision,evidence);
+  }
+  private async recoveryVfs(workspace: Record<string, unknown>, exactEpoch?: unknown,
+      exactBindingGeneration?: unknown, identity?: NativeIdentity): Promise<VirtualFileSystem> {
+    const workspaceId = String(workspace.id);
+    if (workspace.contractVersion !== 2)
+      return new VirtualFileSystem(this.adapter, this.store, workspaceId);
+    const tuple = (identity ?? workspace.binding) as (NativeIdentity & {browserInstallationId?: string}) | undefined;
+    if (!tuple?.browserInstallationId || typeof workspace.assignmentGeneration !== 'number')
+      throw new BrowserError('BINDING_MISMATCH', 'Recovery requires the exact Binding installation.');
+    return VirtualFileSystem.openBound(this.adapter, this.store, {
+      workspaceId, installationId: tuple.browserInstallationId,
+      generatorId: tuple.generatorId, draftId: tuple.draftId,
+      assignmentGeneration: workspace.assignmentGeneration,
+      bindingGeneration: Number(exactBindingGeneration ?? workspace.bindingGeneration),
+      epoch: Number(exactEpoch ?? workspace.epoch),
+    }, {readOnly: true, assertCurrent: () => undefined});
+  }
+  private operationPrefix(workspaceId: string, vfs = this.vfs): string {
+    return vfs?.workspaceId === workspaceId && vfs.scope
+      ? vfs.scope.epochPrefix + ':operation:'
+      : `perch:operation:${workspaceId}:`;
   }
   private async getRecoveryWorkspace(workspaceId:string):Promise<Record<string,unknown>> {
     if(!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId))throw new Error('Invalid Workspace ID.');
@@ -680,7 +754,101 @@ export class BrowserController {
       this.executing = false;
     }
   }
+  private async executeScopedOperation(raw: unknown, lease: Lease): Promise<void> {
+    const parsed = browserEnvelopeV2.safeParse(raw);
+    if (!parsed.success) throw new BrowserError('INCOMPATIBLE_VERSION', 'A scoped v2 envelope is required.');
+    const envelope = parsed.data, target = parseTarget(envelope.target), vfs = this.vfs;
+    if (!vfs?.scope || envelope.workspaceId !== lease.workspaceId || target.workspaceId !== lease.workspaceId ||
+        envelope.tabInstanceId !== this.tabInstanceId || envelope.connectorId !== lease.connectorId || envelope.epoch !== lease.epoch ||
+        envelope.bindingRevision !== lease.bindingRevision || envelope.bindingGeneration !== lease.bindingGeneration ||
+        target.bindingGeneration !== lease.bindingGeneration || envelope.assignmentGeneration !== lease.assignmentGeneration ||
+        target.assignmentGeneration !== lease.assignmentGeneration || !envelope.permissions.every(p=>lease.permissions.includes(p)))
+      throw new BrowserError('STALE_EPOCH','Operation does not match this exact scoped lease.');
+    this.abort = new AbortController();
+    const signal = this.abort.signal;
+    const assertCurrent = async () => {
+      if (signal.aborted || this.stopped || this.lease !== lease)
+        throw new BrowserError('CANCELLED','Operation is cancelled or its lease is no longer active.');
+      const now = Date.now();
+      if (now >= lease.expiresAt || now >= envelope.deadlineMs || envelope.deadlineMs - now > 3_600_000)
+        throw new BrowserError('TIMEOUT','Exact scoped operation deadline expired.');
+      await vfs.scope!.assertCurrent();
+    };
+    await assertCurrent();
+    const operationId = envelope.operationId;
+    const key = this.operationPrefix(envelope.workspaceId) + operationId;
+    const seal = await digest(JSON.stringify(envelope));
+    const reply = (phase: string, result?: Record<string,unknown>) => this.transport.tab(
+      '/api/v1/tab/reply', {...this.ids(lease),operationId,phase,...(result ? {result} : {})},lease.leaseCredential);
+    const existing = await this.store.get<LocalOperation>(key);
+    if (existing) {
+      if (existing.digest !== seal) throw new BrowserError('NATIVE_CONFLICT','Operation envelope changed on replay.');
+      const retained = existing.result;
+      const result = retained && (existing.resultExpiresAt ?? 0) > Date.now() ? retained : {
+        operationId,status:'UNKNOWN',effectState:'POSSIBLE',
+        error:{code:'EFFECT_UNKNOWN',message:'Scoped operation has retained execution evidence.',
+          retryable:false,recovery:'Use the original operationKey to reconcile; no execution was repeated.'},
+      };
+      await reply(String(result.status),result);
+      return;
+    }
+    const intent: LocalOperation & {segments: SegmentRequest[]; steps: Record<string,unknown>[]} = {
+      operationId, digest:seal, epoch:envelope.epoch, tool:envelope.tool,status:'RUNNING',createdAt:Date.now(),segments:[],steps:[],
+    };
+    await this.store.set(key,intent);
+    await reply('RUNNING');
+    let result: Record<string,unknown>;
+    const context: DevelopmentContext = {
+      envelope,vfs,signal,assertCurrent,
+      permit: async (kind, inputDigest) => {
+        await assertCurrent();
+        const segment = {sequence:intent.segments.length,kind,digest:inputDigest};
+        intent.segments.push(segment);
+        await this.store.set(key,intent);
+        const permit = await this.transport.tab('/api/v1/tab/segment', {
+          ...this.ids(lease),operationId,segment,
+        },lease.leaseCredential,{signal}) as {operationId?:unknown;sequence?:unknown;digest?:unknown;expiresAt?:number};
+        if (permit.operationId!==operationId || permit.sequence!==segment.sequence ||
+            permit.digest!==inputDigest || !Number.isSafeInteger(permit.expiresAt) || permit.expiresAt!<=Date.now())
+          throw new BrowserError('REVOKED','Segment receipt is unavailable or stale.');
+        await assertCurrent();
+      },
+      recordStep: async step => {
+        intent.steps[step.index]=step;
+        await this.store.set(key,intent);
+      },
+      additional: async () => {
+        throw new BrowserError('UNSUPPORTED_INTERFACE','The required v2 preview or native interface is unavailable.');
+      },
+    };
+    try {
+      const data = await (this.tools?.callDevelopment ? this.tools.callDevelopment(context) : executeDevelopment(context));
+      const reported = data as {status?:string};
+      const status = reported?.status === 'PARTIAL' || reported?.status === 'UNKNOWN' || (reported?.status==='REJECTED' || reported?.status==='CANCELLED') ? reported.status : 'SUCCEEDED';
+      const effectState = status==='PARTIAL'?'PARTIAL':status==='UNKNOWN'?'POSSIBLE':status==='REJECTED'||status==='CANCELLED'?'NONE':'VERIFIED';
+      result = {operationId,status,effectState,data:new TextEncoder().encode(JSON.stringify(data)).length <= 240_000 ?
+        data : {resultAvailability:'TOO_LARGE'}};
+      if (status!=='SUCCEEDED') result.error = {code:status==='PARTIAL'?'PARTIAL_EFFECT':status==='UNKNOWN'?'EFFECT_UNKNOWN':status==='CANCELLED'?'CANCELLED':'PROVIDER_REJECTED',
+        message:'Inspect exact operation or step evidence.',retryable:false,recovery:'Reconcile recorded effects before another mutation.'};
+    } catch (error) {
+      const fault = error as {code?:string;effectState?:string};
+      const code = errorCodes.includes(fault.code as (typeof errorCodes)[number]) ? fault.code! : 'PROVIDER_REJECTED';
+      const unknown = fault.effectState==='UNKNOWN' || code==='EFFECT_UNKNOWN';
+      const status = fault.effectState==='PARTIAL'?'PARTIAL':unknown?'UNKNOWN':code==='CANCELLED'?'CANCELLED':'REJECTED';
+      const detail = envelope.tool==='capture_page_image' && code==='UNSUPPORTED_INTERFACE' && error instanceof BrowserError
+        ? error.message : 'Scoped operation stopped at '+code+'.';
+      result = {operationId,status,effectState:status==='PARTIAL'?'PARTIAL':unknown?'POSSIBLE':'NONE',
+        error:{code,message:detail,retryable:false,
+          recovery:'Inspect operation status and reconcile before retrying an effect.'}};
+    }
+    intent.status=String(result.status);
+    intent.result=result;
+    intent.resultExpiresAt=Date.now()+600_000;
+    await this.store.set(key,intent);
+    await reply(intent.status,result);
+  }
   private async executeOperation(raw: unknown, lease: Lease): Promise<void> {
+    if (lease.contractVersion === 2) return this.executeScopedOperation(raw, lease);
     const envelope = validateEnvelope(raw);
     const vfs = this.vfs!;
     if (
@@ -711,7 +879,7 @@ export class BrowserController {
         envelope.expectedRevision,
       ]),
     );
-    const key = `perch:operation:${lease.workspaceId}:${envelope.operationId}`;
+    const key = this.operationPrefix(lease.workspaceId) + envelope.operationId;
     const existing = await this.store.get<LocalOperation>(key);
     if (existing) {
       if (existing.digest !== hash) throw new Error("Operation ID collision.");
@@ -1075,7 +1243,7 @@ export class BrowserController {
     );
   }
   private async pruneOperations(workspaceId: string): Promise<void> {
-    const prefix = `perch:operation:${workspaceId}:`;
+    const prefix = this.operationPrefix(workspaceId);
     const rows: { key: string; row: LocalOperation }[] = [];
     for (const key of (await this.store.list()).filter((k) =>
       k.startsWith(prefix),

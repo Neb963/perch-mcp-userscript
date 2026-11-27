@@ -1,5 +1,9 @@
 # Release verification record
 
+For v0.3.0 use the [offline acceptance matrix](verification/v0.3/ACCEPTANCE.md) and the [operator checklist](../OPERATOR-ACCEPTANCE.md). The evidence below records the earlier v0.1 qualification and its historical parity contract.
+
+## Historical v0.1 record
+
 Date: 2026-11-26. Classification: **verification candidate, not release-ready and not full functional parity**. The accepted scope C01–C21 has not been reduced. A tool schema, a candidate adapter, or a synthetic provider receipt is not a passing live parity gate.
 
 ## HAR-confirmed native owner actions (v0.1.11 candidate)

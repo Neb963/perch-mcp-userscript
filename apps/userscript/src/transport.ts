@@ -216,6 +216,7 @@ export class GatewayTransport {
     method: string,
     path: string,
     body?: unknown,
+    options?: { timeoutMs?: number; signal?: AbortSignal; idempotencyKey?: string },
   ): Promise<unknown> {
     if (
       !path.startsWith("/api/v1/admin/") &&
@@ -225,16 +226,16 @@ export class GatewayTransport {
         "PATH_DENIED",
         "Management route not permitted.",
       );
-    return this.authenticated("admin", method, path, body);
+    return this.authenticated("admin", method, path, body, undefined, options);
   }
   async tab(
     path: string,
     body: unknown,
     leaseSecret?: string,
-    options?: { timeoutMs?: number; signal?: AbortSignal },
+    options?: { timeoutMs?: number; signal?: AbortSignal; idempotencyKey?: string },
   ): Promise<unknown> {
     if (
-      !/^\/api\/v1\/tab\/(claim|poll|reply|release|heartbeat|ticket|permit|music|music-result|image)$/.test(
+      !/^\/api\/v1\/tab\/(claim|rebind-proof|poll|reply|release|heartbeat|ticket|permit|segment|music|music-result|image)$/.test(
         path,
       )
     )
@@ -275,7 +276,7 @@ export class GatewayTransport {
     path: string,
     body?: unknown,
     leaseSecret?: string,
-    options?: { timeoutMs?: number; signal?: AbortSignal },
+    options?: { timeoutMs?: number; signal?: AbortSignal; idempotencyKey?: string },
   ): Promise<unknown> {
     const paired = this.pairing;
     if (!paired)
@@ -353,7 +354,7 @@ export class GatewayTransport {
     body?: unknown,
     credential?: string,
     binary = false,
-    options?: { timeoutMs?: number; signal?: AbortSignal },
+    options?: { timeoutMs?: number; signal?: AbortSignal; idempotencyKey?: string },
   ): Promise<unknown> {
     const started = Date.now();
     // Only the bounded route template is recorded. Never record Origin
@@ -387,7 +388,7 @@ export class GatewayTransport {
     body?: unknown,
     credential?: string,
     binary = false,
-    options?: { timeoutMs?: number; signal?: AbortSignal },
+    options?: { timeoutMs?: number; signal?: AbortSignal; idempotencyKey?: string },
   ): Promise<unknown> {
     if (
       !path.startsWith("/") ||
@@ -425,7 +426,7 @@ export class GatewayTransport {
     if (body !== undefined) headers.set("Content-Type", "application/json");
     if (credential) headers.set("Authorization", `Bearer ${credential}`);
     if (!["GET", "HEAD"].includes(method))
-      headers.set("Idempotency-Key", crypto.randomUUID());
+      headers.set("Idempotency-Key", options?.idempotencyKey ?? crypto.randomUUID());
     let response!: Response;
     // Only idempotent GETs may be retried. Never automatically replay a
     // management write, tab operation or an uncertain OAuth-related effect.

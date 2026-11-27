@@ -298,7 +298,8 @@ function cleanupGeneration(db: SqlRecords, generation: number): boolean {
 function fenceLegacyRegistryBinary(db: SqlRecords): void {
   const core = db.get<Record<string, unknown> | undefined>('core');
   if (core === undefined) return;
-  if (!core || typeof core !== 'object' || Array.isArray(core) || (core.schemaVersion !== 1 && core.schemaVersion !== 2)) return corrupt('RESOURCE_SNAPSHOT_CORE_SCHEMA_INVALID');
+  if (!core || typeof core !== 'object' || Array.isArray(core) || (core.schemaVersion !== 1 && core.schemaVersion !== 2 &&
+              !(core.schemaVersion === 3 && core.assignmentContractVersion === 2))) return corrupt('RESOURCE_SNAPSHOT_CORE_SCHEMA_INVALID');
   if (core.schemaVersion === 1) db.put('core',{ ...core, schemaVersion: 2 });
 }
 /** At most32 obsolete assignment-content rows per maintenance invocation. */

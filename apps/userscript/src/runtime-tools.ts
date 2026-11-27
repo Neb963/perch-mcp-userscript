@@ -1,3 +1,6 @@
+import { DevelopmentPreview } from './development-preview.js';
+import { developmentInfo, saveDevelopment } from './development-save.js';
+import { executeDevelopment, type DevelopmentContext } from './development-v2.js';
 import { createComputeWorkerClient, ExecutionError } from "./compute.js";
 import { PreviewAdapter, createNativePreviewBridge } from "./preview.js";
 import { fetchPublic } from "./public-fetch.js";
@@ -18,6 +21,7 @@ declare const __COMPUTE_WORKER_SOURCE__: string;
 /** Context stays in the controller closure. Agent code receives only bounded serialized broker values. */
 export class RuntimeTools implements AdditionalTools {
   private previews = new Map<string, PreviewAdapter>();
+  private developmentPreviews = new Map<string, DevelopmentPreview>();
   private compute: ReturnType<typeof createComputeWorkerClient>;
   private readonly previewOutcomes: { at: number; tool: string; durationMs: number; code: string; outcome: 'ok' | 'error' }[] = [];
   diagnostics() {
@@ -34,6 +38,19 @@ export class RuntimeTools implements AdditionalTools {
     workerSource = __COMPUTE_WORKER_SOURCE__,
   ) {
     this.compute = createComputeWorkerClient(workerSource);
+  }
+  callDevelopment(context: DevelopmentContext): Promise<unknown> {
+    return executeDevelopment({...context, additional: async (name,args,scope) => {
+      if (name==='generator_info') return developmentInfo(args,context);
+      if (name==='save_generator') return saveDevelopment(args,context);
+      const key = context.vfs.prefix;
+      let preview = this.developmentPreviews.get(key);
+      if (!preview) {
+        preview = new DevelopmentPreview(this.page,this.doc,async ()=>(await context.vfs.adapter.snapshot()).revision);
+        this.developmentPreviews.set(key,preview);
+      }
+      return preview.run(name,args,context,scope);
+    }},this.compute);
   }
   capabilityReport(context: RuntimeContext): Record<string, unknown> {
     return this.preview(context).availability();
@@ -83,8 +100,10 @@ export class RuntimeTools implements AdditionalTools {
     return preview;
   }
   dispose(): void {
-    for (const preview of this.previews.values()) preview.restoreViewport();
+    for (const preview of this.previews.values()) preview.dispose();
+    for (const preview of this.developmentPreviews.values()) preview.dispose();
     this.previews.clear();
+    this.developmentPreviews.clear();
   }
   async call(
     name: string,
