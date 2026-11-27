@@ -223,6 +223,97 @@ export class NativeAdapter {
     if (!equalBytes(files['main.pjs'], utf8.encode(boundedString(this.page.modelTextEditor!.getValue()))) || !equalBytes(files['index.html'], utf8.encode(boundedString(this.page.outputTemplateEditor!.getValue())))) throw new BrowserError('STALE_REVISION', 'Editor changed during source snapshot.');
     return { identity, files, revision: await snapshotRevision(identity, files), dirty: this.dirty(), saveState: typeof this.page.perchanceSaveState === 'string' ? this.page.perchanceSaveState : 'unknown' };
   }
+  private async nativeManifest() {
+    const src = this.page.srcState!;
+    const raw = await src.list();
+    const listing: unknown[] = Array.isArray(raw) ? raw :
+      raw && typeof raw === 'object' ? Object.entries(raw).map(([path, value]) => ({
+        path, size: value && typeof value === 'object' ? (value as {size?: unknown}).size : undefined,
+      })) : [];
+    if (!Array.isArray(raw) && (!raw || typeof raw !== 'object'))
+      throw new BrowserError('UNSUPPORTED_INTERFACE', 'Unrecognized native src manifest.');
+    if (listing.length > 1000) throw new BrowserError('LIMIT_EXCEEDED', 'Native source manifest exceeds 1000 files.');
+    const seen = new Set<string>();
+    const rows = listing.map((item) => {
+      const row = typeof item === 'string' ? {path: item, size: undefined} : item as {path?: unknown; size?: unknown};
+      if (!row || typeof row.path !== 'string')
+        throw new BrowserError('UNSUPPORTED_INTERFACE', 'Unrecognized native src manifest row.');
+      const path = canonicalPath('src/' + row.path);
+      const lower = path.toLowerCase();
+      if (seen.has(lower)) throw new BrowserError('PATH_DENIED', 'Native source paths collide by case.');
+      seen.add(lower);
+      const bytes = typeof row.size === 'number' && Number.isSafeInteger(row.size) && row.size >= 0 ? row.size : null;
+      return {path, bytes, sha256: null};
+    }).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+    for (const path of seen) {
+      const parts = path.split('/');
+      for (let i = 2; i < parts.length; i++) {
+        if (seen.has(parts.slice(0, i).join('/')))
+          throw new BrowserError('PATH_DENIED', 'Native manifest has a file/directory collision.');
+      }
+    }
+    return rows;
+  }
+  /** Metadata has no implied content proof. In particular, same-size edits
+   * can leave this observation unchanged. */
+  async listSourceMetadata() {
+    const probe = await this.probe();
+    if (!probe.ready) throw new BrowserError('TAB_BUSY', 'Native editor is not ready.');
+    const before = await this.assertIdentity();
+    const src = this.page.srcState!;
+    await src.ready();
+    if (src.idle) await src.idle();
+    const files = await this.nativeManifest();
+    if (!equalIdentity(before, await this.assertIdentity()) ||
+        JSON.stringify(files) !== JSON.stringify(await this.nativeManifest()))
+      throw new BrowserError('STALE_REVISION', 'Native manifest changed during the listing.');
+    return [{path: 'main.pjs', bytes: null, sha256: null}, {path: 'index.html', bytes: null, sha256: null}, ...files];
+  }
+  async readSelectedSource(paths: readonly string[]): Promise<Map<string, Uint8Array | null>> {
+    if (paths.length < 1 || paths.length > 64)
+      throw new BrowserError('LIMIT_EXCEEDED', 'Selected read requires 1 to 64 native files.');
+    const probe = await this.probe();
+    if (!probe.ready) throw new BrowserError('TAB_BUSY', 'Native editor is not ready.');
+    const identity = await this.assertIdentity();
+    for (const path of paths) {
+      canonicalPath(path);
+      if (path !== 'main.pjs' && path !== 'index.html' && !path.startsWith('src/'))
+        throw new BrowserError('PATH_DENIED', 'Not a native source file.');
+    }
+    const src = this.page.srcState!;
+    const hasAssets = paths.some(path => path.startsWith('src/'));
+    if (hasAssets) {
+      await src.ready();
+      if (src.idle) await src.idle();
+    }
+    const rows = hasAssets ? await this.nativeManifest() : [];
+    const listed = new Map(rows.map(row => [row.path, row.bytes]));
+    const read = async (path: string): Promise<Uint8Array | null> => {
+      if (path === 'main.pjs') return utf8.encode(boundedString(this.page.modelTextEditor!.getValue()));
+      if (path === 'index.html') return utf8.encode(boundedString(this.page.outputTemplateEditor!.getValue()));
+      if (!listed.has(path)) return null;
+      return nativeBytes(await src.readFile(path.slice(4)), this.page.Uint8Array, listed.get(path) ?? undefined);
+    };
+    const selected = new Map<string, Uint8Array | null>();
+    let bytes = 0;
+    for (const path of paths) {
+      const value = await read(path);
+      bytes += value?.length ?? 0;
+      if ((value?.length ?? 0) > 16 * 1024 * 1024 || bytes > (this.options.maxSnapshotBytes ?? 64 * 1024 * 1024))
+        throw new BrowserError('LIMIT_EXCEEDED', 'Selected source exceeded its byte limit.');
+      selected.set(path, value);
+    }
+    for (const [path, value] of selected) {
+      const after = await read(path);
+      if (value ? !after || !equalBytes(after, value) : after !== null)
+        throw new BrowserError('STALE_REVISION', 'Selected source changed while reading.');
+    }
+    if (!equalIdentity(identity, await this.assertIdentity()))
+      throw new BrowserError('BINDING_MISMATCH', 'Native identity changed while reading.');
+    if (hasAssets && JSON.stringify(rows) !== JSON.stringify(await this.nativeManifest()))
+      throw new BrowserError('STALE_REVISION', 'Native manifest changed while reading.');
+    return selected;
+  }
   getSnapshot(): Promise<NativeSnapshot> { return this.snapshot(); }
   async applyFiles(writes: FileWrite[], expectedRevision: string, onDispatch?: () => Promise<void>, assertCurrent?: () => Promise<void>): Promise<MutationResult> {
     const report = await this.probe(); if (!report.ready) throw new BrowserError('TAB_BUSY', 'Native source write interfaces not ready.'); this.assertMutationReady(); if (!report.sourceWrite) throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native source setter interfaces unavailable.');

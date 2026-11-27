@@ -116,8 +116,10 @@ export class BoundObjectStore {
     const files = Object.entries(root?.files ?? {}).map(([path, file]) => ({path, sha256: file.sha256, bytes: file.bytes}));
     const value = await digest(JSON.stringify(files.map((file) => [file.path, file.sha256, file.bytes])
       .sort(([a], [b]) => String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0)));
+    const generation = root?.fields.generation ?? 0;
+    if (!validGeneration(generation)) return failCorrupt('Invalid Binding local revision.');
     return {
-      revision: {value, verified: true as const},
+      revision: {value: generation + ':' + value, verified: true as const},
       files,
       read: async (path: string) => {
         const reference = root?.files[canonicalPath(path)];
@@ -156,6 +158,11 @@ export class BoundObjectStore {
       }
     }
     return total;
+  }
+  async assertStorageRoom(additionalBytes: number): Promise<void> {
+    const keys = await this.keys();
+    if (await this.physicalBytes(keys) + additionalBytes > this.maxBytes)
+      throw new BrowserError('QUOTA_EXCEEDED', 'Binding physical storage is full.');
   }
   async put(name: string, input: Uint8Array): Promise<void> {
     await this.writable();

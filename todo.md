@@ -17,8 +17,8 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 | V01 | V00 | Connector-level Grant, strict version coexistence, indexed discovery and explicit Target | Foundation verified; catalog gated |
 | V02 | V01 | Durable fenced transition, exact management receipts and original-scope result ACL | Gateway verified; manager integration pending |
 | V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | Core and lease integration verified; operator archive UI pending |
-| V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | In progress |
-| V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Pending |
+| V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | Primitives verified; wire integration pending |
+| V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | In progress |
 | V06 | V05 | Preview freshness, diagnostics, viewport, actual-pixel feasibility and verified Save | Pending |
 | V07 | V01–V06 | Exact v2 catalog, archive/export compatibility, retirement and agent knowledge | Pending |
 | V08 | V02–V07 | Manager, compatible migration/rollback and one-click rebind | Pending |
@@ -70,6 +70,17 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 - Add strict v2 filesystem schemas, metadata-only manifest and selected-byte native view. Verify PJS/HTML reads and listings avoid unrelated src content. Return bounded byte/line continuations and scope cursors to query and manifest.
 - Apply exact preconditions and complete path/collision preflight to write, delete and rename. Use retained native verification and checkpoints where no native CAS exists. Scope binary transfer stage and completeness to the initiating Grant and current Target.
 - Exercise same-byte-size changes, invalid UTF-8, exact binary and empty bytes, metadata pagination and partial outcomes using synthetic native interfaces. Integrate the shared catalog only after V05–V07.
+
+### V04 evidence
+
+- Typecheck and eight focused tests passed. A synthetic native fixture with 100 src files observed zero src content reads for panel reads and metadata listing, and exactly four content reads for two requested src files. Same-size manual edits invalidate a digest continuation. Invalid UTF-8, long lines, zero bytes, exact preflight, rename and scoped staged binary commit each have a focused fixture.
+- Native mutation still uses full independent verification because the supported interface exposes no comprehensive generation or CAS. V2 MCP dispatch and chained batch publications remain gated until end-to-end integration.
+
+### V05 plan
+
+- Add timestamp-bounded Operation keys with exact scope, digest and retained receipt. Persist them atomically with admission, check retained keys first, and require exact authorization at status/result delivery. Carry versioned tool envelopes and deny legacy child-tool calls for v2.
+- Define the closed batch union and preflight all nested inputs before execution. Preserve declared-action receipts and partial effects. Isolate QuickJS read views and staged publication, then integrate restricted GET/POST and verified public import snapshots.
+- Exercise lost-response replay, altered digest/Grant, expired key, cancellation, permissions and result projection with local workerd. Keep the gated rollout until all 19 tool definitions and compatibility tests are ready.
 
 ## Historical v0.1–v0.2.0 implementation ledger
 

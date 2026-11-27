@@ -1,3 +1,4 @@
+import { nextGeneration } from '../../../packages/contracts/src/target.js';
 import { NativeAdapter } from './adapter.js';
 import { BoundObjectStore, resolveBindingStorage, type BindingStorageIdentity, type BindingStorageScope } from './binding-storage.js';
 import { ChunkStore } from './storage.js';
@@ -62,6 +63,11 @@ export class VirtualFileSystem {
     if (this.scope?.readOnly) throw new BrowserError('SCOPE_DENIED', 'Binding storage is read-only.');
     await this.scope?.assertCurrent();
   }
+  async assertLocalRoom(additionalBytes: number) {
+    if (!(this.chunks instanceof BoundObjectStore))
+      throw new BrowserError('INCOMPATIBLE_VERSION', 'A scoped Binding lease is required.');
+    await this.chunks.assertStorageRoom(additionalBytes);
+  }
   async localView() {
     if (!(this.chunks instanceof BoundObjectStore))
       throw new BrowserError('INCOMPATIBLE_VERSION', 'A scoped Binding lease is required for targeted local reads.');
@@ -86,6 +92,52 @@ export class VirtualFileSystem {
   getSnapshot(): Promise<WorkspaceSnapshot> { return this.snapshot(); }
   async list(path = ''): Promise<string[]> { if (path && !['src', 'scratch', 'imports'].includes(path)) canonicalPath(path); const files = Object.keys((await this.snapshot()).files).sort(); return path ? files.filter(name => name === path || name.startsWith(`${path.replace(/\/$/, '')}/`)) : files; }
   async read(path: string): Promise<Uint8Array> { canonicalPath(path); const bytes = (await this.snapshot()).files[path]; if (!bytes) throw new BrowserError('FILE_NOT_FOUND', 'File does not exist in assigned Workspace.'); return bytes.slice(); }
+  async writeLocalBatch(writes: FileWrite[], expectedLocalRevision: string, gatewayOperationId?: string) {
+    return this.serial(async () => {
+      await this.assertPublication();
+      const scope = this.scope;
+      if (!scope) throw new BrowserError('INCOMPATIBLE_VERSION', 'Binding-local write requires a scoped store.');
+      const old = await this.localView();
+      if (old.revision.value !== expectedLocalRevision)
+        throw new BrowserError('STALE_REVISION', 'Private files changed before publication.');
+      const pending = await this.unresolved();
+      if (pending.some(row => row.paths.some(path => writes.some(write => write.path === path))))
+        throw new BrowserError('NATIVE_CONFLICT', 'An unresolved local publication overlaps these files.');
+      const local = await this.local();
+      for (const write of writes) {
+        if (!canonicalPath(write.path).startsWith('scratch/'))
+          throw new BrowserError('PATH_DENIED', 'Binding-local write requires a scratch path.');
+        if (write.bytes === null) delete local.files[write.path];
+        else local.files[write.path] = bytesToBase64(write.bytes);
+      }
+      local.generation = nextGeneration(local.generation);
+      const journal: Journal = {id: crypto.randomUUID(), kind: 'SOURCE', state: 'INTENT',
+        paths: writes.map(write => write.path), baseRevision: expectedLocalRevision, createdAt: Date.now(),
+        gatewayOperationId};
+      const key = scope.epochPrefix + ':journal:' + journal.id;
+      await this.store.set(key, journal);
+      let started = false;
+      try {
+        await this.assertPublication();
+        started = true;
+        await this.chunks.put('local', utf8.encode(JSON.stringify(local)));
+        const updated = await this.localView();
+        for (const write of writes) {
+          const file = updated.files.find(file => file.path === write.path);
+          if (write.bytes === null ? file !== undefined : file?.sha256 !== await digest(write.bytes))
+            throw new BrowserError('EFFECT_UNKNOWN', 'Binding local readback differs from planned bytes.');
+        }
+        await this.store.set(key, {...journal, state: 'SUCCEEDED'});
+        void this.serial(() => this.trim()).catch(() => undefined);
+        return updated.revision;
+      } catch (error) {
+        const known = !started || error instanceof BrowserError && error.code === 'QUOTA_EXCEEDED';
+        await this.store.set(key, {...journal, state: known ? 'REJECTED' : 'UNKNOWN'}).catch(() => undefined);
+        if (known) throw error;
+        throw new BrowserError('EFFECT_UNKNOWN', 'Private file publication requires reconciliation.');
+      }
+    });
+  }
   async writeBatch(writes: FileWrite[], expectedRevision?: string, gatewayOperationId?: string): Promise<MutationResult> { return this.serial(async () => this.commit(writes, expectedRevision, gatewayOperationId)); }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const next = this.tail.then(fn, fn); this.tail = next.catch(() => undefined); return next; }
   private async commit(writes: FileWrite[], expectedRevision?: string, gatewayOperationId?: string): Promise<MutationResult> {
@@ -177,6 +229,7 @@ export class VirtualFileSystem {
         const local = await this.local();
         for (const w of writes.filter(w => w.path.startsWith('scratch/')))
           if (w.bytes === null) delete local.files[w.path]; else local.files[w.path] = bytesToBase64(w.bytes);
+        if (this.scope) local.generation = nextGeneration(local.generation);
         await this.chunks.put('local', utf8.encode(JSON.stringify(local)));
       }
       const after = await this.snapshot();
