@@ -528,3 +528,28 @@ test("indexed journal survives cold starts and reconciles legacy writes without 
     assert.equal(local.counts.operationScans, baseline);
   } finally { local.db.close(); }
 });
+
+test("Registry index recreates safely after rollback of first indexed mutation", async()=>{
+ const f=fixture();
+ try {
+   const rows=new SqlRecords(f.storage);
+   const {RegistryIndex}=await import("../../apps/gateway/src/registry-index.js");
+   rows.put("grant/old",{workspaceId:"w",state:"active",expiresAt:Date.now()+10000});
+   assert.throws(()=>rows.transaction(()=>{const index=new RegistryIndex(rows);assert.equal(index.count("grant"),1);throw new Error("abort");}));
+   const index=new RegistryIndex(rows);assert.equal(index.count("grant"),1);
+   rows.put("grant/new",{workspaceId:"w",state:"active",expiresAt:Date.now()+10000});
+   assert.deepEqual(index.grants("w").sort(),["grant/new","grant/old"]);
+   rows.delete("grant/old");assert.equal(index.count("grant"),1);
+ }finally{f.db.close();}
+});
+test("indexed historical cleanup cannot hide an expired active operation",async()=>{
+ const f=fixture();
+ try{
+   const db=new SqlRecords(f.storage);
+   const {OperationIndex}=await import("../../apps/gateway/src/operation-index.js");
+   const index=new OperationIndex<ReturnType<typeof opFixture>>(db);
+   for(let n=0;n<150;n++)db.put("operation/history-"+n,{...opFixture("SUCCEEDED"),operationId:"history-"+n,createdAt:Date.now()-8*86400000,terminalAt:Date.now()-7*86400000,terminalNotified:true});
+   db.put("operation/fixture-operation",opFixture());
+   assert.ok(index.due(Date.now()).some(o=>o.operationId==="fixture-operation"));
+ }finally{f.db.close();}
+});

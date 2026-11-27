@@ -75,7 +75,6 @@ export class Workspace {
     private env: Env,
   ) {
     this.db = new SqlRecords(state.storage);
-    this.db.enableJournalIdleInvalidation();
     const schema = this.db.get<number>("schema");
     if (schema !== undefined && schema !== 1)
       throw new ApiError(
@@ -175,7 +174,7 @@ export class Workspace {
       if (existing !== null) await this.state.storage.deleteAlarm();
       return;
     }
-    const next = Math.max(Date.now() + 10, Math.min(...deadlines));
+    const next = Math.max(Date.now() + 1000, Math.min(...deadlines));
     if (existing === null || existing <= Date.now() || next < existing)
       await this.state.storage.setAlarm(next);
   }
@@ -187,7 +186,9 @@ export class Workspace {
       try { await this.scheduleAlarm(retryAt); } catch { /* Retain durable outbox. */ }
       return;
     }
-    for (const op of this.journal.pending()) {
+    for (const {key} of this.journal.pendingKeys()) {
+      const op=this.db.get<Operation>(key);
+      if(!op?.terminalAt||op.terminalNotified)continue;
       const error = (op.result as { error?: { code?: unknown } } | undefined)
         ?.error;
       const errorCode =
@@ -359,7 +360,7 @@ export class Workspace {
       bindingRevision: op.bindingRevision,
       ...(op.resolution ? { resolution: op.resolution } : {}),
       ...(op.lateObservation ? { lateObservation: op.lateObservation } : {}),
-      ...(op.result === undefined
+      ...(op.result === undefined || (op.terminalAt!==undefined&&op.terminalAt+600000<=Date.now())
         ? op.terminalAt
           ? {
               error: {
@@ -407,7 +408,7 @@ export class Workspace {
         createdAt: Date.now(),
       };
       this.db.transaction(() => {
-        const all = this.journal.active();
+        const all = this.journal.activeStats();
         if (this.journal.pendingFull())
           throw new ApiError(
             "QUOTA_EXCEEDED",
@@ -428,16 +429,14 @@ export class Workspace {
             "Workspace holds an unresolved effect.",
             409,
           );
-        if (all.filter((o) => !o.terminalAt).length >= 8)
+        if (all.length >= 8)
           throw new ApiError(
             "QUEUE_FULL",
             "Workspace queue has eight operations.",
             429,
           );
         if (
-          all
-            .filter((o) => !o.terminalAt)
-            .reduce((n, o) => n + JSON.stringify(o.args ?? {}).length, 0) +
+          all.reduce((n,o)=>n+o.argSize,0) +
             JSON.stringify(args).length >
           2 * 1024 * 1024
         )
@@ -695,15 +694,12 @@ export class Workspace {
         this.db.put("lease", refreshed);
       }
       this.expire();
-      const operations = this.journal.active();
-      const idleFor = Date.now() - Math.max(refreshed.claimedAt ?? Date.now(), this.journal.lastActivityAt());
-      const idleWaitMs = !operations.length && idleFor >= 120000 ? 15000 : 5000;
-      if (operations.some(o => ["DISPATCHED", "RUNNING"].includes(o.phase)))
-        return json({ operations: [], expiresAt: l.expiresAt, idleWaitMs });
-      const op = operations
-        .filter((o) => o.phase === "ADMITTED")
-        .sort((a, b) => a.sequence - b.sequence)[0];
-      if (!op) return json({ operations: [], expiresAt: l.expiresAt, idleWaitMs });
+      if(this.journal.running())return json({operations:[],expiresAt:l.expiresAt,idleWaitMs:5000});
+      const op=this.journal.nextAdmitted();
+      if(!op){
+        const idleFor=Date.now()-Math.max(refreshed.claimedAt??Date.now(),this.journal.lastActivityAt());
+        return json({operations:[],expiresAt:l.expiresAt,idleWaitMs:idleFor>=120000?15000:5000});
+      }
       try {
         await rpc(registry(this.env), "/internal/dispatch", {
           props: op.props,

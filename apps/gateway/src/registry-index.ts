@@ -60,10 +60,11 @@ export class RegistryIndex {
         else {
           const v=this.db.get<Event>(key);
           const kind=(key==="library"?"library":key.split("/")[0]) as Kind;
-          if(!v){
+          if(v===undefined){
             this.db.query("DELETE FROM registry_entity_v1 WHERE key=?",key);
             if(kind==="terminal-notice")this.setActivity(key.slice("terminal-notice/".length),"notice",null);
           }else {
+            if(!v||typeof v!=="object"||Array.isArray(v))throw new Error("SQLITE_RECORD_CORRUPT");
             let due:number|null=null, expires:number|null=null, hold=0;
             const event=v.event as Event|undefined;
             if(kind==="approval"||kind==="grant"){due=expires=num(v.expiresAt);}
@@ -91,7 +92,7 @@ export class RegistryIndex {
       this.sync();
       const old=eventsByKey(previous), upcoming=eventsByKey(next);
       for(const key of old.keys())if(!upcoming.has(key))this.setActivity(key,"base",null);
-      for(const [key,event] of upcoming)if(JSON.stringify(old.get(key))!==JSON.stringify(event))this.setActivity(key,"base",event);
+      for(const [key,event] of upcoming)if(old.get(key)!==event)this.setActivity(key,"base",event);
       this.db.put("activity",next);
       this.db.query("DELETE FROM registry_dirty_v1 WHERE key='activity'");
     });

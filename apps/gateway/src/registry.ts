@@ -111,7 +111,13 @@ export interface AuthProps {
 export class Registry {
   private records?: SqlRecords;
   private derived?: RegistryIndex;
-  private get catalog():RegistryIndex {return this.derived??=new RegistryIndex(this.db);}
+  private get catalog():RegistryIndex {
+    if(this.derived)return this.derived;
+    const index=new RegistryIndex(this.db);
+    // An enclosing transaction may roll back DDL. Cache only committed initialization.
+    if(!this.db.inTransaction)this.derived=index;
+    return index;
+  }
   constructor(
     private state: DurableObjectState,
     private env: Env,

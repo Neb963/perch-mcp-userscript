@@ -5,6 +5,7 @@ export const WORKSPACE_JOURNAL_IDLE_KEY = "workspace-journal-idle/v1";
 /** SQLite-backed chunked records; every mutation runs within transactionSync. */
 export class SqlRecords {
   private depth = 0;
+  get inTransaction():boolean {return this.depth>0;}
   private usage: SqlUsage = { reads: 0, writes: 0, statements: 0, unmetered: 0 };
   constructor(private storage: DurableObjectStorage) {
     this.query(
@@ -43,7 +44,6 @@ export class SqlRecords {
   }
   private write(key: string, value: unknown): void {
     const s = JSON.stringify(value);
-    this.query("DELETE FROM records WHERE key=?", key);
     let offset = 0,
       part = 0;
     while (offset < s.length) {
@@ -52,13 +52,14 @@ export class SqlRecords {
       const last = s.charCodeAt(end - 1);
       if (end < s.length && last >= 0xd800 && last <= 0xdbff) end--;
       this.query(
-        "INSERT INTO records(key,part,value) VALUES(?,?,?)",
+        "INSERT INTO records(key,part,value) VALUES(?,?,?) ON CONFLICT(key,part) DO UPDATE SET value=excluded.value WHERE records.value<>excluded.value",
         key,
         part++,
         s.slice(offset, end),
       );
       offset = end;
     }
+    this.query("DELETE FROM records WHERE key=? AND part>=?",key,part);
   }
 
   enableJournalIdleInvalidation(): void {

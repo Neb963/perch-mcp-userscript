@@ -49,8 +49,12 @@ export class OperationIndex<T extends IndexedOperation> {
       const dirty = this.db.query<Key>("SELECT key FROM operation_dirty_v1 ORDER BY key");
       for (const {key} of dirty) {
         const o = this.db.get<T>(key);
-        if (!o) this.db.query("DELETE FROM operation_index_v1 WHERE key=?", key);
+        if (o===undefined) this.db.query("DELETE FROM operation_index_v1 WHERE key=?", key);
         else {
+          if(!o||typeof o!=="object"||!["ADMITTED","DISPATCHED","RUNNING","SUCCEEDED","REJECTED","UNKNOWN","PARTIAL","CANCELLED"].includes(o.phase)||
+             typeof o.tool!=="string"||!Number.isFinite(o.sequence)||!Number.isFinite(o.createdAt)||!Number.isFinite(o.deadlineMs)||
+             (o.terminalAt!==undefined&&!Number.isFinite(o.terminalAt)))
+            throw new Error("SQLITE_RECORD_CORRUPT");
           const terminal = o.terminalAt || 0;
           const active = terminal ? 0 : 1;
           const pending = terminal && !o.terminalNotified ? 1 : 0;
@@ -74,15 +78,21 @@ export class OperationIndex<T extends IndexedOperation> {
   }
   private select(sql: string, ...args: number[]): Key[] { this.sync(); return this.db.query<Key>(sql,...args); }
   private load(rows: Key[]): T[] { return rows.map(({key}) => { const o=this.db.get<T>(key); if(!o)throw new Error("SQLITE_RECORD_CORRUPT"); return o; }); }
-  active(): T[] { return this.load(this.select("SELECT key FROM operation_index_v1 WHERE active=1 ORDER BY sequence LIMIT 9")); }
-  pending(): T[] { return this.load(this.select("SELECT key FROM operation_index_v1 WHERE pending=1 ORDER BY created LIMIT 128")); }
+  activeStats(): {argSize:number}[] {this.sync();return this.db.query<{argSize:number}>("SELECT argSize FROM operation_index_v1 WHERE active=1 ORDER BY sequence LIMIT 9");}
+  running():boolean {return this.select("SELECT key FROM operation_index_v1 WHERE active=1 AND phase IN ('DISPATCHED','RUNNING') ORDER BY sequence LIMIT 1").length>0;}
+  nextAdmitted():T|undefined {return this.load(this.select("SELECT key FROM operation_index_v1 WHERE active=1 AND phase='ADMITTED' ORDER BY sequence LIMIT 1"))[0];}
+  pendingKeys():Key[] {return this.select("SELECT key FROM operation_index_v1 WHERE pending=1 ORDER BY created LIMIT 32");}
   pendingExists(): boolean { return this.select("SELECT key FROM operation_index_v1 WHERE pending=1 ORDER BY created LIMIT 1").length>0; }
   pendingFull(): boolean { return this.select("SELECT key FROM operation_index_v1 WHERE pending=1 ORDER BY created LIMIT 1 OFFSET 127").length>0; }
   holds(): boolean { return this.select("SELECT key FROM operation_index_v1 WHERE hold=1 ORDER BY created LIMIT 1").length>0; }
   holdsFull(): boolean { return this.select("SELECT key FROM operation_index_v1 WHERE hold=1 ORDER BY created LIMIT 1 OFFSET 127").length>0; }
   leaseBlocked(): boolean { return this.select("SELECT key FROM operation_index_v1 WHERE leaseBlock=1 ORDER BY created LIMIT 1").length>0; }
   leaseBlockers(): T[] { return this.load(this.select("SELECT key FROM operation_index_v1 WHERE leaseBlock=1 ORDER BY created LIMIT 128")); }
-  due(now: number): T[] { return this.load(this.select("SELECT key FROM operation_index_v1 WHERE due IS NOT NULL AND due<=? ORDER BY due LIMIT 128",now)); }
+  due(now: number): T[] {
+    // Never let a historical retention backlog delay expiration of an active operation.
+    return this.load(this.select("SELECT key FROM operation_index_v1 WHERE active=1 AND due<=? ORDER BY sequence LIMIT 9",now))
+      .concat(this.load(this.select("SELECT key FROM operation_index_v1 WHERE active=0 AND due IS NOT NULL AND due<=? ORDER BY due LIMIT 128",now)));
+  }
   nextDue(): number | undefined { this.sync(); return this.db.query<{due:number}>("SELECT due FROM operation_index_v1 WHERE due IS NOT NULL ORDER BY due LIMIT 1")[0]?.due; }
   lastActivityAt(): number { this.sync(); return this.db.query<{terminal:number}>("SELECT terminal FROM operation_index_v1 ORDER BY terminal DESC LIMIT 1")[0]?.terminal ?? 0; }
   stats(): ProjectionStats { this.sync(); return this.db.query<ProjectionStats>("SELECT eligible,resultSize FROM operation_index_state_v1 WHERE id=1")[0]!; }

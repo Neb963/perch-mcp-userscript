@@ -479,7 +479,7 @@ test("SQL cursor budgets do not scale with terminal history while idle or active
     const active=await measure(idle);
     const status=await measure(()=>h.status(f,String(admitted.operationId)));
     const invalid=await measure(async()=> {
-      const r=await stub.fetch("https://internal/api/v1/tab/poll",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer invalid"},body:JSON.stringify({workspaceId:f.workspaceId,epoch:f.lease.epoch,tabInstanceId:f.lease.tabInstanceId,waitMs:0})});
+      const r=await stub.fetch("https://internal/api/v1/tab/poll",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+"x".repeat(64)},body:JSON.stringify({workspaceId:f.workspaceId,epoch:f.lease.epoch,tabInstanceId:f.lease.tabInstanceId,waitMs:0})});
       assert.equal(r.status,409);
     });
     console.log(JSON.stringify({kind:"sql-budget",idleBefore,idleAfter,active,status,invalid,firstCycle,lastCycle}));
