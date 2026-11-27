@@ -24,7 +24,7 @@ import {
   type Env,
 } from "./common.js";
 import { SqlRecords } from "./sql.js";
-import { incident, persistIncident, registryFailureReason } from "./incident.js";
+import { incident, persistIncident, registryFailureReason, registryQuotaDimension } from "./incident.js";
 import { requiresGeneratorReservation } from "../../../packages/contracts/src/effect-policy.js";
 import { resourceAdmin, resourceTool } from "./resources.js";
 export interface WorkspaceRecord {
@@ -250,6 +250,7 @@ export class Registry {
       if (new URL(request.url).pathname === "/internal/health") {
         const headers = new Headers(response.headers);
         headers.set("X-Perch-Registry-Failure", registryFailureReason(error));
+        headers.set("X-Perch-Registry-Quota", registryQuotaDimension(error));
         return new Response(response.body, { status: response.status, headers });
       }
       return response;

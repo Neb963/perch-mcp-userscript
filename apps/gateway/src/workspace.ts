@@ -17,7 +17,7 @@ import {
   str,
   type Env,
 } from "./common.js";
-import { SqlRecords } from "./sql.js";
+import { SqlRecords, WORKSPACE_JOURNAL_IDLE_KEY } from "./sql.js";
 import {
   toolDefinitions,
   validateToolCall,
@@ -32,6 +32,7 @@ interface Lease {
   bindingRevision: number;
   tabInstanceId: string;
   secretHash: string;
+  claimedAt?: number;
   expiresAt: number;
   credentialEpoch: number;
   permissions: string[];
@@ -66,12 +67,12 @@ export class Workspace {
   private db: SqlRecords;
   private music: MusicHandler;
   private images: ImageTransferHandler<Operation>;
-  private wake: (() => void) | undefined;
   constructor(
     private state: DurableObjectState,
     private env: Env,
   ) {
     this.db = new SqlRecords(state.storage);
+    this.db.enableJournalIdleInvalidation();
     const schema = this.db.get<number>("schema");
     if (schema !== undefined && schema !== 1)
       throw new ApiError(
@@ -150,15 +151,35 @@ export class Workspace {
     await this.drainTerminalOutbox();
   }
   private async scheduleAlarm(retryAt?: number): Promise<void> {
-    const rows = this.operations(),
-      deadlines = rows.filter((o) => !o.terminalAt).map((o) => o.deadlineMs);
-    for (const row of rows)
-      if (row.terminalAt && row.result !== undefined)
-        deadlines.push(row.terminalAt + 600000);
+    const idle = this.journalIdle();
+    const rows = idle ? [] : this.operations();
+    const deadlines: number[] = idle?.nextAt == null ? [] : [idle.nextAt];
+    if (!idle) {
+      const now = Date.now();
+      let eligible = 0;
+      for (const row of rows) {
+        if (!row.terminalAt) deadlines.push(row.deadlineMs);
+        else {
+          if (row.result !== undefined) deadlines.push(row.terminalAt + 600000);
+          const code = (row.result as { error?: { code?: unknown } } | undefined)?.error?.code;
+          if (!row.terminalErrorCode && typeof code === "string" &&
+              /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) deadlines.push(now);
+          if (!row.terminalNotified) deadlines.push(retryAt ?? now + 1000);
+          else if (this.retentionEligible(row)) {
+            eligible++;
+            deadlines.push(row.createdAt + 7 * 86400000);
+          }
+        }
+      }
+      if (eligible > 1000) deadlines.push(now);
+      const nextAt = deadlines.length ? Math.min(...deadlines) : null;
+      // Derived hint, not authority: every operation mutation invalidates it synchronously.
+      if (rows.every(o => o.terminalAt && o.terminalNotified) &&
+          (nextAt === null || nextAt > now))
+        this.db.put(WORKSPACE_JOURNAL_IDLE_KEY, { nextAt, lastActivityAt: rows.reduce((latest, row) => Math.max(latest, row.terminalAt ?? row.createdAt), 0) });
+    }
     for (const expiry of [this.images.nextExpiry(), this.music.nextExpiry()])
       if (expiry !== undefined) deadlines.push(expiry);
-    if (rows.some((o) => o.terminalAt && !o.terminalNotified))
-      deadlines.push(retryAt ?? Date.now() + 1000);
     const existing = await this.state.storage.getAlarm();
     if (!deadlines.length) {
       if (existing !== null) await this.state.storage.deleteAlarm();
@@ -170,7 +191,7 @@ export class Workspace {
   }
   private async drainTerminalOutbox(): Promise<void> {
     let failed = false;
-    const pending = this.operations().filter(
+    const pending = this.journalIdle() ? [] : this.operations().filter(
       (row) => row.terminalAt && !row.terminalNotified,
     );
     const retryAt = pending.length ? this.db.get<number>("outbox-retry-at", 0) : 0;
@@ -242,6 +263,22 @@ export class Workspace {
       /* Persistent terminal rows remain the outbox for the next request/alarm. */
     }
   }
+  private journalIdle(): { nextAt: number | null; lastActivityAt: number } | undefined {
+    let hint: { nextAt: number | null; lastActivityAt: number } | undefined;
+    try { hint = this.db.get<{ nextAt: number | null; lastActivityAt: number }>(WORKSPACE_JOURNAL_IDLE_KEY); }
+    catch (error) {
+      if (!(error instanceof Error) || error.message !== "SQLITE_RECORD_CORRUPT") throw error;
+      return undefined; // A corrupt derived hint is never trusted.
+    }
+    if (hint && Number.isSafeInteger(hint.lastActivityAt) && (hint.nextAt === null ||
+        (Number.isSafeInteger(hint.nextAt) && hint.nextAt > Date.now()))) return hint;
+    return undefined;
+  }
+  private retentionEligible(o: Operation): boolean {
+    return !!o.terminalAt && !!o.terminalNotified &&
+      ((o.phase !== "UNKNOWN" && o.phase !== "PARTIAL") ||
+        !!o.resolution || isTerminalViewportEffect(o));
+  }
   private operations(): Operation[] {
     return this.db.keys("operation/").map((k) => this.db.get<Operation>(k));
   }
@@ -253,6 +290,7 @@ export class Workspace {
       for (const key of this.db.keys("retired/"))
         if (this.db.get<Lease>(key).expiresAt + 86400000 < now)
           this.db.delete(key);
+      if (this.journalIdle()) return;
       for (const op of this.operations()) {
         const terminalCode = (
           op.result as { error?: { code?: unknown } } | undefined
@@ -307,13 +345,7 @@ export class Workspace {
         }
       }
       const terminal = this.operations()
-        .filter(
-          (o) =>
-            o.terminalAt &&
-            o.terminalNotified &&
-            ((o.phase !== "UNKNOWN" && o.phase !== "PARTIAL") ||
-              o.resolution || isTerminalViewportEffect(o)),
-        )
+        .filter(o => this.retentionEligible(o))
         .sort((a, b) => a.createdAt - b.createdAt);
       const excess = Math.max(0, terminal.length - 1000);
       for (const [index, op] of terminal.entries())
@@ -378,7 +410,7 @@ export class Workspace {
   private async route(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname,
       b = await parseBody(request);
-    this.expire();
+    if (path !== "/api/v1/tab/poll") this.expire();
     if (path === "/internal/admit") {
       const w = b.workspace as WorkspaceRecord,
         l = this.db.get<Lease>("lease");
@@ -454,7 +486,6 @@ export class Workspace {
         this.db.put("sequence", op.sequence);
         this.db.put("operation/" + op.operationId, op);
       });
-      this.wake?.();
       return json(this.summary(op));
     }
     if (path === "/internal/status" || path === "/internal/cancel") {
@@ -599,6 +630,7 @@ export class Workspace {
           bindingRevision: approved.workspace.bindingRevision,
           tabInstanceId,
           secretHash,
+          claimedAt: Date.now(),
           expiresAt: Date.now() + 180000,
           credentialEpoch: approved.credentialEpoch,
           permissions: approved.workspace.permissions,
@@ -661,7 +693,6 @@ export class Workspace {
     if (path === "/api/v1/tab/release") {
       this.db.put("retired/" + l.epoch + "/" + l.tabInstanceId, l);
       this.db.delete("lease");
-      this.wake?.();
       return json({ ok: true });
     }
     if (path === "/api/v1/tab/heartbeat") {
@@ -692,39 +723,28 @@ export class Workspace {
     }
     if (path === "/api/v1/tab/poll") {
       // Recheck registry policy through an execution credential-independent lease revision probe at dispatch.
-      l.expiresAt = Date.now() + 180000;
-      this.db.put("lease", l);
-      if (!this.operations().some((o) => o.phase === "ADMITTED"))
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(
-            () => {
-              this.wake = undefined;
-              resolve();
-            },
-            Math.min(25000, Number(b.waitMs ?? 25000)),
-          );
-          this.wake = () => {
-            clearTimeout(timer);
-            this.wake = undefined;
-            resolve();
-          };
-        });
+      // Never sleep inside a Durable Object. The outer Worker paces empty responses.
       const refreshed = this.db.get<Lease>("lease");
-      if (!refreshed || refreshed.epoch !== l.epoch)
-        throw new ApiError(
-          "STALE_EPOCH",
-          "Lease released during polling.",
-          409,
-        );
+      if (!refreshed || refreshed.epoch !== l.epoch ||
+          refreshed.tabInstanceId !== l.tabInstanceId || refreshed.expiresAt <= Date.now())
+        throw new ApiError("STALE_EPOCH", "Lease changed during polling.", 409);
+      l.expiresAt = refreshed.expiresAt;
+      if (l.expiresAt - Date.now() <= 120000 || !refreshed.claimedAt) {
+        refreshed.claimedAt ??= Date.now();
+        refreshed.expiresAt = l.expiresAt = Date.now() + 180000;
+        this.db.put("lease", refreshed);
+      }
       this.expire();
-      const running = this.operations().find((o) =>
-        ["DISPATCHED", "RUNNING"].includes(o.phase),
-      );
-      if (running) return json({ operations: [], expiresAt: l.expiresAt });
-      const op = this.operations()
+      const idle = this.journalIdle();
+      const operations = idle ? [] : this.operations();
+      const idleFor = Date.now() - Math.max(refreshed.claimedAt ?? Date.now(), idle?.lastActivityAt ?? Date.now());
+      const idleWaitMs = idle && idleFor >= 120000 ? 15000 : 5000;
+      if (operations.some(o => ["DISPATCHED", "RUNNING"].includes(o.phase)))
+        return json({ operations: [], expiresAt: l.expiresAt, idleWaitMs });
+      const op = operations
         .filter((o) => o.phase === "ADMITTED")
         .sort((a, b) => a.sequence - b.sequence)[0];
-      if (!op) return json({ operations: [], expiresAt: l.expiresAt });
+      if (!op) return json({ operations: [], expiresAt: l.expiresAt, idleWaitMs });
       try {
         await rpc(registry(this.env), "/internal/dispatch", {
           props: op.props,

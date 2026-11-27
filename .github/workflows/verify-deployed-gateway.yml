@@ -63,6 +63,7 @@ jobs:
                       "version": version if isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) else None,
                       "traceId": trace if isinstance(trace, str) and re.fullmatch(r"[0-9a-fA-F-]{36}", trace) else None,
                       "reason": reason if isinstance(reason, str) and reason in reasons else None,
+                      "quotaDimension": data.get("quotaDimension") if data.get("quotaDimension") in ["DURATION", "ROWS_READ", "ROWS_WRITTEN", "REQUESTS", "SPENDING", "STORAGE", "UNKNOWN"] else None,
                       "paired": data.get("paired") is True,
                       "configured": data.get("configured") is True}
 
