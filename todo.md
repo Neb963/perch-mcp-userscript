@@ -16,8 +16,8 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 | V00 | v0.2.0 | Baseline, authority amendment, full disposition, offline reproduction or explicit gap | Verified locally |
 | V01 | V00 | Connector-level Grant, strict version coexistence, indexed discovery and explicit Target | Foundation verified; catalog gated |
 | V02 | V01 | Durable fenced transition, exact management receipts and original-scope result ACL | Gateway verified; manager integration pending |
-| V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | In progress |
-| V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | Pending |
+| V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | Core and lease integration verified; operator archive UI pending |
+| V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | In progress |
 | V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Pending |
 | V06 | V05 | Preview freshness, diagnostics, viewport, actual-pixel feasibility and verified Save | Pending |
 | V07 | V01–V06 | Exact v2 catalog, archive/export compatibility, retirement and agent knowledge | Pending |
@@ -59,6 +59,17 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 - Derive a private namespace from installation, Workspace, assignment, Binding and exact native identity. Use separate epoch writers and retain legacy Workspace-only records for operator quarantine.
 - Store checkpoint and local file bytes as verified content-addressed chunks. Persist staged roots before the pointer, verify readback, protect active/held roots and enforce physical capacity. Test exact binary bytes, deduplication, partial persistence, stale epoch and bounded cleanup.
 - Integrate lease-based opening, scope operation receipts, and preserve exact offline recovery paths. Do not admit a v2 operation through a legacy local namespace.
+
+### V03 evidence
+
+- Scoped store uses exact Binding and independent Epoch namespaces. Checkpoints deduplicate content-addressed chunks within an Epoch. Mutable pointers are read back and uncertain publication roots remain reachable. Same-Binding reconnect copies the prior verified local manifest only after earlier local journals and publication records are settled. Untagged v0.2 bytes stay quarantined.
+- Strict typecheck and 72 focused offline tests passed, including exact binary/empty files, lost pointer acknowledgement, stale writer fence, physical budget, staged-root retention and the 32-chunk GC cap. The controller claims a matching adapter version and opens the scoped store before polling. Operator archive presentation and cross-epoch recovery UI remain integration work.
+
+### V04 plan
+
+- Add strict v2 filesystem schemas, metadata-only manifest and selected-byte native view. Verify PJS/HTML reads and listings avoid unrelated src content. Return bounded byte/line continuations and scope cursors to query and manifest.
+- Apply exact preconditions and complete path/collision preflight to write, delete and rename. Use retained native verification and checkpoints where no native CAS exists. Scope binary transfer stage and completeness to the initiating Grant and current Target.
+- Exercise same-byte-size changes, invalid UTF-8, exact binary and empty bytes, metadata pagination and partial outcomes using synthetic native interfaces. Integrate the shared catalog only after V05–V07.
 
 ## Historical v0.1–v0.2.0 implementation ledger
 
