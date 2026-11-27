@@ -4,7 +4,7 @@ import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, digest, equa
 export interface WorkspaceSnapshot extends NativeSnapshot { nativeRevision: string; generation: number }
 interface StoredSource { version: 1; identity: NativeIdentity; files: Record<string, string>; revision: string; createdAt: number; label: string; pinned: boolean }
 interface LocalState { version: 1; files: Record<string, string>; lastHash: string; generation: number }
-interface Journal { id: string; state: 'INTENT' | 'DISPATCHED' | 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN' | 'REJECTED'; paths: string[]; baseRevision: string; checkpointId?: string; kind?: 'SOURCE'|'IMPORT'; createdAt: number; resolvedByOperator?: boolean; inspectedRevision?: string; resolvedAt?: number; operatorEvidence?: string;
+interface Journal { id: string; state: 'INTENT' | 'DISPATCHED' | 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN' | 'REJECTED'; paths: string[]; baseRevision: string; checkpointId?: string; kind?: 'SOURCE'|'IMPORT'|'SAVE'; createdAt: number; resolvedByOperator?: boolean; inspectedRevision?: string; resolvedAt?: number; operatorEvidence?: string;
   gatewayOperationId?: string; plannedHash?: string; plannedPaths?: Record<string,string|null>; identity?: NativeIdentity;
   resolvedByReadback?: boolean; resolutionMode?: 'VERIFIED_INTENDED_BYTES'|'ADOPTED_CURRENT_SAVED_SOURCE'|'ADOPTED_CURRENT_DRAFT'|'ADOPTED_CURRENT_IMPORT_CACHE'|'SUPERSEDED_BINDING';
 }
