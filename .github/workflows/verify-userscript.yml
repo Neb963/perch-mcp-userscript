@@ -34,7 +34,7 @@ jobs:
       - name: Static typecheck
         run: npm run typecheck
       - name: Unit and integration tests
-        run: npm test
+        run: timeout --signal=TERM --kill-after=10s 240s npm test
       - name: Build userscript and Worker package
         run: npm run build
       - name: Verify release package hashes

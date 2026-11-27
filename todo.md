@@ -309,3 +309,5 @@ Incident confirmed by Cloudflare dashboard (5.93M rows read) and sanitized runti
 - Added indexed media/retired-lease deadlines and bounded cleanup, preserving indefinite uncertain paid media intents. Ordinary polls no longer enumerate media history.
 
 - Authenticate claims before local maintenance and guard writes; fence expired/superseded claim completions. Failed auxiliary outbox maintenance does not rewrite a committed operation response. New derived tables use compact WITHOUT ROWID layout; canonical tables unchanged.
+
+- Epoch 18: scoped internal configuration to the requested Agent on MCP routes; empty approval refresh 15s, pending 4s, failures back off to 60s. Userscript 0.1.18 / Worker 0.1.12 candidate. Test harness now disposes partially initialized Miniflare instances and CI has an explicit test-step deadline.
