@@ -1,0 +1,215 @@
+{
+  "source": "f99b0f313603084cc720c83be974d7fd24f05e49",
+  "sourceDirty": false,
+  "runtime": "Miniflare4.20260730.0/workerd1.20260730.1",
+  "activated": {
+    "registry": {
+      "mode": "native",
+      "revision": 14,
+      "activity": {
+        "version": 2,
+        "stage": "NATIVE",
+        "authority": "native",
+        "sequence": 0,
+        "revision": 1,
+        "rollback": "compatible-binary-required"
+      },
+      "resources": {
+        "phase": "NATIVE",
+        "verified": true,
+        "sourcePart": 3,
+        "sourceBytes": 137624,
+        "generation": 1
+      },
+      "rollback": "After any native cutover use this compatible candidate; old binaries cannot read new authority."
+    },
+    "workspace": {
+      "stage": "NATIVE",
+      "cursor": "",
+      "generation": 2,
+      "resumeStage": null,
+      "verification": "{\"total\":0,\"eligible\":0,\"resultSize\":0,\"activeCount\":0,\"pendingCount\":0,\"holdCount\":0,\"leaseCount\":0,\"lastTerminal\":0}",
+      "authority": "native",
+      "maintenanceReady": true,
+      "media": {
+        "image": {
+          "binaryWritesEnabled": false,
+          "metadata": {
+            "stage": "UNINITIALIZED",
+            "indexedCount": null,
+            "indexedReservedBytes": null,
+            "indexedBusy": null
+          }
+        },
+        "music": {
+          "binaryWritesEnabled": false,
+          "metadata": {
+            "stage": "UNINITIALIZED",
+            "indexedCount": null,
+            "indexedReservedBytes": null,
+            "indexedBusy": null
+          }
+        }
+      }
+    }
+  },
+  "fixture": {
+    "files": 10,
+    "decodedBytes": 10240,
+    "tool": "put_files",
+    "bounds": "64 files / 256 KiB; mandatory expectedRevision; WRITE_SOURCE; existing per-item outcomes; no new RPC"
+  },
+  "measurement": "actual local OAuth/MCP HTTP + Registry/Workspace lifecycle, RUNNING, terminal receipt, one status retrieval each; synthetic browser results, all external traffic denied; startup/migration/OAuth excluded",
+  "individual": {
+    "wallMs": 296.5550000000003,
+    "usage": {
+      "worker": {
+        "requests": 50,
+        "kvGet": 20,
+        "kvPut": 0,
+        "kvDelete": 0,
+        "kvList": 0,
+        "alarmGet": 0,
+        "alarmSet": 0,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "sqlReads": 0,
+        "sqlWrites": 0,
+        "sqlStatements": 0,
+        "sqlFailures": 0,
+        "responseBytes": 34450,
+        "wallMs": 164,
+        "coldStarts": 0,
+        "wsAccepted": 0,
+        "wsIncoming": 0,
+        "wsIncomingBytes": 0,
+        "wsCloseEvents": 0
+      },
+      "registry": {
+        "requests": 60,
+        "kvGet": 0,
+        "kvPut": 0,
+        "kvDelete": 0,
+        "kvList": 0,
+        "alarmGet": 10,
+        "alarmSet": 0,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "sqlReads": 710,
+        "sqlWrites": 300,
+        "sqlStatements": 620,
+        "sqlFailures": 0,
+        "responseBytes": 0,
+        "wallMs": 26,
+        "coldStarts": 0,
+        "wsAccepted": 0,
+        "wsIncoming": 0,
+        "wsIncomingBytes": 0,
+        "wsCloseEvents": 0
+      },
+      "workspace": {
+        "requests": 50,
+        "kvGet": 0,
+        "kvPut": 0,
+        "kvDelete": 0,
+        "kvList": 0,
+        "alarmGet": 50,
+        "alarmSet": 0,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "sqlReads": 1170,
+        "sqlWrites": 240,
+        "sqlStatements": 1130,
+        "sqlFailures": 0,
+        "responseBytes": 0,
+        "wallMs": 74,
+        "coldStarts": 0,
+        "wsAccepted": 0,
+        "wsIncoming": 0,
+        "wsIncomingBytes": 0,
+        "wsCloseEvents": 0
+      }
+    }
+  },
+  "batch": {
+    "wallMs": 36.380085000000236,
+    "usage": {
+      "worker": {
+        "requests": 5,
+        "kvGet": 2,
+        "kvPut": 0,
+        "kvDelete": 0,
+        "kvList": 0,
+        "alarmGet": 0,
+        "alarmSet": 0,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "sqlReads": 0,
+        "sqlWrites": 0,
+        "sqlStatements": 0,
+        "sqlFailures": 0,
+        "responseBytes": 14088,
+        "wallMs": 24,
+        "coldStarts": 0,
+        "wsAccepted": 0,
+        "wsIncoming": 0,
+        "wsIncomingBytes": 0,
+        "wsCloseEvents": 0
+      },
+      "registry": {
+        "requests": 6,
+        "kvGet": 0,
+        "kvPut": 0,
+        "kvDelete": 0,
+        "kvList": 0,
+        "alarmGet": 1,
+        "alarmSet": 0,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "sqlReads": 71,
+        "sqlWrites": 30,
+        "sqlStatements": 62,
+        "sqlFailures": 0,
+        "responseBytes": 0,
+        "wallMs": 3,
+        "coldStarts": 0,
+        "wsAccepted": 0,
+        "wsIncoming": 0,
+        "wsIncomingBytes": 0,
+        "wsCloseEvents": 0
+      },
+      "workspace": {
+        "requests": 5,
+        "kvGet": 0,
+        "kvPut": 0,
+        "kvDelete": 0,
+        "kvList": 0,
+        "alarmGet": 5,
+        "alarmSet": 0,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "sqlReads": 117,
+        "sqlWrites": 24,
+        "sqlStatements": 113,
+        "sqlFailures": 0,
+        "responseBytes": 0,
+        "wallMs": 10,
+        "coldStarts": 0,
+        "wsAccepted": 0,
+        "wsIncoming": 0,
+        "wsIncomingBytes": 0,
+        "wsCloseEvents": 0
+      }
+    }
+  },
+  "totals": {
+    "individual": {
+      "reads": 1880,
+      "writes": 540
+    },
+    "batch": {
+      "reads": 188,
+      "writes": 54
+    }
+  }
+}

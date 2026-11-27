@@ -1,0 +1,12 @@
+{
+  "transport": "push",
+  "reconnect": {
+    "workerRequests": 2,
+    "doRequests": 2,
+    "sqlReads": 64,
+    "sqlWrites": 8,
+    "doWallMsProxy": 4,
+    "wsIncomingRaw": 0,
+    "wsOutgoingRaw": 1
+  }
+}
