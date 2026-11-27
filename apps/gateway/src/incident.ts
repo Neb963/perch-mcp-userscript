@@ -86,6 +86,7 @@ const REGISTRY_REASONS = [
   'REGISTRY_STORAGE_CORRUPT', 'REGISTRY_STORAGE_UNAVAILABLE',
   'REGISTRY_SCHEMA_INCOMPATIBLE', 'REGISTRY_CONFIGURATION_INVALID',
   'REGISTRY_TIMEOUT', 'REGISTRY_HTTP_ERROR', 'REGISTRY_UNCLASSIFIED',
+  'REGISTRY_RUNTIME_LIMIT', 'REGISTRY_LIMIT_UNSPECIFIED',
 ] as const;
 export type RegistryFailureReason = typeof REGISTRY_REASONS[number];
 function knownReason(value: unknown): value is RegistryFailureReason {
@@ -98,12 +99,15 @@ export function registryFailureReason(error: unknown): RegistryFailureReason {
   }
   if (!(error instanceof Error)) return 'REGISTRY_UNCLASSIFIED';
   const message = error.message.toLowerCase();
-  if (/quota|free tier|free-tier|daily (?:row|request|storage)|spending limit|exceeded.*limit|limit.*exceeded/.test(message)) return 'REGISTRY_QUOTA';
-  if (/overload|too many (?:requests|queued)|queue.*full/.test(message)) return 'REGISTRY_OVERLOADED';
+  if (/overload|too many (?:requests|queued|concurrent)|queue.*full/.test(message) ||
+      (error as Error & { overloaded?: boolean }).overloaded === true) return 'REGISTRY_OVERLOADED';
+  if (/timeout|timed out|aborted/.test(message)) return 'REGISTRY_TIMEOUT';
+  if (/\b(?:cpu|memory|subrequests?|invocation|execution time|stack)\b.*\b(?:limit|exceed|exhaust)|\b(?:limit|exceed|exhaust).*\b(?:cpu|memory|subrequests?|invocation|execution time|stack)\b/.test(message)) return 'REGISTRY_RUNTIME_LIMIT';
+  if (/free[- ]tier|daily (?:row|request|storage|duration)|monthly quota|account(?:'s)? spending (?:cap|limit)|account(?:'s)? quota|account has exceeded.*(?:quota|daily|monthly)|quota.*(?:daily|monthly)/.test(message)) return 'REGISTRY_QUOTA';
   if (/sqlite_full|database or disk is full|storage.*full/.test(message)) return 'REGISTRY_STORAGE_FULL';
   if (/sqlite_record_corrupt|sqlite_corrupt|database.*(?:corrupt|malformed)/.test(message)) return 'REGISTRY_STORAGE_CORRUPT';
   if (/invalid url|canonical https gateway origin/.test(message)) return 'REGISTRY_CONFIGURATION_INVALID';
-  if (/timeout|timed out|aborted/.test(message)) return 'REGISTRY_TIMEOUT';
+  if (/quota|exceed.*limit|limit.*exceed|limit reached/.test(message)) return 'REGISTRY_LIMIT_UNSPECIFIED';
   if (/sqlite|database|storage|durable object namespace|durable object binding/.test(message)) return 'REGISTRY_STORAGE_UNAVAILABLE';
   return 'REGISTRY_UNCLASSIFIED';
 }
@@ -122,12 +126,30 @@ export function registryQuotaDimension(error: unknown): QuotaDimension {
   if (/storage|disk/.test(message)) return 'STORAGE';
   return 'UNKNOWN';
 }
-function degraded(traceId: string, reason: RegistryFailureReason, dimension: QuotaDimension = 'UNKNOWN'): Response {
+const STAGES = ['DO_STUB', 'SQL_INIT', 'CORE_READ', 'CORE_VALIDATE', 'REGISTRY_RESPONSE'] as const;
+type FailureStage = typeof STAGES[number];
+function knownStage(value: unknown): value is FailureStage {
+  return typeof value === 'string' && (STAGES as readonly string[]).includes(value);
+}
+// Only fixed infrastructure words may be emitted, never arbitrary message substrings,
+// identifiers, URLs, numbers, SQL values, source, stack traces, or credential material.
+const SIGNAL_WORDS = new Set(('account accounts exceeded exceed exceeds exceeding limit limits quota quotas daily monthly free tier plan paid spending cap billing budget blocked reached durable object objects worker workers script scripts class namespace namespaces binding bindings registered configured deployment version invocation execution cpu memory stack subrequest subrequests request requests row rows read reads reading write writes written writing storage sqlite sqlite_full sqlite_corrupt database disk full timeout timed out reset overloaded overload concurrent operations operation too many connection closed internal error runtime resource resources exhausted unavailable unavailable temporarily retry retryable invalid not supported allowed maximum minimum number count time duration second seconds milliseconds wall clock exceeded unexpected failed failure failed to from for by on in of and or a an the its is was has have with as at per must cannot could no found due because before after during this your it that be done more than less than calls call called sql query queries transaction transactions initialization constructor init creation create created read-only readonly table statement statements code updated service services environment permission permissions access denied forbidden disconnected terminated exceeded sized size exceeded exceeded database quota enforcement capacity capacity daily monthly').split(' '));
+export function registryFailureSignal(error: unknown): string {
+  if (!(error instanceof Error)) return 'unavailable';
+  const words = error.message.toLowerCase().slice(0, 1024).match(/[a-z_]+/g) ?? [];
+  return words.slice(0, 48).map(word => SIGNAL_WORDS.has(word) ? word : '_').join(' ').slice(0, 320) || 'unavailable';
+}
+function knownSignal(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 320 &&
+    value.split(' ').every(word => word === '_' || SIGNAL_WORDS.has(word));
+}
+function degraded(traceId: string, reason: RegistryFailureReason, dimension: QuotaDimension = 'UNKNOWN',
+  stage: FailureStage = 'DO_STUB', signal = 'unavailable'): Response {
   return Response.json({ ok: false, code: 'GATEWAY_DEGRADED',
     dependency: 'registry', retryable: ![
       'REGISTRY_SCHEMA_INCOMPATIBLE', 'REGISTRY_CONFIGURATION_INVALID',
       'REGISTRY_STORAGE_CORRUPT',
-    ].includes(reason), traceId, version: VERSION, reason,
+    ].includes(reason), traceId, version: VERSION, reason, stage, signal,
     ...(reason === "REGISTRY_QUOTA" ? { quotaDimension: dimension } : {}) },
     {status: 503, headers: {'Cache-Control':'no-store'}});
 }
@@ -146,10 +168,13 @@ export async function probeRegistryHealth(read: () => Promise<Response>): Promis
     const classified = upstream.headers.get('X-Perch-Registry-Failure');
     const reason = knownReason(classified) ? classified : 'REGISTRY_HTTP_ERROR';
     const quota = upstream.headers.get('X-Perch-Registry-Quota');
-    return { response: degraded(traceId, reason, knownQuota(quota) ? quota : 'UNKNOWN'), failure: { traceId } };
+    const stage = upstream.headers.get('X-Perch-Registry-Stage');
+    const signal = upstream.headers.get('X-Perch-Registry-Signal');
+    return { response: degraded(traceId, reason, knownQuota(quota) ? quota : 'UNKNOWN',
+      knownStage(stage) ? stage : 'REGISTRY_RESPONSE', knownSignal(signal) ? signal : 'unavailable'), failure: { traceId } };
   } catch (error) {
     const traceId = crypto.randomUUID();
-    return { response: degraded(traceId, registryFailureReason(error), registryQuotaDimension(error)),
+    return { response: degraded(traceId, registryFailureReason(error), registryQuotaDimension(error), 'DO_STUB', registryFailureSignal(error)),
       failure: { traceId, error } };
   }
 }

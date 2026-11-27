@@ -80,3 +80,20 @@ test("quota dimensions are allowlisted and omit raw errors", async () => {
   const forged=await probeRegistryHealth(async()=>Response.json({}, {status:503,headers:{"X-Perch-Registry-Failure":"REGISTRY_QUOTA","X-Perch-Registry-Quota":"secret"}}));
   assert.equal((await forged.response.json() as {quotaDimension:string}).quotaDimension,"UNKNOWN");
 });
+
+test("generic limit errors are not evidence of account quota exhaustion", async()=>{
+  for(const [message,reason] of [
+    ["Exceeded CPU time limit", "REGISTRY_RUNTIME_LIMIT"],
+    ["Durable Object storage operation exceeded timeout which caused object to be reset", "REGISTRY_TIMEOUT"],
+    ["Exceeded account's spending cap for Durable Objects.", "REGISTRY_QUOTA"],
+    ["Exceeded the limit for this object", "REGISTRY_LIMIT_UNSPECIFIED"],
+    ["Your account is doing too many concurrent storage operations", "REGISTRY_OVERLOADED"],
+  ] as const) assert.equal(registryFailureReason(new Error(message)),reason);
+  const response=(await probeRegistryHealth(async()=>{throw new Error("Exceeded limit for durable object SECRET-123 https://example.com/token");})).response;
+  const result=await response.json() as {signal:string;stage:string};
+  assert.equal(result.stage,"DO_STUB");
+  assert.match(result.signal,/exceeded limit for durable object/);
+  assert.doesNotMatch(result.signal,/secret|123|example|https|token/);
+  const upstream=await probeRegistryHealth(async()=>Response.json({}, {status:500,headers:{"X-Perch-Registry-Stage":"CORE_READ","X-Perch-Registry-Signal":"sqlite database error"}}));
+  assert.equal((await upstream.response.json() as {stage:string}).stage,"CORE_READ");
+});

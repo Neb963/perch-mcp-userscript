@@ -4,7 +4,7 @@ import type {
   DurableObjectStub,
   KVNamespace,
 } from "@cloudflare/workers-types";
-export const VERSION = "0.1.10";
+export const VERSION = "0.1.11";
 export const HAR_NATIVE_ACTIONS: Readonly<Record<string,string>> = Object.freeze({
   save_generator:"SAVE",rename_generator:"RENAME",set_listing:"LISTING",
 });

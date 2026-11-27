@@ -17,7 +17,7 @@ concurrency:
 jobs:
   readiness:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - name: Verify exact Worker version and Registry readiness
@@ -38,6 +38,7 @@ jobs:
               "REGISTRY_STORAGE_CORRUPT", "REGISTRY_STORAGE_UNAVAILABLE",
               "REGISTRY_SCHEMA_INCOMPATIBLE", "REGISTRY_CONFIGURATION_INVALID",
               "REGISTRY_TIMEOUT", "REGISTRY_HTTP_ERROR", "REGISTRY_UNCLASSIFIED",
+              "REGISTRY_RUNTIME_LIMIT", "REGISTRY_LIMIT_UNSPECIFIED",
           }
 
           def probe(path):
@@ -64,11 +65,13 @@ jobs:
                       "traceId": trace if isinstance(trace, str) and re.fullmatch(r"[0-9a-fA-F-]{36}", trace) else None,
                       "reason": reason if isinstance(reason, str) and reason in reasons else None,
                       "quotaDimension": data.get("quotaDimension") if data.get("quotaDimension") in ["DURATION", "ROWS_READ", "ROWS_WRITTEN", "REQUESTS", "SPENDING", "STORAGE", "UNKNOWN"] else None,
+                      "stage": data.get("stage") if data.get("stage") in ["DO_STUB", "SQL_INIT", "CORE_READ", "CORE_VALIDATE", "REGISTRY_RESPONSE"] else None,
+                      "signal": data.get("signal") if isinstance(data.get("signal"), str) and re.fullmatch(r"[a-z_ ]{1,320}", data["signal"]) else None,
                       "paired": data.get("paired") is True,
                       "configured": data.get("configured") is True}
 
           print("Expected Worker version:", expected, flush=True)
-          for attempt in range(1, 13):
+          for attempt in range(1, 25):
               live_status, live = probe("/live")
               health_status, health = probe("/health")
               print(json.dumps({"attempt": attempt, "live": evidence(live_status, live),
@@ -84,9 +87,9 @@ jobs:
                       print("Production readiness and OAuth metadata verified.", flush=True)
                       sys.exit(0)
               if (live.get("version") == health.get("version") == expected
-                  and health.get("reason") in {"REGISTRY_QUOTA", "REGISTRY_STORAGE_FULL", "REGISTRY_STORAGE_CORRUPT", "REGISTRY_SCHEMA_INCOMPATIBLE", "REGISTRY_CONFIGURATION_INVALID"}):
+                  and health_status == 503 and health.get("stage") in {"DO_STUB", "SQL_INIT", "CORE_READ", "CORE_VALIDATE", "REGISTRY_RESPONSE"}):
                   sys.exit("Deployed version is blocked by a classified Registry fault; see evidence above.")
-              if attempt != 12:
+              if attempt != 24:
                   time.sleep(10)
           sys.exit("Production readiness was not verified within the bounded deployment window.")
           PY
