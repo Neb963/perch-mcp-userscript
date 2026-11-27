@@ -220,3 +220,9 @@ Implementation:
 - Prove Gateway read-only secrecy, lease/blocker state matrix, UI recovery actions, lost-ack retry, namespace isolation, full checks and packaging. No production user draft mutation, resolution or Cloudflare deployment performed during implementation.
 
 Evidence: docs/verification/epoch10-recovery-v0112.md. Gateway v0.1.7 must be deployed in place before installing userscript v0.1.12 to expose the Recovery status endpoint. Live operator exact hold still requires the new read-only status after installation; do not guess the operation from these diagnostics.
+
+### Epoch 11 / v0.1.13 — Preview, bytes, reconnect and UI reliability
+
+Evidence: live `perch-mcp-diagnostics9.json` (0.1.12/0.1.7): successful long-lived lease/polls with recent preview `UNSUPPORTED_INTERFACE` after `STALE_EPOCH`, plus independent native byte-wrapper unsupported error and a later `TAB_OFFLINE` on live read-only status. No provider mutation attempted. Visual audit: synthetic Chromium 1366×768 and 390×844 ShadowRoot manager screenshots before/after UI improvements.
+
+Changes: frame-specific 15-second native preview attestation cache invalidated on reload, read-only status preflight; guarded byte structured-clone crossing Firefox page realm; 45-second idle viewport CSS restoration and immediate failed-resize cleanup; bounded transient poll retries through authoritative lease expiration, single-flight read-only autoreconnect on network/visibility with 1–60s backoff and strict pause/unknown-effect fences; Recovery one-action UX, compact Workspace surface and stacked narrow-screen data tables. Unimplemented provider tools remain unsupported; gateway 0.1.7 unchanged. Type, test, release and dry-run verification are required before merge. Full native Firefox live re-test remains open; see docs/verification/epoch11-hardening-v0113.md.

@@ -67,6 +67,7 @@ export interface AdditionalTools {
   dispose?(): void;
   /** Read-only, no network or source effects; scoped to the bound Workspace. */
   capabilityReport?(context: RuntimeContext): Record<string, unknown>;
+  preflightPreview?(context: RuntimeContext): Promise<void>;
   supports(name: string): boolean;
   call(
     name: string,
@@ -491,14 +492,18 @@ export class BrowserController {
         // operation ACK. Only transient network failures are retried here.
         if (
           !["GATEWAY_TIMEOUT", "GATEWAY_UNAVAILABLE"].includes(code) ||
-          this.consecutivePollFailures >= 3 ||
-          Date.now() + 3000 >= lease.expiresAt
+          Date.now() + 1500 >= lease.expiresAt
         ) throw error;
         this.updateStatus({
           connection: "degraded", workspace: lease.workspaceId,
-          reason: `Poll interrupted (${code}); recovering existing lease, attempt ${this.consecutivePollFailures + 1}/3.`,
+          reason: `Temporary connection interruption (${code}); resuming the existing lease.`,
         });
-        await new Promise((resolve) => setTimeout(resolve, 750 * this.consecutivePollFailures));
+        // A short-lived VPN switch, throttled background tab or Cloudflare
+        // timeout must not strand the agent after a fixed three-strike count.
+        // Retry *only the read-only poll* and never re-ACK/replay an effect.
+        const backoff=Math.min(10000,250*2**Math.min(this.consecutivePollFailures-1,6));
+        await new Promise((resolve) => setTimeout(resolve,Math.min(backoff,
+          Math.max(0,lease.expiresAt-Date.now()-1000))));
         continue;
       }
       this.consecutivePollFailures = 0;
@@ -1079,6 +1084,10 @@ export class BrowserController {
       };
     }
     if (name === 'workspace_status' && this.source) {
+      // Probe the real preview before telling the agent whether it is usable.
+      // A broken optional preview must not prevent Workspace inspection.
+      try { await this.tools?.preflightPreview?.(context); }
+      catch { /* An optional preview cannot prevent authoritative status. */ }
       const base = await this.source.call(name, args) as Record<string, unknown>;
       const caps = base.capabilities as {
         nativeSave?:boolean;sourceRead?:boolean;sourceWrite?:boolean;

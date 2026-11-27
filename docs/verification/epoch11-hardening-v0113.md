@@ -1,0 +1,23 @@
+# Epoch 11 — continuous operation and human-centered recovery (0.1.13)
+
+## Live evidence and scope
+
+Operator diagnostics `perch-mcp-diagnostics9.json` show browser 0.1.12, deployed gateway 0.1.7, pairing and current lease healthy, and successful refresh/evaluation/viewport requests before a preview `STALE_EPOCH` followed by three `UNSUPPORTED_INTERFACE` responses. Subsequent live `workspace_status` returned `TAB_OFFLINE`; the snapshot does not establish which tab/navigation event caused it. Another operator error reported `UNSUPPORTED_INTERFACE: Native file result is not exact bytes`. These are independent feature detection, source-byte boundary and transport/lease failure domains. The diagnostic JSON and HAR are not committed.
+
+## Changes
+
+- Preview: memoize the attestation of an exact native iframe for at most 15 seconds, invalidate on iframe replacement/load, and run a read-only preflight when a Workspace status is requested. A transient preview feature failure does not invalidate a healthy source transport/lease. No change to `page_eval`'s privilege boundary; exact frame, source and native reply checks still apply.
+- Native bytes: validate cross-realm typed-array/buffer byte length, reject `Symbol.toStringTag` impostors, and try a structured clone of a wrapped native buffer before rejecting it. Never fabricate bytes or accept lossy string coercion. The user-reported Firefox wrapper outcome still requires a live re-test after installation.
+- Transient connectivity: retain the same live lease for temporary network failures rather than stopping after three errors; exponential bounded poll retry continues only while the authoritative lease has time remaining. After lease loss, a single-flight background reconnect requests authoritative *read-only* Recovery status, backs off from 1 to 60 seconds, and reconnects only when the Worker says `RECONNECT`. It never replays an uncertain source/provider action, overrides a paused Workspace, or races a manual connection attempt. Network/visibility events accelerate the next safe attempt.
+- Viewport: temporary viewport emulation restores the exact original iframe CSS after 45 seconds without preview activity, at session disposal, and immediately on failed native viewport verification. Each still-active preview operation extends the idle timer, so a long evaluation is not resized mid-operation. An explicit reset remains available.
+- Manager: remove the unexplained Recovery evidence text field and duplicate confirmation from the Recovery tab. Display one explicit acknowledgment action per terminal hold after explaining the inspection requirement. Preserve exact authoritative operation identity, binding, source-revision checks and independent local journals. Keep advanced identifiers under native disclosure `details`. Collapse risky Workspace settings and Workspace creation; on screens ≤620px, label and stack table fields in readable cards instead of narrow three-column tables.
+
+## Verification strategy
+
+- Unit tests: foreign-realm empty/binary files and spoofed buffers; repeated preview calls do not re-handshake an unchanged frame, iframe load invalidates attestation; idle viewport restores CSS and failed verification restores CSS; long transient poll loss succeeds past three failures and truly expired lease exits; Recovery UI requires one explicit acknowledgment, no unknown evidence field/checkbox, leaves unrelated holds unchanged.
+- Visual: Chromium synthetic manager with native ShadowRoot CSS at 1366×768 and 390×844. Inspected Recovery and Workspace screens and iterated on stacked table geometry. These screenshots demonstrate visual layout under the harness, not live Firefox UI acceptance.
+- CI: full repository TypeScript check, unit/integration suite, hashed compiled userscript and Cloudflare gateway bundle verification. A packaged build cannot prove actual Perchance native realm and tab connection behavior. No live provider changes were authorized or attempted during this change.
+
+## Known limits
+
+Gateway 0.1.7 is unchanged; deploying userscript 0.1.13 alone on the already-upgraded 0.1.7 gateway is sufficient. Real Firefox live QA after installation is still necessary to verify the reported foreign-wrapper byte failure and the exact iframe evaluation path; the current live connector was offline when this investigation attempted `workspace_status`. Browser tab closure/suspension, expired authorized leases, incompatible native page changes, and genuinely uncertain external effects cannot be made uninterrupted without violating identity and exactly-once safety. The current provider tools that remain explicitly disabled are **not** claimed working by this release.

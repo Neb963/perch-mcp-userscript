@@ -36,6 +36,21 @@ async function nativeBytes(value: unknown): Promise<Uint8Array> {
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
   const exact = copyArrayBuffer(value);
   if (exact !== null) return exact;
+  // Firefox/Violentmonkey wrappedJSObject may expose a foreign-realm
+  // ArrayBuffer whose intrinsic cannot be invoked from the isolated realm.
+  // Structured clone crosses that compartment without invoking an untrusted
+  // page conversion callback. Prove the cloned buffer's native brand/length.
+  if (value && typeof value === 'object') {
+    try {
+      const cloned: unknown = structuredClone(value);
+      if (ArrayBuffer.isView(cloned)) {
+        const view = cloned as ArrayBufferView;
+        return new Uint8Array(view.buffer, view.byteOffset, view.byteLength).slice();
+      }
+      const copied = copyArrayBuffer(cloned);
+      if (copied !== null) return copied;
+    } catch { /* Unsupported foreign wrapper: retain exact-byte fail closed. */ }
+  }
   if (typeof value === 'string') return utf8.encode(value);
   if (value && typeof value === 'object' && 'arrayBuffer' in value && typeof value.arrayBuffer === 'function') {
     const buffer: unknown = await value.arrayBuffer();
