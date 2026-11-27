@@ -2,6 +2,31 @@ import assert from 'node:assert/strict';
 import type { createCapacityHarness, CapacityFixture } from '../integration/gateway-capacity-harness.js';
 export type Harness=Awaited<ReturnType<typeof createCapacityHarness>>;
 const base='https://capacity.test';
+/** Explicit synthetic operator activation, never mistaken for flag-only native state. */
+export async function activateSyntheticNative(h:Harness,f:CapacityFixture) {
+  await h.get('/api/v1/admin/resources'); // Seed the same original default library.
+  let registry:Record<string,unknown>={};
+  for(let step=0;step<128;step++) {
+    registry=await h.get('/api/v1/admin/storage');
+    if((registry.activity as {stage:string}).stage==='NATIVE'&&
+        (registry.resources as {phase:string}).phase==='NATIVE')break;
+    await h.request('/api/v1/admin/storage/step',{expectedRevision:registry.revision});
+    assert.ok(step<127,'Synthetic Registry migration did not converge');
+  }
+  let workspace:Record<string,unknown>={};
+  const path='/api/v1/admin/workspaces/'+f.workspaceId+'/storage-migration';
+  for(let step=0;step<128;step++) {
+    workspace=await h.get(path);
+    if(workspace.stage==='NATIVE')break;
+    const w=await h.get('/api/v1/admin/workspaces/'+f.workspaceId);
+    await h.request(path,{expectedRevision:w.revision,action:'step'});
+    assert.ok(step<127,'Synthetic Workspace migration did not converge');
+  }
+  assert.equal((registry.activity as {stage:string}).stage,'NATIVE');
+  assert.equal((registry.resources as {phase:string}).phase,'NATIVE');
+  assert.equal(workspace.stage,'NATIVE');
+  return {registry,workspace};
+}
 /** Real local SDK DCR + PKCE + operator approval + code/token exchange. */
 export async function issueSyntheticToken(h:Harness,f:CapacityFixture):Promise<string> {
   const registration=await h.mf.dispatchFetch(base+'/register',{method:'POST',

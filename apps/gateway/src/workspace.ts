@@ -19,7 +19,7 @@ import {
   type Env,
 } from "./common.js";
 import { SqlRecords } from "./sql.js";
-import { OperationIndex } from "./operation-index.js";
+import { OperationStore, operationReceiptDigest } from "./operation-store.js";
 import { MaintenanceIndex } from "./maintenance-index.js";
 import {
   toolDefinitions,
@@ -65,10 +65,13 @@ interface Operation {
   terminalErrorCode?: string;
   resolution?: unknown;
   lateObservation?: unknown;
+  terminalResultDigest?: string;
+  dispatchAttempt?: {id:string;reconcileAt:number};
 }
 export class Workspace {
   private db: SqlRecords;
-  private journal: OperationIndex<Operation>;
+  private operations: OperationStore<Operation>;
+  private journal: OperationStore<Operation>;
   private maintenance: MaintenanceIndex;
   private music: MusicHandler;
   private images: ImageTransferHandler<Operation>;
@@ -79,19 +82,22 @@ export class Workspace {
   ) {
     this.db = new SqlRecords(state.storage);
     const schema = this.db.get<number>("schema");
-    if (schema !== undefined && schema !== 1)
+    const nativeMarker = schema===2 && this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='operation_migration_v2'").length &&
+      this.db.query<{stage:string}>("SELECT stage FROM operation_migration_v2 WHERE id=1")[0]?.stage==='NATIVE';
+    if (schema !== undefined && schema !== 1 && !nativeMarker)
       throw new ApiError(
         "INCOMPATIBLE_VERSION",
         "Workspace schema is newer than this Worker.",
         409,
       );
     if (schema === undefined) this.db.put("schema", 1);
-    this.journal = new OperationIndex<Operation>(this.db);
+    this.operations = new OperationStore<Operation>(this.db, env.CANONICAL_STORAGE_MODE ?? "legacy");
+    this.journal = this.operations;
     this.maintenance = new MaintenanceIndex(this.db);
     this.images = new ImageTransferHandler(this.db, {
       getLease: () => this.db.get<Lease>("lease"),
       getOperation: (operationId) =>
-        this.db.get<Operation>("operation/" + operationId),
+        this.operations.get("operation/" + operationId),
       authorize: async (op) => {
         const fresh = await rpc<{ workspace: WorkspaceRecord }>(
           registry(this.env),
@@ -157,7 +163,11 @@ export class Workspace {
     // Invalid public requests must not amplify maintenance work. An alarm or
     // next authorized request drains any pending canonical terminal state.
     const path = new URL(request.url).pathname;
-    if (!maintenance.settled && path !== "/internal/sql-usage" && (response.ok || path.startsWith("/internal/"))) {
+    if (response.ok && this.operations.migrating && path !== "/internal/sql-usage" && path !== "/internal/migration") {
+      try { this.operations.prepareStep(); await this.scheduleAlarm(); }
+      catch { console.error(JSON.stringify({kind:"workspace-migration-deferred"})); }
+    }
+    if (this.operations.journalReady && !maintenance.settled && path !== "/internal/sql-usage" && (response.ok || path.startsWith("/internal/"))) {
       try {await this.drainTerminalOutbox();}
       catch {console.error(JSON.stringify({kind:"workspace-maintenance-deferred"}));}
     }
@@ -165,12 +175,21 @@ export class Workspace {
   }
   async alarm(): Promise<void> {
     return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","workspace","alarm",async()=>{
+      if(this.operations.migrating)this.operations.prepareStep();
+      if(!this.operations.journalReady){await this.scheduleAlarm();return;}
       this.expire();
       await this.drainTerminalOutbox();
     });
   }
   private async scheduleAlarm(retryAt?: number): Promise<void> {
     const deadlines: number[] = [];
+    if(this.operations.migrating)deadlines.push(Date.now()+1000);
+    if(!this.operations.journalReady) {
+      const existing=await this.state.storage.getAlarm();
+      if(deadlines.length){const next=Date.now()+1000;if(existing===null||existing<=Date.now()||next<existing)await this.state.storage.setAlarm(next);}
+      else if(existing!==null)await this.state.storage.deleteAlarm();
+      return;
+    }
     const due = this.journal.nextDue();
     if (due !== undefined) deadlines.push(due);
     if (this.journal.pendingExists()) deadlines.push(retryAt ?? Date.now() + 1000);
@@ -204,7 +223,7 @@ export class Workspace {
       return;
     }
     for (const {key} of this.journal.pendingKeys()) {
-      const op=this.db.get<Operation>(key);
+      const op=this.operations.get(key);
       if(!op?.terminalAt||op.terminalNotified)continue;
       const error = (op.result as { error?: { code?: unknown } } | undefined)
         ?.error;
@@ -235,11 +254,11 @@ export class Workspace {
           ...(op.resolution ? { resolution: op.resolution } : {}),
         });
         this.db.transaction(() => {
-          const current = this.db.get<Operation>("operation/" + op.operationId);
+          const current = this.operations.get("operation/" + op.operationId);
           if (current && current.phase === op.phase && current.terminalAt === op.terminalAt &&
               canonical(current.resolution) === canonical(op.resolution) && !current.terminalNotified) {
             current.terminalNotified = true;
-            this.db.put("operation/" + current.operationId, current);
+            this.operations.put("operation/" + current.operationId, current);
           }
         });
       } catch {
@@ -282,7 +301,7 @@ export class Workspace {
       if(imageKeys.length)this.images.expire(imageKeys);
       if(musicKeys.length)this.music.expire(musicKeys);
       for (const op of this.journal.due(now)) this.expireOperation(op, now);
-      for (const {key} of this.journal.excessRetention()) this.db.delete(key);
+      for (const {key} of this.journal.excessRetention()) this.operations.delete(key);
     });
   }
   /** Expire exactly one canonical record. Returns true only when retention deleted it. */
@@ -297,7 +316,7 @@ export class Workspace {
       /^[A-Z][A-Z0-9_]{0,63}$/.test(terminalCode)
     ) {
       op.terminalErrorCode = terminalCode;
-      this.db.put("operation/" + op.operationId, op);
+      this.operations.put("operation/" + op.operationId, op);
     }
     if (
       ![
@@ -307,9 +326,9 @@ export class Workspace {
         "PARTIAL",
         "CANCELLED",
       ].includes(op.phase) &&
-      op.deadlineMs <= now
+      (op.deadlineMs <= now || (op.dispatchAttempt && op.dispatchAttempt.reconcileAt <= now))
     ) {
-      op.phase = op.phase === "ADMITTED" ? "REJECTED" : "UNKNOWN";
+      op.phase = op.phase === "ADMITTED" && !op.dispatchAttempt ? "REJECTED" : "UNKNOWN";
       op.result = {
         operationId: op.operationId,
         status: op.phase,
@@ -328,20 +347,23 @@ export class Workspace {
         },
       };
       op.terminalAt = now;
+      op.terminalErrorCode = op.phase === "UNKNOWN" ? "EFFECT_UNKNOWN" : "TIMEOUT";
+      op.terminalResultDigest = operationReceiptDigest(op.result);
       delete op.args;
-      this.db.put("operation/" + op.operationId, op);
+      this.operations.put("operation/" + op.operationId, op);
     } else if (
       op.terminalAt &&
       op.terminalAt + 600000 <= now &&
       op.result !== undefined
     ) {
+      op.terminalResultDigest ??= operationReceiptDigest(op.result);
       delete op.result;
-      this.db.put("operation/" + op.operationId, op);
+      this.operations.put("operation/" + op.operationId, op);
     }
     if (op.terminalAt && op.terminalNotified &&
         (!["UNKNOWN","PARTIAL"].includes(op.phase) || op.resolution || isTerminalViewportEffect(op)) &&
         op.createdAt + 7 * 86400000 <= now)
-      { this.db.delete("operation/" + op.operationId); return true; }
+      { this.operations.delete("operation/" + op.operationId); return true; }
     return false;
   }
   private lease(
@@ -402,6 +424,13 @@ export class Workspace {
    * retention backlog fall through to the normal bounded maintenance path. */
   private async idlePollState(): Promise<{ lastActivityAt: number } | undefined> {
     const row = this.db.query<{ operationDue: number | null; maintenanceDue: number | null; lastActivity: number | null }>(
+      this.operations.native ? `SELECT
+        (SELECT due FROM operation_native_v2 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS operationDue,
+        (SELECT due FROM workspace_maintenance_v1 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS maintenanceDue,
+        lastTerminal AS lastActivity FROM operation_native_stats_v2 WHERE id=1 AND eligible<=1000
+        AND activeCount=0 AND pendingCount=0
+        AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_dirty_v1 LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM records WHERE key IN ('outbox-backoff','outbox-retry-at') LIMIT 1)` :
       `SELECT (SELECT due FROM operation_index_v1 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS operationDue,
         (SELECT due FROM workspace_maintenance_v1 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS maintenanceDue,
         (SELECT terminal FROM operation_index_v1 ORDER BY terminal DESC LIMIT 1) AS lastActivity
@@ -423,12 +452,56 @@ export class Workspace {
     }
     return {lastActivityAt:row.lastActivity??0};
   }
+  /** Only the Worker admin router may call this fixed migration surface. */
+  private migrationAction(b:Record<string,unknown>):Record<string,unknown> {
+    const action=b.action??"status";
+    if(action==="status")return this.operations.progress();
+    if(action!=="step"&&action!=="resume")throw new ApiError("INVALID_INPUT","Unknown storage migration action.");
+    if(this.operations.progress().stage==="LEGACY")throw new ApiError("INCOMPATIBLE_VERSION","Set CANONICAL_STORAGE_MODE to prepare or native before starting migration.",409);
+    const key=id(b.idempotencyKey,"idempotencyKey"),workspaceId=id(b.workspaceId,"workspaceId");
+    const requestDigest=operationReceiptDigest({workspaceId,action});
+    this.db.query("CREATE TABLE IF NOT EXISTS operation_migration_actions_v2 (key TEXT PRIMARY KEY,digest TEXT NOT NULL,response TEXT NOT NULL,expires INTEGER NOT NULL) WITHOUT ROWID");
+    this.db.query("CREATE INDEX IF NOT EXISTS operation_migration_actions_expiry_v2 ON operation_migration_actions_v2(expires)");
+    try {
+      return this.db.transaction(()=>{
+        const now=Date.now();
+        const prior=this.db.query<{digest:string;response:string;expires:number}>("SELECT digest,response,expires FROM operation_migration_actions_v2 WHERE key=?",key)[0];
+        if(prior&&prior.expires>now) {
+          if(prior.digest!==requestDigest)throw new ApiError("CONFLICT","Migration idempotency key has a different action.",409);
+          return JSON.parse(prior.response) as Record<string,unknown>;
+        }
+        if(prior)this.db.query("DELETE FROM operation_migration_actions_v2 WHERE key=?",key);
+        for(const row of this.db.query<{key:string}>("SELECT key FROM operation_migration_actions_v2 WHERE expires<=? ORDER BY expires LIMIT 16",now))
+          this.db.query("DELETE FROM operation_migration_actions_v2 WHERE key=?",row.key);
+        if(this.db.query<{count:number}>("SELECT COUNT(*) AS count FROM operation_migration_actions_v2")[0]!.count>=128)
+          throw new ApiError("QUOTA_EXCEEDED","Migration action receipts are full; wait for their 24-hour expiry.",429);
+        const result=action==="step"?this.operations.prepareStep():this.operations.resumeMigration();
+        this.db.query("INSERT INTO operation_migration_actions_v2 VALUES(?,?,?,?)",key,requestDigest,JSON.stringify(result),now+86400000);
+        return result;
+      });
+    } catch(error) {
+      // A failure writing the idempotency receipt also rolls back cutover.
+      // Restore the cache from durable authority before serving another call.
+      this.operations.refreshMigrationState();
+      if(error instanceof Error&&error.message==="SQLITE_RECORD_CORRUPT")this.operations.blockMigration();
+      throw error;
+    }
+  }
   private async route(request: Request, maintenance: {settled:boolean}): Promise<Response> {
     const path = new URL(request.url).pathname,
       b = await parseBody(request);
     if (path === "/internal/sql-usage") return json(this.db.snapshotUsage());
+    if (path === "/internal/migration") {
+      maintenance.settled=true;
+      const result=this.migrationAction(b);
+      if(b.action==="step"||b.action==="resume") {
+        try {await this.scheduleAlarm();}catch{console.error(JSON.stringify({kind:"workspace-migration-alarm-deferred"}));}
+      }
+      return json(result);
+    }
     if (path.startsWith("/internal/") && !["/internal/status", "/internal/cancel"].includes(path)) this.expire();
     if (path === "/internal/admit") {
+      if(this.operations.blocked)throw new ApiError("GATEWAY_DEGRADED", "Operation migration is blocked; inspect storage-migration status and repair the recorded fixture before resuming.",503);
       const w = b.workspace as WorkspaceRecord,
         l = this.db.get<Lease>("lease");
       if (!l || l.expiresAt <= Date.now() || l.epoch !== w.epoch || l.bindingRevision !== w.bindingRevision)
@@ -504,12 +577,12 @@ export class Workspace {
           );
         op.sequence = this.db.get<number>("sequence", 0) + 1;
         this.db.put("sequence", op.sequence);
-        this.db.put("operation/" + op.operationId, op);
+        this.operations.put("operation/" + op.operationId, op);
       });
       return json(this.summary(op));
     }
     if (path === "/internal/status" || path === "/internal/cancel") {
-      const op = this.db.get<Operation>("operation/" + id(b.operationId));
+      const op = this.operations.get("operation/" + id(b.operationId));
       if (
         !op ||
         op.workspaceId !== b.workspaceId ||
@@ -543,7 +616,7 @@ export class Workspace {
           };
           op.terminalAt = Date.now();
           delete op.args;
-          this.db.put("operation/" + op.operationId, op);
+          this.operations.put("operation/" + op.operationId, op);
         } else if (!op.terminalAt)
           throw new ApiError(
             "EFFECT_UNKNOWN",
@@ -593,6 +666,7 @@ export class Workspace {
         }));
       return json({schemaVersion:1,workspaceId,observedAt:now,
         activeLease:active,pendingClaimUntil,blockingOperations:operations,
+        storageMigration:this.operations.progress(),
         leaseClaimAvailable:!active&&!pendingClaimUntil&&!operations.length,
         action: operations.some(op=>op.resolvable) ? 'RECONCILE' :
           operations.length ? 'WAIT_FOR_TERMINAL' :
@@ -675,7 +749,7 @@ export class Workspace {
       }
     }
     if (path === "/internal/resolve") {
-      const op = this.db.get<Operation>("operation/" + id(b.operationId));
+      const op = this.operations.get("operation/" + id(b.operationId));
       if (
         !op ||
         op.workspaceId !== b.workspaceId ||
@@ -690,7 +764,7 @@ export class Workspace {
         );
       if (!op.resolution) {
         op.resolution = b.resolution;
-        this.db.put("operation/" + op.operationId, op);
+        this.operations.put("operation/" + op.operationId, op);
         const current = this.db.get<Lease>("lease");
         if (current) {
           this.db.put(
@@ -749,6 +823,7 @@ export class Workspace {
       });
     }
     if (path === "/api/v1/tab/poll") {
+      if(!this.operations.journalReady)throw new ApiError("GATEWAY_DEGRADED","Operation storage migration is preparing its counter authority. Preserve pending browser results and retry after migration.",503);
       // Recheck registry policy through an execution credential-independent lease revision probe at dispatch.
       // Never sleep inside a Durable Object. The outer Worker paces empty responses.
       const refreshed = l;
@@ -772,8 +847,25 @@ export class Workspace {
         const idleFor=Date.now()-Math.max(refreshed.claimedAt??Date.now(),this.journal.lastActivityAt());
         return json({operations:[],expiresAt:l.expiresAt,idleWaitMs:idleFor>=120000?15000:5000});
       }
+      if(op.dispatchAttempt)return json({operations:[],expiresAt:l.expiresAt,idleWaitMs:5000});
+      const attempt={id:crypto.randomUUID(),reconcileAt:Date.now()+5000};
+      this.db.transaction(()=>{
+        const fresh=this.operations.get("operation/"+op.operationId);
+        if(!fresh||fresh.phase!=="ADMITTED"||fresh.dispatchAttempt)
+          throw new ApiError("CONFLICT","Operation dispatch is already in progress.",409);
+        fresh.dispatchAttempt=attempt;
+        this.operations.put("operation/"+fresh.operationId,fresh);
+      });
+      let dispatchPermissions=op.permissions;
       try {
-        await rpc(registry(this.env), "/internal/dispatch", {
+        // Persisted recovery precedes permit consumption. A crash after the
+        // permit RPC can never turn this ADMITTED row into a replayable intent.
+        await this.scheduleAlarm();
+        const before=this.operations.get("operation/"+op.operationId),lease=this.db.get<Lease>("lease");
+        if(!before||before.phase!=="ADMITTED"||before.dispatchAttempt?.id!==attempt.id||
+            !lease||lease.expiresAt<=Date.now()||lease.epoch!==op.epoch||lease.tabInstanceId!==op.tabInstanceId||lease.secretHash!==l.secretHash)
+          throw new ApiError("STALE_EPOCH","Dispatch was cancelled or its lease changed.",409);
+        const authority=await rpc<{workspace:{permissions:string[]};grant:{permissions:string[]}}>(registry(this.env), "/internal/dispatch", {
           props: op.props,
           agentId: op.agentId,
           permissions: op.requiredPermissions,
@@ -784,21 +876,27 @@ export class Workspace {
           operationId: op.operationId,
           tool: op.tool,
         });
+        if(!Array.isArray(authority.workspace?.permissions)||!Array.isArray(authority.grant?.permissions))
+          throw new ApiError("GATEWAY_DEGRADED","Registry dispatch authority has an invalid shape.",503);
+        dispatchPermissions=op.permissions.filter(p=>authority.workspace.permissions.includes(p)&&authority.grant.permissions.includes(p));
       } catch (error) {
         this.db.transaction(() => {
-          const current = this.db.get<Operation>("operation/" + op.operationId);
+          const current = this.operations.get("operation/" + op.operationId);
           // A second poll, deadline, cancel, or terminal reply may have won
           // while Registry authorization was in flight. Never overwrite it.
           if (!current || current.phase !== "ADMITTED" || current.epoch !== op.epoch ||
-              current.tabInstanceId !== op.tabInstanceId || current.bindingRevision !== op.bindingRevision) return;
-          current.phase = "REJECTED";
+              current.tabInstanceId !== op.tabInstanceId || current.bindingRevision !== op.bindingRevision || current.dispatchAttempt?.id!==attempt.id) return;
+          const knownRejection=error instanceof ApiError&&error.status>=400&&error.status<500;
+          current.phase = knownRejection ? "REJECTED" : "UNKNOWN";
           current.terminalAt = Date.now();
-          current.result = { error: {
-            code: error instanceof ApiError ? error.code : "REVOKED",
-            message: "Dispatch rejected after authorization changed.",
-          } };
+          current.terminalErrorCode=current.phase==="UNKNOWN"?"EFFECT_UNKNOWN":error instanceof ApiError?error.code:"REVOKED";
+          current.result = {operationId:current.operationId,status:current.phase,effectState:current.phase==="UNKNOWN"?"POSSIBLE":"NONE",error:{
+            code:current.terminalErrorCode,message:current.phase==="UNKNOWN"?"Dispatch authority outcome requires reconciliation.":"Dispatch rejected after authorization changed.",
+            retryable:false,recovery:"Inspect the exact operation; do not replay an uncertain dispatch.",
+          }};
+          current.terminalResultDigest=operationReceiptDigest(current.result);
           delete current.args;
-          this.db.put("operation/" + current.operationId, current);
+          this.operations.put("operation/" + current.operationId, current);
         });
         return json({ operations: [], expiresAt: l.expiresAt });
       }
@@ -806,20 +904,22 @@ export class Workspace {
       // binding and deadline in one synchronous transaction before exposure.
       const dispatched = this.db.transaction(() => {
         const active = this.db.get<Lease>("lease");
-        const fresh = this.db.get<Operation>("operation/" + op.operationId);
+        const fresh = this.operations.get("operation/" + op.operationId);
         if (!active || active.expiresAt <= Date.now() || active.epoch !== op.epoch ||
             active.bindingRevision !== op.bindingRevision || active.tabInstanceId !== op.tabInstanceId ||
             active.secretHash !== l.secretHash)
           throw new ApiError("STALE_EPOCH", "Lease changed before dispatch.", 409);
         if (!fresh || fresh.phase !== "ADMITTED" || fresh.epoch !== op.epoch ||
-            fresh.bindingRevision !== op.bindingRevision || fresh.tabInstanceId !== op.tabInstanceId)
+            fresh.bindingRevision !== op.bindingRevision || fresh.tabInstanceId !== op.tabInstanceId || fresh.dispatchAttempt?.id!==attempt.id)
           throw new ApiError("CONFLICT", "Operation already consumed.", 409);
-        if (fresh.deadlineMs <= Date.now()) {
+        if (fresh.deadlineMs <= Date.now() || attempt.reconcileAt<=Date.now()) {
           this.expireOperation(fresh, Date.now());
           return;
         }
         fresh.phase = "DISPATCHED";
-        this.db.put("operation/" + fresh.operationId, fresh);
+        fresh.permissions=dispatchPermissions;
+        delete fresh.dispatchAttempt;
+        this.operations.put("operation/" + fresh.operationId, fresh);
         return fresh;
       });
       if (!dispatched || dispatched.phase !== "DISPATCHED")
@@ -828,23 +928,23 @@ export class Workspace {
         operations: [
           {
             version: 1,
-            operationId: op.operationId,
-            workspaceId: op.workspaceId,
-            epoch: op.epoch,
-            bindingRevision: op.bindingRevision,
-            tabInstanceId: op.tabInstanceId,
-            deadlineMs: op.deadlineMs,
-            tool: op.tool,
-            args: op.args,
-            traceId: op.traceId,
-            permissions: op.permissions,
+            operationId: dispatched.operationId,
+            workspaceId: dispatched.workspaceId,
+            epoch: dispatched.epoch,
+            bindingRevision: dispatched.bindingRevision,
+            tabInstanceId: dispatched.tabInstanceId,
+            deadlineMs: dispatched.deadlineMs,
+            tool: dispatched.tool,
+            args: dispatched.args,
+            traceId: dispatched.traceId,
+            permissions: dispatched.permissions,
           },
         ],
         expiresAt: l.expiresAt,
       });
     }
     if (path === "/api/v1/tab/permit") {
-      const op = this.db.get<Operation>("operation/" + id(b.operationId));
+      const op = this.operations.get("operation/" + id(b.operationId));
       if (
         !op ||
         op.phase !== "RUNNING" ||
@@ -912,7 +1012,7 @@ export class Workspace {
           "Binding changed during parent execution.",
           409,
         );
-      const current = this.db.get<Operation>("operation/" + op.operationId);
+      const current = this.operations.get("operation/" + op.operationId);
       const currentLease = this.db.get<Lease>("lease");
       if (!current || current.phase !== "RUNNING" || current.deadlineMs <= Date.now() ||
           current.epoch !== op.epoch || current.bindingRevision !== op.bindingRevision ||
@@ -955,7 +1055,7 @@ export class Workspace {
           );
       }
       this.db.transaction(() => {
-        const op = this.db.get<Operation>("operation/" + operationId);
+        const op = this.operations.get("operation/" + operationId);
         if (!op || op.epoch !== l.epoch || op.tabInstanceId !== l.tabInstanceId)
           throw new ApiError(
             "STALE_EPOCH",
@@ -965,12 +1065,13 @@ export class Workspace {
         if (op.terminalAt) {
           if (op.phase === "UNKNOWN" && phase !== "RUNNING") {
             op.lateObservation = b.result;
-            this.db.put("operation/" + operationId, op);
+            this.operations.put("operation/" + operationId, op);
             return;
           }
           if (
             op.phase === phase &&
-            canonical(op.result) === canonical(b.result)
+            (canonical(op.result) === canonical(b.result) ||
+              (op.terminalResultDigest ?? this.operations.receiptDigest("operation/"+operationId)) === operationReceiptDigest(b.result))
           )
             return;
           throw new ApiError(
@@ -990,6 +1091,9 @@ export class Workspace {
         if (phase === "RUNNING" && op.phase === "RUNNING") return;
         op.phase = phase;
         if (phase !== "RUNNING") {
+          op.terminalResultDigest=operationReceiptDigest(b.result);
+          const errorCode=(b.result as {error?:{code?:unknown}})?.error?.code;
+          if(typeof errorCode==='string'&&/^[A-Z][A-Z0-9_]{0,63}$/.test(errorCode))op.terminalErrorCode=errorCode;
           const retained = this.journal.stats().resultSize;
           op.result =
             retained + JSON.stringify(b.result).length <= 8 * 1024 * 1024
@@ -998,7 +1102,7 @@ export class Workspace {
           op.terminalAt = Date.now();
           delete op.args;
         }
-        this.db.put("operation/" + operationId, op);
+        this.operations.put("operation/" + operationId, op);
       });
       return json({ ok: true });
     }

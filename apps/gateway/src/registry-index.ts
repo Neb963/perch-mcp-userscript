@@ -66,11 +66,14 @@ export class RegistryIndex {
     for(const {key} of this.db.query<Key>("SELECT key FROM registry_activity_v1 WHERE base IS NOT NULL"))if(!events.has(key))this.setActivity(key,"base",null);
     for(const [key,event] of events)this.setActivity(key,"base",event);
   }
-  private sync(includeActivity=false):void {
+  private sync(includeActivity=false,includeLibrary=false):void {
     this.db.transaction(()=>{
-      // Activity rebuilds are needed only for legacy list/write paths. An alarm,
-      // grant check, or migration step must not materialize a dirty 10k array.
-      for(const {key} of this.db.query<Key>("SELECT key FROM registry_dirty_v1"+(includeActivity?"":" WHERE key<>'activity'")+" ORDER BY key")){
+      // Monolithic legacy domains are reconciled only by their explicit readers.
+      // Cleanup, grant checks and migration never materialize their full bodies.
+      const excluded:string[]=[];
+      if(!includeActivity)excluded.push("key<>'activity'");
+      if(!includeLibrary)excluded.push("key<>'library'");
+      for(const {key} of this.db.query<Key>("SELECT key FROM registry_dirty_v1"+(excluded.length?" WHERE "+excluded.join(" AND "):"")+" ORDER BY key")){
         if(key==="activity") {
           if (!this.canonicalActivity?.isNative()) this.rebuildActivity();
         }
@@ -173,7 +176,7 @@ export class RegistryIndex {
   page(kind:Kind,offset:number,now:number):string[]{this.sync();return (kind==="approval"?this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind=? AND expires>? ORDER BY key LIMIT 100 OFFSET ?",kind,now,offset):this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind=? ORDER BY key LIMIT 100 OFFSET ?",kind,offset)).map(r=>r.key);}
   grants(workspace:string):string[]{this.sync();return this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind='grant' AND workspace=? AND state='active'",workspace).map(r=>r.key);}
   bindingBlocked(workspace:string):boolean {this.sync();return !!(this.db.query("SELECT key FROM registry_entity_v1 WHERE kind='permit' AND workspace=? AND state='consumed' LIMIT 1",workspace).length||this.db.query("SELECT key FROM registry_entity_v1 WHERE kind='terminal-notice' AND workspace=? AND hold=1 LIMIT 1",workspace).length);}
-  libraryRevision():number {this.sync();return this.db.query<{revision:number|null}>("SELECT revision FROM registry_entity_v1 WHERE key='library'")[0]?.revision??0;}
+  libraryRevision():number {this.sync(false,true);return this.db.query<{revision:number|null}>("SELECT revision FROM registry_entity_v1 WHERE key='library'")[0]?.revision??0;}
   activity(offset:number,status:string|null,workspace:string|null):Event[] {
     if(this.canonicalActivity?.isNative())throw new ApiError("STALE_REVISION","Native Activity requires a keyset cursor; restart the list.",409);
     this.sync(true);

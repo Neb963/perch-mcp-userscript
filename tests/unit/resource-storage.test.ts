@@ -79,8 +79,8 @@ test('Legacy mutation during backfill invalidates generation and only latest sta
     migrate(f.db);
     assert.deepEqual(new NativeResourceLibrary(f.db).snapshot(), changed.snapshot());
     assert.equal(new NativeResourceLibrary(f.db).get('base').body, 'latest');
-    f.db.put('library', original);
-    assert.throws(() => new NativeResourceLibrary(f.db), /LEGACY_WRITE_AFTER_RESOURCE_CUTOVER/);
+    assert.throws(() => f.db.put('library', original), /RESOURCE_NATIVE_REQUIRES_COMPATIBLE_BINARY/);
+    assert.equal(new NativeResourceLibrary(f.db).get('base').body, 'latest');
   } finally { f.close(); }
 });
 
@@ -270,5 +270,34 @@ test('Resource cutover atomically fences legacy Registry binaries without changi
     resourceStorageMaintenance(f.db,'native',1);
     assert.deepEqual(f.db.get('core'),{schemaVersion:2,revision:27,policyRevision:19,paired:true,credentialEpoch:4});
     assert.equal(resourceStorageStatus(f.db).phase,'NATIVE');
+  }finally{f.close();}
+});
+
+test('Native admin history and assignment reads refresh revisions after an awaited concurrent publish', async () => {
+  const f=fixture();try {
+    f.db.put('library',await source());migrate(f.db);
+    const historyReader=new NativeResourceLibrary(f.db), writer=new NativeResourceLibrary(f.db),before=writer.revision;
+    await writer.publish({...input('child','new concurrent body'),dependencies:['base']},2);
+    f.db.transaction(()=>writer.commit(before));
+    assert.equal(historyReader.historyMetadata('child').at(-1)!.revision,3);
+    assert.equal(historyReader.revision,writer.revision);
+    const assignmentReader=new NativeResourceLibrary(f.db),assigner=new NativeResourceLibrary(f.db),prior=assigner.revision;
+    assigner.assign('workspace','workspace-a','private',true,prior);
+    f.db.transaction(()=>assigner.commit(prior));
+    assert.equal(assignmentReader.assignments().length,2);
+    assert.equal(assignmentReader.revision,assigner.revision);
+  }finally{f.close();}
+});
+
+test('A Resource publish loaded before native cutover cannot commit into the stale legacy snapshot', async () => {
+  const f=fixture();try {
+    const original=await source();f.db.put('library',original);migrate(f.db,'prepare');
+    let cutover=false;
+    await assert.rejects(()=>resourceAdmin(admin('/child',{resource:{...input('child','must not commit'),dependencies:['base']},expectedRevision:2},crypto.randomUUID(),'PUT'),f.db,()=>{
+      if(!cutover){cutover=true;resourceStorageMaintenance(f.db,'native',1);}
+    }),error=>(error as {code?:string}).code==='RESOURCE_CONFLICT');
+    assert.equal(resourceStorageStatus(f.db).phase,'NATIVE');
+    assert.equal(new NativeResourceLibrary(f.db).get('child').body,'second');
+    assert.deepEqual(f.db.get('library'),original);
   }finally{f.close();}
 });

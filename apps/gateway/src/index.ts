@@ -27,6 +27,7 @@ import {
   HAR_NATIVE_ACTIONS,
   permitsHarNativeAction,
   ApiError,
+  bearer,
   MAX_BODY,
   VERSION,
   errorResponse,
@@ -471,6 +472,31 @@ async function route(
     return html(
       "<h1>Perch MCP gateway</h1><p>Install the userscript in Firefox with Violentmonkey. Open its Settings, enter this gateway origin and the dashboard bootstrap secret. The URL grants no access.</p><p>This candidate requires the live acceptance checklist before a full release.</p>",
     );
+  const migrationMatch=/^\/api\/v1\/admin\/workspaces\/([A-Za-z0-9_-]+)\/storage-migration$/.exec(path);
+  if(migrationMatch) {
+    if(!["GET","POST"].includes(request.method))
+      throw new ApiError("INVALID_INPUT","GET or POST required.",405);
+    bearer(request); // Shape only; Registry verifies the current admin credential.
+    const authenticated=await registry(env).fetch(new Request(
+      new URL('/api/v1/admin/workspaces/'+migrationMatch[1],request.url),
+      {method:'GET',headers:request.headers}) as never) as unknown as Response;
+    if(!authenticated.ok)return authenticated;
+    const current=await authenticated.json() as {revision:number};
+    let body:Record<string,unknown>={action:'status'};
+    if(request.method==='POST') {
+      body=await parseBody(request,1024);
+      if(Object.keys(body).some(key=>!['action','expectedRevision'].includes(key))||
+          !['step','resume'].includes(String(body.action))||body.expectedRevision!==current.revision)
+        throw new ApiError('STALE_REVISION','Exact action and current Workspace revision required.',409);
+      const key=request.headers.get('Idempotency-Key');
+      if(!key||!/^[A-Za-z0-9_-]{1,128}$/.test(key))
+        throw new ApiError('INVALID_INPUT','Idempotency-Key required.');
+      body={action:body.action,idempotencyKey:key};
+    }
+    return json(await rpc(workspace(env,migrationMatch[1]!),'/internal/migration',{
+      ...body,workspaceId:migrationMatch[1],
+    }));
+  }
   const recoveryMatch = /^\/api\/v1\/admin\/workspaces\/([a-zA-Z0-9_-]+)\/recovery$/.exec(path);
   if (recoveryMatch) {
     if (request.method !== "GET")

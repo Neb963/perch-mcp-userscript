@@ -11,13 +11,14 @@ import { SqlRecords } from "../../apps/gateway/src/sql.js";
 function fixture() {
   const sqlite = new DatabaseSync(":memory:");
   const sql: string[] = [];
-  const counts = { activityWholeReads: 0 };
+  const counts = { activityWholeReads: 0, libraryWholeReads: 0 };
   let fault: ((query: string) => boolean) | undefined;
   const storage = {
     sql: { exec(query: string, ...args: (string | number | null)[]) {
       if (fault?.(query)) throw new Error("synthetic SQL write unavailable");
       sql.push(query);
       if (query === "SELECT value FROM records WHERE key=? ORDER BY part" && args[0] === "activity") counts.activityWholeReads++;
+      if (query === "SELECT value FROM records WHERE key=? ORDER BY part" && args[0] === "library") counts.libraryWholeReads++;
       const statement = sqlite.prepare(query);
       const rows = /^(SELECT|EXPLAIN)/.test(query) ? statement.all(...args) : (statement.run(...args), []);
       return { toArray: () => rows, rowsRead: rows.length, rowsWritten: 0 };
@@ -63,6 +64,30 @@ test("default Registry legacy mode creates no new canonical Activity tables", ()
     assert.equal(f.db.query("SELECT name FROM sqlite_master WHERE name='canonical_activity_meta_v2'").length, 0);
     index.appendActivity(event(1));
     assert.deepEqual(f.db.get("activity"), [event(1)]);
+  } finally { f.close(); }
+});
+
+test("cold Registry cleanup and migration leave monolithic library reconciliation to its explicit legacy reader", () => {
+  const f = fixture();
+  try {
+    f.db.put("library", { revision: 23, resources: { large: { body: "x".repeat(2 * 1024 * 1024) } } });
+    f.db.put("activity", Array.from({ length: 150 }, (_, n) => event(n)));
+    const index = new RegistryIndex(f.db, { activityStorageMode: "prepare" });
+    for (let n = 0; n < 3; n++) {
+      assert.equal(index.nextDue(), undefined);
+      assert.equal(index.count("workspace"), 0);
+    }
+    for (let n = 0; index.activityMigrationStatus().stage !== "VERIFIED"; n++) {
+      assert.ok(n < 100);
+      index.advanceActivityMigration();
+      assert.equal(index.nextDue(), undefined, "pending library revision has no cleanup deadline and cannot spin alarms");
+    }
+    assert.equal(f.counts.libraryWholeReads, 0);
+    assert.equal(f.counts.activityWholeReads, 0);
+    assert.equal(f.db.query("SELECT key FROM registry_dirty_v1 WHERE key='library'").length, 1);
+    assert.equal(index.libraryRevision(), 23);
+    assert.equal(f.counts.libraryWholeReads, 1, "explicit legacy library revision retains its existing full-read cost");
+    assert.equal(f.db.query("SELECT key FROM registry_dirty_v1 WHERE key='library'").length, 0);
   } finally { f.close(); }
 });
 
@@ -221,6 +246,18 @@ test("corrupt legacy arrays fail closed and permit explicit repair before native
       assert.deepEqual(all(store), [event(1)]);
     } finally { f.close(); }
   }
+});
+
+test("multibyte partial Activity events cannot exceed the accepted UTF-8 migration token bound", () => {
+  const f = fixture();
+  try {
+    const source = [event(1, { extension: "😀".repeat(160000) })];
+    f.db.put("activity", source);
+    const store = new CanonicalActivity(f.db);
+    assert.throws(() => complete(store), /SQLITE_RECORD_CORRUPT/);
+    assert.equal(store.status().stage, "BLOCKED");
+    assert.deepEqual(f.db.get("activity"), source);
+  } finally { f.close(); }
 });
 
 test("unresolved overlay, resolution ordering and receipt expiry remain independent of visibility", () => {

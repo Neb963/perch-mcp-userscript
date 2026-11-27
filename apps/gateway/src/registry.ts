@@ -1171,6 +1171,10 @@ export class Registry {
     c: Core,
   ): unknown {
     const prefix = "/api/v1/admin/";
+    if(path===prefix+"storage/restart-activity") {
+      fields(b,["expectedRevision"]);revision(b.expectedRevision,c.revision);
+      return this.catalog.restartActivityMigration();
+    }
     if(path===prefix+"storage/step") {
       fields(b,["expectedRevision"]);revision(b.expectedRevision,c.revision);
       return this.advanceStorage();

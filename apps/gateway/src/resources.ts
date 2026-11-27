@@ -199,6 +199,8 @@ export async function resourceAdmin(
     }
     db.transaction(() => {
       reauthorize();
+      if (!(library instanceof NativeResourceLibrary) && resourceLibraryIsNative(db))
+        throw new ApiError("RESOURCE_CONFLICT", "Resource storage changed during the request; retry against the current library.", 409);
       revision(before, resourceLibraryRevision(db));
       const repeat = db.get<{ hash: string; result: unknown; expires: number }>(
         "idempotency/" + key,

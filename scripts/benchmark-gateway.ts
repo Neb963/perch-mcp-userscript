@@ -2,7 +2,7 @@ import {writeFile} from 'node:fs/promises';
 import {execFileSync} from 'node:child_process';
 import assert from 'node:assert/strict';
 import {createCapacityHarness} from '../tests/integration/gateway-capacity-harness.js';
-import {fixtureSnapshot,metricDelta,issueSyntheticToken,syntheticMcp} from '../tests/fixtures/optimization-client.js';
+import {fixtureSnapshot,metricDelta,issueSyntheticToken,syntheticMcp,activateSyntheticNative} from '../tests/fixtures/optimization-client.js';
 const histories=(process.env.BENCHMARK_HISTORIES??'0,150,999,1000').split(',').map(Number);
 assert.ok(histories.every(n=>Number.isSafeInteger(n)&&n>=0&&n<=1000));
 const h=await createCapacityHarness(1,{
@@ -10,7 +10,9 @@ const h=await createCapacityHarness(1,{
 },{entryPoint:'tests/fixtures/optimization-runtime.ts'});
 try {
   const f=h.fixtures[0]!, startup=await fixtureSnapshot(h,f);
-  const token=await issueSyntheticToken(h,f), oauth=metricDelta(startup,await fixtureSnapshot(h,f));
+  const activated=process.env.BENCHMARK_NATIVE==='true'?await activateSyntheticNative(h,f):undefined;
+  const prepared=await fixtureSnapshot(h,f),migration=metricDelta(startup,prepared);
+  const token=await issueSyntheticToken(h,f), oauth=metricDelta(prepared,await fixtureSnapshot(h,f));
   const rows:unknown[]=[];
   async function measure(path:string,history:number,fn:()=>Promise<unknown>) {
     const before=await fixtureSnapshot(h,f),at=performance.now(); await fn();
@@ -37,7 +39,7 @@ try {
   const report={source:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),
     runtime:'Miniflare4.20260730.0/workerd1.20260730.1',fixture:'read main.pjs, tiny marker result; actual local SDK OAuth token and MCP HTTP; all outbound denied',
     measuredDimensions:'consumed SQL cursor rows/statements; Worker/DO invocations; KV method calls; alarm API calls; response bytes; wall proxy',
-    unavailable:'provider billing/duration GB-s/physical hibernation/cold eviction/log billing DEFERRED_LIVE',startup,oauth,rows};
+    unavailable:'provider billing/duration GB-s/physical hibernation/cold eviction/log billing DEFERRED_LIVE',startup,migration,activated,oauth,rows};
   await writeFile(process.argv[2]??'/tmp/perch-optimization-benchmark.json',JSON.stringify(report,null,2)+'\n');
   console.log(JSON.stringify({samples:rows.length,output:process.argv[2]??'/tmp/perch-optimization-benchmark.json'}));
 } finally {await h.close();}

@@ -66,6 +66,7 @@ function install(db: SqlRecords): void {
     db.query('CREATE TABLE resource_content_gc_v2 (generation INTEGER NOT NULL, content_id INTEGER NOT NULL, PRIMARY KEY(generation,content_id)) WITHOUT ROWID');
     for (const [event, row] of [['INSERT','NEW'], ['DELETE','OLD'], ['UPDATE','NEW']] as const) {
       db.query(`CREATE TRIGGER resource_legacy_${event.toLowerCase()}_v2 AFTER ${event} ON records WHEN ${row}.key='library'${event === 'UPDATE' ? " OR OLD.key='library'" : ''} BEGIN UPDATE resource_legacy_generation_v2 SET generation=generation+1 WHERE id=1; END`);
+      db.query(`CREATE TRIGGER resource_native_guard_${event.toLowerCase()}_v2 BEFORE ${event} ON records WHEN (${row}.key='library'${event === 'UPDATE' ? " OR OLD.key='library'" : ''}) AND (SELECT json_extract(value,'$.phase') FROM resource_storage_v2 WHERE id=1)='NATIVE' BEGIN SELECT RAISE(ABORT,'RESOURCE_NATIVE_REQUIRES_COMPATIBLE_BINARY'); END`);
     }
   });
 }
@@ -393,7 +394,12 @@ export class NativeResourceLibrary {
   }
   assignments(): Assignment[] {
     if (this.model) return this.model.snapshot().assignments;
+    this.refreshReadHeader();
     return this.assignmentRows().map(r => this.assignment(r));
+  }
+  private refreshReadHeader(): void {
+    if (this.model) return;
+    this.initial = header(this.db,assertNative(this.db).generation);
   }
   private assignment(row: AssignmentRow): Assignment {
     const value = parse<Assignment>(readContent(this.db,this.initial.generation,row.content_id,row.digest)); validateAssignment(value);
@@ -402,8 +408,7 @@ export class NativeResourceLibrary {
   }
   private validation(context?: ResourceContext): ResourceLibrary {
     if (this.model) return this.model;
-    const current = assertNative(this.db);
-    this.initial = header(this.db,current.generation);
+    this.refreshReadHeader();
     const resources: Record<string, Resource[]> = {};
     for (const row of this.currents()) resources[row.id] = [skeleton(row)];
     return new ResourceLibrary({ schemaVersion: 1, revision: this.initial.revision, resources, assignments: this.assignmentRows(context).map(r => this.assignment(r)) });
@@ -412,6 +417,7 @@ export class NativeResourceLibrary {
   listMetadata(context?: ResourceContext, kind?: ResourceKind): Resource[] { return this.validation(context).list(context,kind); }
   list(context?: ResourceContext, kind?: ResourceKind): Resource[] { return this.listMetadata(context,kind).map(r => this.getRevision(r.id,r.revision)); }
   historyMetadata(id: string): Resource[] {
+    this.refreshReadHeader();
     return this.db.query<RevisionRow & Record<string,string|number>>('SELECT id,revision,metadata,content_id,digest,json_bytes FROM resource_revision_v2 WHERE generation=? AND id=? ORDER BY revision',this.initial.generation,id).map(r => ({ ...parse<Metadata>(r.metadata), body: '', files: {} }));
   }
   history(id: string): Resource[] { return this.historyMetadata(id).map(r => this.getRevision(id,r.revision)); }

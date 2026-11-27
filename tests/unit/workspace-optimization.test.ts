@@ -102,3 +102,29 @@ test('heartbeat cannot revive a lease which expired while Registry validation aw
     assert.ok(f.records.get<{expiresAt:number}>('lease').expiresAt < Date.now());
   } finally { gate.release(); f.close(); }
 });
+
+test('persisted interrupted dispatch attempt becomes UNKNOWN after restart and is never consumed again', async () => {
+  let dispatches=0;
+  const f=fixture(async(path)=>{if(path==='/internal/dispatch')dispatches++;return Response.json({ok:true});});
+  try{
+    const token='fixture-lease-token'.padEnd(64,'x');await lease(f.records,token);
+    f.records.put('operation/current',{...operation('current'),dispatchAttempt:{id:'persisted-attempt',reconcileAt:Date.now()-1}});
+    const workspace=new Workspace(f.state,f.env);
+    const poll=await workspace.fetch(request('/api/v1/tab/poll',{workspaceId:'workspace-fixture',epoch:1,tabInstanceId:'tab-fixture'},token));
+    assert.equal(poll.status,200);assert.deepEqual((await poll.json() as {operations:unknown[]}).operations,[]);
+    assert.equal(dispatches,0);assert.equal(f.records.get<{phase:string}>('operation/current').phase,'UNKNOWN');
+  }finally{f.close();}
+});
+
+test('a second poll cannot consume a durable dispatch attempt while its Registry call awaits',async()=>{
+  const reached=deferred(),gate=deferred();let dispatches=0;
+  const f=fixture(async(path)=>{if(path==='/internal/dispatch'){dispatches++;reached.release();await gate.promise;return Response.json({workspace:{permissions:['READ_SOURCE']},grant:{permissions:['READ_SOURCE']}});}return Response.json({ok:true});});
+  try{
+    const token='fixture-lease-token'.padEnd(64,'x');await lease(f.records,token);f.records.put('operation/current',operation('current'));
+    const workspace=new Workspace(f.state,f.env);
+    const first=workspace.fetch(request('/api/v1/tab/poll',{workspaceId:'workspace-fixture',epoch:1,tabInstanceId:'tab-fixture'},token));await reached.promise;
+    const second=await workspace.fetch(request('/api/v1/tab/poll',{workspaceId:'workspace-fixture',epoch:1,tabInstanceId:'tab-fixture'},token));
+    assert.equal(second.status,200);assert.deepEqual((await second.json() as {operations:unknown[]}).operations,[]);assert.equal(dispatches,1);
+    gate.release();const response=await first;assert.equal(response.status,200);assert.equal((await response.json()as{operations:unknown[]}).operations.length,1);
+  }finally{gate.release();f.close();}
+});

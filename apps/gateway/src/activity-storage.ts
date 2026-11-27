@@ -277,6 +277,7 @@ export class CanonicalActivity {
         else throw new CorruptActivity();
       } else throw new CorruptActivity();
     }
+    if (new TextEncoder().encode(state.token).byteLength > MAX_EVENT_BYTES) throw new CorruptActivity();
     if (state.offset === row.value.length) { state.part++; state.offset = 0; }
     return false;
   }
