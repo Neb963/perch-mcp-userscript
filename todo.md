@@ -296,3 +296,7 @@ See `docs/verification/epoch15-gateway-incident-v0117.md`.
 - Operator confirms available account quota; deployment log confirms version upload and bindings. Previous REGISTRY_QUOTA classification was overly broad, not proof of exhausted account quota.
 - Discriminate runtime limits, generic limits, overload and explicit account quota; expose only fixed vocabulary and stage for read-only health failures. Preserve canonical state and fail closed.
 - Extend independent production deployment check to accommodate slower Cloudflare builds. Root cause and end-to-end recovery pending production evidence.
+
+## Epoch 18 — durable indexed Workspace lifecycle and SQL budgets
+
+Incident confirmed by Cloudflare dashboard (5.93M rows read) and sanitized runtime exception. Preserve canonical records, identity, bindings and OAuth; no destructive schema migration. Add rebuildable lifecycle index, legacy-write dirty triggers, indexed expiry/outbox/queue/holds and transactional counters; bound maintenance batches; instrument cursor rows. Verify cold restart, rollback writes, non-idle history independence, exact effect fences and production readiness. Registry indexing and transport optimization follow independently. T4 remains blocked by exhausted daily quota until actual recovery.

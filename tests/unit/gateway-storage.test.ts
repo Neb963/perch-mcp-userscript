@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { SqlRecords, WORKSPACE_JOURNAL_IDLE_KEY } from "../../apps/gateway/src/sql.js";
+import { SqlRecords } from "../../apps/gateway/src/sql.js";
 import { Registry } from "../../apps/gateway/src/registry.js";
 import { Workspace } from "../../apps/gateway/src/workspace.js";
 import type {
@@ -30,7 +30,7 @@ function fixture() {
         const rows = sql.trim().startsWith("SELECT")
           ? statement.all(...args)
           : (statement.run(...args), []);
-        return { toArray: () => rows };
+        return { toArray: () => rows, rowsRead: rows.length, rowsWritten: 0 };
       },
     },
     transactionSync<T>(fn: () => T) {
@@ -511,7 +511,7 @@ test("idle journal survives cold starts and invalidates on every operation mutat
       fetch: async () => Response.json({ ok: true }),
     }) } } as unknown as Env;
     await new Workspace(local.state, env).alarm();
-    assert.ok(records.get(WORKSPACE_JOURNAL_IDLE_KEY));
+    assert.equal(local.storage.sql.exec("SELECT key FROM operation_dirty_v1").toArray().length, 0);
     const baseline = local.counts.operationScans;
     for (let i = 0; i < 10; i++) await new Workspace(local.state, env).alarm();
     assert.equal(local.counts.operationScans, baseline);
@@ -519,10 +519,10 @@ test("idle journal survives cold starts and invalidates on every operation mutat
       records.put("operation/rollback", opFixture());
       throw new Error("rollback");
     }));
-    assert.ok(records.get(WORKSPACE_JOURNAL_IDLE_KEY));
+    assert.equal(local.storage.sql.exec("SELECT key FROM operation_dirty_v1").toArray().length, 0);
     // An older binary issuing raw SQL also invalidates the persisted hint.
     local.storage.sql.exec("INSERT INTO records (key, part, value) VALUES (?, ?, ?)", "operation/fixture-operation", 0, JSON.stringify(opFixture()));
-    assert.equal(records.get(WORKSPACE_JOURNAL_IDLE_KEY), undefined);
+    assert.equal(local.storage.sql.exec("SELECT key FROM operation_dirty_v1").toArray().length, 1);
     await new Workspace(local.state, env).alarm();
     assert.equal(records.get<{phase:string}>("operation/fixture-operation")?.phase, "UNKNOWN");
     assert.ok(local.counts.operationScans > baseline);

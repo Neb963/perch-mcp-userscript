@@ -17,7 +17,8 @@ import {
   str,
   type Env,
 } from "./common.js";
-import { SqlRecords, WORKSPACE_JOURNAL_IDLE_KEY } from "./sql.js";
+import { SqlRecords } from "./sql.js";
+import { OperationIndex } from "./operation-index.js";
 import {
   toolDefinitions,
   validateToolCall,
@@ -25,7 +26,7 @@ import {
   permissionsForTool,
 } from "../../../packages/contracts/src/index.js";
 import type { AuthProps, WorkspaceRecord } from "./registry.js";
-import { blocksNewLease, blocksNewMutation, isTerminalViewportEffect } from "../../../packages/contracts/src/effect-policy.js";
+import { isTerminalViewportEffect } from "../../../packages/contracts/src/effect-policy.js";
 interface Lease {
   workspaceId: string;
   epoch: number;
@@ -65,6 +66,7 @@ interface Operation {
 }
 export class Workspace {
   private db: SqlRecords;
+  private journal: OperationIndex<Operation>;
   private music: MusicHandler;
   private images: ImageTransferHandler<Operation>;
   constructor(
@@ -81,6 +83,7 @@ export class Workspace {
         409,
       );
     if (schema === undefined) this.db.put("schema", 1);
+    this.journal = new OperationIndex<Operation>(this.db);
     this.images = new ImageTransferHandler(this.db, {
       getLease: () => this.db.get<Lease>("lease"),
       getOperation: (operationId) =>
@@ -143,7 +146,10 @@ export class Workspace {
     } catch (error) {
       response = errorResponse(error);
     }
-    await this.drainTerminalOutbox();
+    // Invalid public requests must not amplify maintenance work. An alarm or
+    // next authorized request drains any pending canonical terminal state.
+    const path = new URL(request.url).pathname;
+    if (path !== "/internal/sql-usage" && (response.ok || path.startsWith("/internal/"))) await this.drainTerminalOutbox();
     return response;
   }
   async alarm(): Promise<void> {
@@ -151,33 +157,11 @@ export class Workspace {
     await this.drainTerminalOutbox();
   }
   private async scheduleAlarm(retryAt?: number): Promise<void> {
-    const idle = this.journalIdle();
-    const rows = idle ? [] : this.operations();
-    const deadlines: number[] = idle?.nextAt == null ? [] : [idle.nextAt];
-    if (!idle) {
-      const now = Date.now();
-      let eligible = 0;
-      for (const row of rows) {
-        if (!row.terminalAt) deadlines.push(row.deadlineMs);
-        else {
-          if (row.result !== undefined) deadlines.push(row.terminalAt + 600000);
-          const code = (row.result as { error?: { code?: unknown } } | undefined)?.error?.code;
-          if (!row.terminalErrorCode && typeof code === "string" &&
-              /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) deadlines.push(now);
-          if (!row.terminalNotified) deadlines.push(retryAt ?? now + 1000);
-          else if (this.retentionEligible(row)) {
-            eligible++;
-            deadlines.push(row.createdAt + 7 * 86400000);
-          }
-        }
-      }
-      if (eligible > 1000) deadlines.push(now);
-      const nextAt = deadlines.length ? Math.min(...deadlines) : null;
-      // Derived hint, not authority: every operation mutation invalidates it synchronously.
-      if (rows.every(o => o.terminalAt && o.terminalNotified) &&
-          (nextAt === null || nextAt > now))
-        this.db.put(WORKSPACE_JOURNAL_IDLE_KEY, { nextAt, lastActivityAt: rows.reduce((latest, row) => Math.max(latest, row.terminalAt ?? row.createdAt), 0) });
-    }
+    const deadlines: number[] = [];
+    const due = this.journal.nextDue();
+    if (due !== undefined) deadlines.push(due);
+    if (this.journal.pendingExists()) deadlines.push(retryAt ?? Date.now() + 1000);
+    if (this.journal.stats().eligible > 1000) deadlines.push(Date.now());
     for (const expiry of [this.images.nextExpiry(), this.music.nextExpiry()])
       if (expiry !== undefined) deadlines.push(expiry);
     const existing = await this.state.storage.getAlarm();
@@ -191,16 +175,13 @@ export class Workspace {
   }
   private async drainTerminalOutbox(): Promise<void> {
     let failed = false;
-    const pending = this.journalIdle() ? [] : this.operations().filter(
-      (row) => row.terminalAt && !row.terminalNotified,
-    );
-    const retryAt = pending.length ? this.db.get<number>("outbox-retry-at", 0) : 0;
+    const retryAt = this.journal.pendingExists() ? this.db.get<number>("outbox-retry-at", 0) : 0;
     if (retryAt > Date.now()) {
       // Ordinary traffic must not bypass a durable outage backoff.
       try { await this.scheduleAlarm(retryAt); } catch { /* Retain durable outbox. */ }
       return;
     }
-    for (const op of pending) {
+    for (const op of this.journal.pending()) {
       const error = (op.result as { error?: { code?: unknown } } | undefined)
         ?.error;
       const errorCode =
@@ -263,25 +244,6 @@ export class Workspace {
       /* Persistent terminal rows remain the outbox for the next request/alarm. */
     }
   }
-  private journalIdle(): { nextAt: number | null; lastActivityAt: number } | undefined {
-    let hint: { nextAt: number | null; lastActivityAt: number } | undefined;
-    try { hint = this.db.get<{ nextAt: number | null; lastActivityAt: number }>(WORKSPACE_JOURNAL_IDLE_KEY); }
-    catch (error) {
-      if (!(error instanceof Error) || error.message !== "SQLITE_RECORD_CORRUPT") throw error;
-      return undefined; // A corrupt derived hint is never trusted.
-    }
-    if (hint && Number.isSafeInteger(hint.lastActivityAt) && (hint.nextAt === null ||
-        (Number.isSafeInteger(hint.nextAt) && hint.nextAt > Date.now()))) return hint;
-    return undefined;
-  }
-  private retentionEligible(o: Operation): boolean {
-    return !!o.terminalAt && !!o.terminalNotified &&
-      ((o.phase !== "UNKNOWN" && o.phase !== "PARTIAL") ||
-        !!o.resolution || isTerminalViewportEffect(o));
-  }
-  private operations(): Operation[] {
-    return this.db.keys("operation/").map((k) => this.db.get<Operation>(k));
-  }
   private expire(): void {
     this.images.expire();
     this.music.expire();
@@ -290,8 +252,7 @@ export class Workspace {
       for (const key of this.db.keys("retired/"))
         if (this.db.get<Lease>(key).expiresAt + 86400000 < now)
           this.db.delete(key);
-      if (this.journalIdle()) return;
-      for (const op of this.operations()) {
+      for (const op of this.journal.due(now)) {
         const terminalCode = (
           op.result as { error?: { code?: unknown } } | undefined
         )?.error?.code;
@@ -343,14 +304,12 @@ export class Workspace {
           delete op.result;
           this.db.put("operation/" + op.operationId, op);
         }
-      }
-      const terminal = this.operations()
-        .filter(o => this.retentionEligible(o))
-        .sort((a, b) => a.createdAt - b.createdAt);
-      const excess = Math.max(0, terminal.length - 1000);
-      for (const [index, op] of terminal.entries())
-        if (index < excess || op.createdAt + 7 * 86400000 <= now)
+        if (op.terminalAt && op.terminalNotified &&
+            (!["UNKNOWN","PARTIAL"].includes(op.phase) || op.resolution || isTerminalViewportEffect(op)) &&
+            op.createdAt + 7 * 86400000 <= now)
           this.db.delete("operation/" + op.operationId);
+      }
+      for (const {key} of this.journal.excessRetention()) this.db.delete(key);
     });
   }
   private async lease(
@@ -410,7 +369,8 @@ export class Workspace {
   private async route(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname,
       b = await parseBody(request);
-    if (path !== "/api/v1/tab/poll") this.expire();
+    if (path === "/internal/sql-usage") return json(this.db.snapshotUsage());
+    if (path.startsWith("/internal/")) this.expire();
     if (path === "/internal/admit") {
       const w = b.workspace as WorkspaceRecord,
         l = this.db.get<Lease>("lease");
@@ -441,24 +401,22 @@ export class Workspace {
         createdAt: Date.now(),
       };
       this.db.transaction(() => {
-        const all = this.operations();
-        if (
-          all.filter((o) => o.terminalAt && !o.terminalNotified).length >= 128
-        )
+        const all = this.journal.active();
+        if (this.journal.pendingFull())
           throw new ApiError(
             "QUOTA_EXCEEDED",
             "Terminal notice outbox is full; restore Registry communication before new work.",
             429,
           );
         if (
-          all.filter(blocksNewMutation).length >= 128
+          this.journal.holdsFull()
         )
           throw new ApiError(
             "QUOTA_EXCEEDED",
             "Unresolved-operation metadata budget reached; reconcile held operations.",
             429,
           );
-        if (all.some(blocksNewMutation) && op.mutating)
+        if (op.mutating && this.journal.holds())
           throw new ApiError(
             "EFFECT_UNKNOWN",
             "Workspace holds an unresolved effect.",
@@ -553,8 +511,8 @@ export class Workspace {
         : null;
       const claiming = this.db.get<{expiresAt:number}>("claiming");
       const pendingClaimUntil = claiming && claiming.expiresAt > now ? claiming.expiresAt : null;
-      const operations = this.operations()
-        .filter(op=>op.workspaceId === workspaceId && blocksNewLease(op))
+      const operations = this.journal.leaseBlockers()
+        .filter(op=>op.workspaceId === workspaceId)
         .sort((a,z)=>a.createdAt-z.createdAt)
         .slice(0,128)
         .map(op=>({
@@ -589,14 +547,6 @@ export class Workspace {
           "Another document has an active lease. Release it or wait for expiry.",
           409,
         );
-      if (
-        this.operations().some(blocksNewLease)
-      )
-        throw new ApiError(
-          "EFFECT_UNKNOWN",
-          "Previous document has an unresolved operation. Reconciliation required before reconnect.",
-          409,
-        );
       const guard = crypto.randomUUID();
       this.db.transaction(() => {
         const claiming = this.db.get<{ expiresAt: number }>("claiming");
@@ -617,6 +567,9 @@ export class Workspace {
           binding: b.binding,
           credential,
         });
+        this.expire();
+        if (this.journal.leaseBlocked())
+          throw new ApiError("EFFECT_UNKNOWN", "Previous document has an unresolved operation. Reconciliation required before reconnect.", 409);
         const fresh = await rpc<{ epoch: number }>(
           registry(this.env),
           "/internal/epoch",
@@ -686,6 +639,7 @@ export class Workspace {
       b,
       path === "/api/v1/tab/reply" && b.phase !== "RUNNING",
     );
+    if (path !== "/api/v1/tab/poll") this.expire();
     if (path === "/api/v1/tab/image")
       return json(await this.images.handle(b, l));
     if (path === "/api/v1/tab/music" || path === "/api/v1/tab/music-result")
@@ -735,10 +689,9 @@ export class Workspace {
         this.db.put("lease", refreshed);
       }
       this.expire();
-      const idle = this.journalIdle();
-      const operations = idle ? [] : this.operations();
-      const idleFor = Date.now() - Math.max(refreshed.claimedAt ?? Date.now(), idle?.lastActivityAt ?? Date.now());
-      const idleWaitMs = idle && idleFor >= 120000 ? 15000 : 5000;
+      const operations = this.journal.active();
+      const idleFor = Date.now() - Math.max(refreshed.claimedAt ?? Date.now(), this.journal.lastActivityAt());
+      const idleWaitMs = !operations.length && idleFor >= 120000 ? 15000 : 5000;
       if (operations.some(o => ["DISPATCHED", "RUNNING"].includes(o.phase)))
         return json({ operations: [], expiresAt: l.expiresAt, idleWaitMs });
       const op = operations
@@ -946,10 +899,7 @@ export class Workspace {
           );
         op.phase = phase;
         if (phase !== "RUNNING") {
-          const retained = this.operations().reduce(
-            (n, row) => n + JSON.stringify(row.result ?? null).length,
-            0,
-          );
+          const retained = this.journal.stats().resultSize;
           op.result =
             retained + JSON.stringify(b.result).length <= 8 * 1024 * 1024
               ? b.result
