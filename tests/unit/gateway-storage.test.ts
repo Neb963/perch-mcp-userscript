@@ -520,7 +520,8 @@ test("idle journal survives cold starts and invalidates on every operation mutat
       throw new Error("rollback");
     }));
     assert.ok(records.get(WORKSPACE_JOURNAL_IDLE_KEY));
-    records.put("operation/fixture-operation", opFixture());
+    // An older binary issuing raw SQL also invalidates the persisted hint.
+    local.storage.sql.exec("INSERT INTO records (key, part, value) VALUES (?, ?, ?)", "operation/fixture-operation", 0, JSON.stringify(opFixture()));
     assert.equal(records.get(WORKSPACE_JOURNAL_IDLE_KEY), undefined);
     await new Workspace(local.state, env).alarm();
     assert.equal(records.get<{phase:string}>("operation/fixture-operation")?.phase, "UNKNOWN");

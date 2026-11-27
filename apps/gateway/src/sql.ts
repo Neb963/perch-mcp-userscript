@@ -24,7 +24,6 @@ export class SqlRecords {
   }
   put(key: string, value: unknown): void {
     const s = JSON.stringify(value);
-    this.invalidateJournalIdle(key);
     this.storage.sql.exec("DELETE FROM records WHERE key=?", key);
     let offset = 0,
       part = 0;
@@ -43,12 +42,15 @@ export class SqlRecords {
     }
   }
 
-  private invalidateJournalIdle(key: string): void {
-    if (key.startsWith("operation/"))
-      this.storage.sql.exec("DELETE FROM records WHERE key=?", WORKSPACE_JOURNAL_IDLE_KEY);
+  enableJournalIdleInvalidation(): void {
+    // Persist in SQLite, so even previous binaries or direct SQL writes invalidate the hint.
+    for (const [event, row] of [["INSERT", "NEW"], ["DELETE", "OLD"], ["UPDATE", "NEW"]]) {
+      this.storage.sql.exec(`CREATE TRIGGER IF NOT EXISTS journal_idle_${event.toLowerCase()} AFTER ${event} ON records
+        WHEN ${row}.key LIKE 'operation/%'${event === "UPDATE" ? " OR OLD.key LIKE 'operation/%'" : ""}
+        BEGIN DELETE FROM records WHERE key='workspace-journal-idle/v1'; END`);
+    }
   }
   delete(key: string): void {
-    this.invalidateJournalIdle(key);
     this.storage.sql.exec("DELETE FROM records WHERE key=?", key);
   }
   keys(prefix: string): string[] {

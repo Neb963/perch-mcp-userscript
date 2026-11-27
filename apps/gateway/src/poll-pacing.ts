@@ -14,7 +14,8 @@ export async function paceIdlePoll(
 ): Promise<Response> {
   if (!response.ok || !waitMs) return response;
   const bytes = await response.arrayBuffer();
-  const result = JSON.parse(new TextDecoder().decode(bytes)) as { operations?: unknown };
-  if (Array.isArray(result.operations) && result.operations.length === 0) await sleep(waitMs);
+  const result = JSON.parse(new TextDecoder().decode(bytes)) as { operations?: unknown; idleWaitMs?: unknown };
+  if (Array.isArray(result.operations) && result.operations.length === 0)
+    await sleep(Math.min(waitMs, result.idleWaitMs === 15000 ? 15000 : 5000));
   return new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
 }

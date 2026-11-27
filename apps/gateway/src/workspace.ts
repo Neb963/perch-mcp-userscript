@@ -32,6 +32,7 @@ interface Lease {
   bindingRevision: number;
   tabInstanceId: string;
   secretHash: string;
+  claimedAt?: number;
   expiresAt: number;
   credentialEpoch: number;
   permissions: string[];
@@ -71,6 +72,7 @@ export class Workspace {
     private env: Env,
   ) {
     this.db = new SqlRecords(state.storage);
+    this.db.enableJournalIdleInvalidation();
     const schema = this.db.get<number>("schema");
     if (schema !== undefined && schema !== 1)
       throw new ApiError(
@@ -174,7 +176,7 @@ export class Workspace {
       // Derived hint, not authority: every operation mutation invalidates it synchronously.
       if (rows.every(o => o.terminalAt && o.terminalNotified) &&
           (nextAt === null || nextAt > now))
-        this.db.put(WORKSPACE_JOURNAL_IDLE_KEY, { nextAt });
+        this.db.put(WORKSPACE_JOURNAL_IDLE_KEY, { nextAt, lastActivityAt: rows.reduce((latest, row) => Math.max(latest, row.terminalAt ?? row.createdAt), 0) });
     }
     for (const expiry of [this.images.nextExpiry(), this.music.nextExpiry()])
       if (expiry !== undefined) deadlines.push(expiry);
@@ -261,14 +263,14 @@ export class Workspace {
       /* Persistent terminal rows remain the outbox for the next request/alarm. */
     }
   }
-  private journalIdle(): { nextAt: number | null } | undefined {
-    let hint: { nextAt: number | null } | undefined;
-    try { hint = this.db.get<{ nextAt: number | null }>(WORKSPACE_JOURNAL_IDLE_KEY); }
+  private journalIdle(): { nextAt: number | null; lastActivityAt: number } | undefined {
+    let hint: { nextAt: number | null; lastActivityAt: number } | undefined;
+    try { hint = this.db.get<{ nextAt: number | null; lastActivityAt: number }>(WORKSPACE_JOURNAL_IDLE_KEY); }
     catch (error) {
       if (!(error instanceof Error) || error.message !== "SQLITE_RECORD_CORRUPT") throw error;
       return undefined; // A corrupt derived hint is never trusted.
     }
-    if (hint && (hint.nextAt === null ||
+    if (hint && Number.isSafeInteger(hint.lastActivityAt) && (hint.nextAt === null ||
         (Number.isSafeInteger(hint.nextAt) && hint.nextAt > Date.now()))) return hint;
     return undefined;
   }
@@ -628,6 +630,7 @@ export class Workspace {
           bindingRevision: approved.workspace.bindingRevision,
           tabInstanceId,
           secretHash,
+          claimedAt: Date.now(),
           expiresAt: Date.now() + 180000,
           credentialEpoch: approved.credentialEpoch,
           permissions: approved.workspace.permissions,
@@ -726,18 +729,22 @@ export class Workspace {
           refreshed.tabInstanceId !== l.tabInstanceId || refreshed.expiresAt <= Date.now())
         throw new ApiError("STALE_EPOCH", "Lease changed during polling.", 409);
       l.expiresAt = refreshed.expiresAt;
-      if (l.expiresAt - Date.now() <= 120000) {
+      if (l.expiresAt - Date.now() <= 120000 || !refreshed.claimedAt) {
+        refreshed.claimedAt ??= Date.now();
         refreshed.expiresAt = l.expiresAt = Date.now() + 180000;
         this.db.put("lease", refreshed);
       }
       this.expire();
-      const operations = this.journalIdle() ? [] : this.operations();
+      const idle = this.journalIdle();
+      const operations = idle ? [] : this.operations();
+      const idleFor = Date.now() - Math.max(refreshed.claimedAt ?? Date.now(), idle?.lastActivityAt ?? Date.now());
+      const idleWaitMs = idle && idleFor >= 120000 ? 15000 : 5000;
       if (operations.some(o => ["DISPATCHED", "RUNNING"].includes(o.phase)))
-        return json({ operations: [], expiresAt: l.expiresAt });
+        return json({ operations: [], expiresAt: l.expiresAt, idleWaitMs });
       const op = operations
         .filter((o) => o.phase === "ADMITTED")
         .sort((a, b) => a.sequence - b.sequence)[0];
-      if (!op) return json({ operations: [], expiresAt: l.expiresAt });
+      if (!op) return json({ operations: [], expiresAt: l.expiresAt, idleWaitMs });
       try {
         await rpc(registry(this.env), "/internal/dispatch", {
           props: op.props,

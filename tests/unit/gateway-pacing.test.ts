@@ -17,5 +17,6 @@ test("only detached empty successful responses wait outside the DO",async()=>{
   await paceIdlePoll(Response.json({operations:[{id:1}]}),15000,async ms=>{calls.push(ms);});
   await paceIdlePoll(Response.json({}, {status:503}),15000,async ms=>{calls.push(ms);});
   await paceIdlePoll(Response.json({operations:[]}),0,async ms=>{calls.push(ms);});
-  assert.deepEqual(calls,[15000]);
+  await paceIdlePoll(Response.json({operations:[],idleWaitMs:15000}),15000,async ms=>{calls.push(ms);});
+  assert.deepEqual(calls,[5000,15000]);
 });
