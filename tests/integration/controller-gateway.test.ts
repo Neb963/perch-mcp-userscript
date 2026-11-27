@@ -97,10 +97,10 @@ test(
         draftId: "",
         browserInstallationId: await transport.installationId(),
       };
-      await transport.request("POST", `/api/v1/admin/workspaces/${w.id}/bind`, {
+      const bound = (await transport.request("POST", `/api/v1/admin/workspaces/${w.id}/bind`, {
         expectedRevision: w.revision,
         binding,
-      });
+      })) as Record<string, unknown>;
       const a = (await transport.request("POST", "/api/v1/admin/agents", {
         workspaceId: w.id,
         label: "Controller Agent",
@@ -154,7 +154,7 @@ test(
         id: pending.id,
         handle: pending.handle,
       });
-      await controller.attach(w);
+      await controller.attach(bound);
       async function call(
         tool: string,
         args: Record<string, unknown>,
