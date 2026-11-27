@@ -55,6 +55,14 @@ export class SourceTools {
     if (name === 'save_generator') {
       if (!context?.save) throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native Save is gated until an independent complete readback driver, saved base and explicit Save permission are supplied.');
       const source = await this.vfs.snapshot(); if (source.revision !== string(args, 'intendedRevision')) throw new BrowserError('STALE_REVISION', 'Intended Workspace revision no longer matches.');
+      const operationId = context.save.operationId;
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(operationId))
+        throw new BrowserError('INVALID_INPUT','Invalid Save Operation ID.');
+      const key = `${this.vfs.prefix}:journal:${operationId}`;
+      // Same operation ID always means status lookup, not a fresh Save. This
+      // check precedes pending-path checks so retry guidance is unambiguous.
+      if (await this.vfs.store.get(key))
+        throw new BrowserError('EFFECT_UNKNOWN','This Save operation was already dispatched. Inspect its status; never repeat the same effect.');
       await this.vfs.reconcileRetained();
       // Import-cache uncertainty is irrelevant to native Save. A recent
       // source/save effect can still be running; old ones are automatically
@@ -63,8 +71,6 @@ export class SourceTools {
       if (pending.length) throw new BrowserError('NATIVE_CONFLICT',
         'A recent source operation is settling. Inspect current Workspace status and retry this new Save after it settles.',
         'No old operation is replayed. Current source remains intact.');
-      const operationId = context.save.operationId; if (!/^[A-Za-z0-9_-]{1,128}$/.test(operationId)) throw new BrowserError('INVALID_INPUT','Invalid Save Operation ID.');
-      const key = `${this.vfs.prefix}:journal:${operationId}`; if (await this.vfs.store.get(key)) throw new BrowserError('EFFECT_UNKNOWN','Retained Save intent cannot be replayed; reconcile its Operation ID.');
       const checkpoint = await this.vfs.checkpoint('Before native Save', true); const journal = {id:operationId,gatewayOperationId:operationId,state:'INTENT',kind:'SAVE',paths:Object.keys(source.files).filter(path=>!path.startsWith('scratch/')&&!path.startsWith('imports/')),baseRevision:source.revision,checkpointId:checkpoint.id,createdAt:Date.now(),identity:source.identity}; await this.vfs.store.set(key,journal);
       let dispatched = false;
       try {
