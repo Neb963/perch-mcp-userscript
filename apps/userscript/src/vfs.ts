@@ -4,7 +4,10 @@ import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, digest, equa
 export interface WorkspaceSnapshot extends NativeSnapshot { nativeRevision: string; generation: number }
 interface StoredSource { version: 1; identity: NativeIdentity; files: Record<string, string>; revision: string; createdAt: number; label: string; pinned: boolean }
 interface LocalState { version: 1; files: Record<string, string>; lastHash: string; generation: number }
-interface Journal { id: string; state: 'INTENT' | 'DISPATCHED' | 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN' | 'REJECTED'; paths: string[]; baseRevision: string; checkpointId?: string; kind?: 'SOURCE'|'IMPORT'; createdAt: number; resolvedByOperator?: boolean; inspectedRevision?: string; resolvedAt?: number; operatorEvidence?: string }
+interface Journal { id: string; state: 'INTENT' | 'DISPATCHED' | 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN' | 'REJECTED'; paths: string[]; baseRevision: string; checkpointId?: string; kind?: 'SOURCE'|'IMPORT'|'SAVE'; createdAt: number; resolvedByOperator?: boolean; inspectedRevision?: string; resolvedAt?: number; operatorEvidence?: string;
+  gatewayOperationId?: string; plannedHash?: string; plannedPaths?: Record<string,string|null>; identity?: NativeIdentity;
+  resolvedByReadback?: boolean; resolutionMode?: 'VERIFIED_INTENDED_BYTES'|'ADOPTED_CURRENT_SAVED_SOURCE'|'ADOPTED_CURRENT_DRAFT'|'ADOPTED_CURRENT_IMPORT_CACHE'|'SUPERSEDED_BINDING';
+}
 /** Serialized per active lease. Durable generation pointer stores scratch without page-origin storage. */
 export class VirtualFileSystem {
   private chunks: ChunkStore; private tail: Promise<unknown> = Promise.resolve(); private observationTail: Promise<unknown> = Promise.resolve(); readonly prefix: string;
@@ -27,10 +30,22 @@ export class VirtualFileSystem {
   getSnapshot(): Promise<WorkspaceSnapshot> { return this.snapshot(); }
   async list(path = ''): Promise<string[]> { if (path && !['src', 'scratch', 'imports'].includes(path)) canonicalPath(path); const files = Object.keys((await this.snapshot()).files).sort(); return path ? files.filter(name => name === path || name.startsWith(`${path.replace(/\/$/, '')}/`)) : files; }
   async read(path: string): Promise<Uint8Array> { canonicalPath(path); const bytes = (await this.snapshot()).files[path]; if (!bytes) throw new BrowserError('FILE_NOT_FOUND', 'File does not exist in assigned Workspace.'); return bytes.slice(); }
-  async writeBatch(writes: FileWrite[], expectedRevision?: string): Promise<MutationResult> { return this.serial(async () => this.commit(writes, expectedRevision)); }
+  async writeBatch(writes: FileWrite[], expectedRevision?: string, gatewayOperationId?: string): Promise<MutationResult> { return this.serial(async () => this.commit(writes, expectedRevision, gatewayOperationId)); }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const next = this.tail.then(fn, fn); this.tail = next.catch(() => undefined); return next; }
-  private async commit(writes: FileWrite[], expectedRevision?: string): Promise<MutationResult> {
-    const unresolved = await this.unresolved(); if (unresolved.length) throw new BrowserError('EFFECT_UNKNOWN', 'Workspace has unresolved native intent.', 'Inspect local journal and current source; explicit operator reconciliation is required.');
+  private async commit(writes: FileWrite[], expectedRevision?: string, gatewayOperationId?: string): Promise<MutationResult> {
+    await this.reconcileRetainedUnlocked();
+    // An old uncertain operation is *not* a Workspace-wide lock. The current
+    // native source and the requested optimistic revision are authoritative.
+    // Only a recent overlapping write, which may still be executing, is held.
+    const unresolved = await this.unresolved();
+    const nativePaths = new Set(writes.map(w=>w.path));
+    const conflicting = unresolved.filter(j=>j.kind!=='IMPORT' &&
+      ((j.kind==='SAVE' && writes.some(w=>!w.path.startsWith('scratch/'))) ||
+       j.paths.some(path=>nativePaths.has(path))));
+    if (conflicting.length) throw new BrowserError('NATIVE_CONFLICT',
+      `A recent source operation may still be settling (${conflicting.map(j=>j.paths.join(', ')).join('; ')}). `+
+      'Refresh Workspace status and retry after the native editor has settled.',
+      'The agent can continue reading, previewing, and modifying unaffected paths. Do not repeat the uncertain operation.');
     const before = await this.snapshot(); if (expectedRevision && before.revision !== expectedRevision) throw new BrowserError('STALE_REVISION', 'Workspace revision changed.');
     if (!writes.length || writes.length > 1000) throw new BrowserError('LIMIT_EXCEEDED', 'Batch requires 1–1000 files.');
     const planned = { ...before.files }; const seen = new Set<string>();
@@ -42,22 +57,89 @@ export class VirtualFileSystem {
       else { if (write.bytes.length > 16 * 1024 * 1024) throw new BrowserError('QUOTA_EXCEEDED', 'File exceeds configured 16 MiB inline local file budget.'); if (write.path === 'main.pjs' || write.path === 'index.html') new TextDecoder('utf-8', { fatal: true }).decode(write.bytes); planned[write.path] = write.bytes.slice(); }
     }
     if (Object.values(planned).reduce((n, b) => n + b.length, 0) > this.maxBytes) throw new BrowserError('QUOTA_EXCEEDED', 'Workspace exceeds configured total local budget.');
-    const checkpoint = await this.createCheckpoint('Before source mutation', false, before); const journal: Journal = { id: crypto.randomUUID(), state: 'INTENT', paths: writes.map(w => w.path), baseRevision: before.revision, checkpointId: checkpoint.id, createdAt: Date.now() };
-    await this.store.set(`${this.prefix}:journal:${journal.id}`, journal);
-    const nativeWrites = writes.filter(w => !w.path.startsWith('scratch/')); let nativeResult: MutationResult = { status: 'SUCCEEDED', revision: before.nativeRevision, committed: [] };
-    try { if (nativeWrites.length) nativeResult = await this.adapter.applyFiles(nativeWrites, before.nativeRevision); }
-    catch (error) { journal.state = 'REJECTED'; await this.store.set(`${this.prefix}:journal:${journal.id}`, journal); throw error; }
-    if (nativeResult.status !== 'SUCCEEDED') { journal.state = nativeResult.status; await this.store.set(`${this.prefix}:journal:${journal.id}`, journal); return { ...nativeResult, revision: (await this.snapshot()).revision }; }
+    // Precompute the *complete intended result* before dispatch. No native or
+    // scratch bytes are embedded in the journal; only immutable SHA-256 proofs.
+    const plannedHash = await snapshotRevision(before.identity, planned);
+    const plannedPaths: Record<string,string|null> = {};
+    for (const write of writes) plannedPaths[write.path] = write.bytes===null ? null : await digest(write.bytes);
+    const checkpoint = await this.createCheckpoint('Before source mutation', false, before);
+    const journal: Journal = { id: crypto.randomUUID(), state: 'INTENT', kind:'SOURCE',
+      paths: writes.map(w => w.path), baseRevision: before.revision,
+      checkpointId: checkpoint.id, createdAt: Date.now(), plannedHash, plannedPaths, identity:before.identity,
+      ...(gatewayOperationId && /^[A-Za-z0-9_-]{1,128}$/.test(gatewayOperationId) ? {gatewayOperationId} : {}),
+    };
+    const key = `${this.prefix}:journal:${journal.id}`;
+    await this.store.set(key, journal);
+    const nativeWrites = writes.filter(w => !w.path.startsWith('scratch/'));
+    let nativeResult: MutationResult = { status: 'SUCCEEDED', revision: before.nativeRevision, committed: [] };
+    let dispatched = false;
     try {
-      const afterNative = await this.adapter.snapshot(); const expectedNative = { ...before.files }; for (const path of Object.keys(expectedNative)) if (path.startsWith('scratch/') || path.startsWith('imports/')) delete expectedNative[path]; for (const w of nativeWrites) if (w.bytes === null) delete expectedNative[w.path]; else expectedNative[w.path] = w.bytes;
-      if (afterNative.revision !== await snapshotRevision(before.identity, expectedNative)) throw new BrowserError('STALE_REVISION', 'Manual edit interrupted final commit.');
-      const local = await this.local(); for (const w of writes.filter(w => w.path.startsWith('scratch/'))) if (w.bytes === null) delete local.files[w.path]; else local.files[w.path] = bytesToBase64(w.bytes);
-      await this.chunks.put('local', utf8.encode(JSON.stringify(local))); const after = await this.snapshot();
-      const expectedHash = await snapshotRevision(before.identity, planned); if (after.revision.split(':')[1] !== expectedHash) throw new BrowserError('STALE_REVISION', 'Workspace readback differs from planned complete source.');
-      journal.state = 'SUCCEEDED'; await this.store.set(`${this.prefix}:journal:${journal.id}`, journal); await this.trim();
+      if (nativeWrites.length) nativeResult = await this.adapter.applyFiles(nativeWrites, before.nativeRevision, async () => {
+        // A failed durable dispatch marker prevents *all* native effects.
+        await this.store.set(key,{...journal,state:'DISPATCHED'});
+        journal.state='DISPATCHED'; dispatched = true;
+      });
+    } catch (error) {
+      journal.state = dispatched ? 'UNKNOWN' : 'REJECTED';
+      await this.store.set(key,journal);
+      if (!dispatched) throw error;
+      nativeResult = {status:'UNKNOWN',revision:before.nativeRevision,committed:[],
+        error:{code:'EFFECT_UNKNOWN',message:'Native effect was dispatched; inspect current bytes before retrying.',
+          recovery:'No automatic repeat. Readback will reconcile exact intended bytes.'}};
+    }
+    if (nativeResult.status !== 'SUCCEEDED') {
+      // The native method can throw *after* committing all of its bytes.
+      // Complete current-state proof is sufficient; the reply is not.
+      if (nativeWrites.length === writes.length) {
+        try {
+          const actual = await this.snapshot();
+          if (actual.revision.split(':')[1] === plannedHash && await this.matchesPlannedPaths(actual,journal)) {
+            journal.state='SUCCEEDED'; journal.resolvedByReadback=true;
+            journal.resolutionMode='VERIFIED_INTENDED_BYTES'; journal.resolvedAt=Date.now();
+            journal.inspectedRevision=actual.revision;
+            await this.store.set(key,journal);
+            void this.trim().catch(()=>undefined); // Cleanup must not falsify success.
+            return {status:'SUCCEEDED',revision:actual.revision,committed:writes.map(w=>w.path)};
+          }
+        } catch { /* Retain the original UNKNOWN/PARTIAL without losing the journal. */ }
+      }
+      journal.state=nativeResult.status;
+      await this.store.set(key,journal);
+      let currentRevision=before.revision;
+      try { currentRevision=(await this.snapshot()).revision; } catch { /* Readback unavailable. */ }
+      return {...nativeResult,revision:currentRevision};
+    }
+    try {
+      const afterNative = await this.adapter.snapshot();
+      const expectedNative = { ...before.files };
+      for (const path of Object.keys(expectedNative)) if (path.startsWith('scratch/') || path.startsWith('imports/')) delete expectedNative[path];
+      for (const w of nativeWrites) if (w.bytes === null) delete expectedNative[w.path]; else expectedNative[w.path] = w.bytes;
+      if (afterNative.revision !== await snapshotRevision(before.identity, expectedNative))
+        throw new BrowserError('STALE_REVISION', 'Manual edit interrupted final commit.');
+      if (writes.some(w=>w.path.startsWith('scratch/'))) {
+        const local = await this.local();
+        for (const w of writes.filter(w => w.path.startsWith('scratch/')))
+          if (w.bytes === null) delete local.files[w.path]; else local.files[w.path] = bytesToBase64(w.bytes);
+        await this.chunks.put('local', utf8.encode(JSON.stringify(local)));
+      }
+      const after = await this.snapshot();
+      if (after.revision.split(':')[1] !== plannedHash || !(await this.matchesPlannedPaths(after,journal)))
+        throw new BrowserError('STALE_REVISION', 'Workspace readback differs from planned complete source.');
+      journal.state = 'SUCCEEDED'; journal.resolvedByReadback=true;
+      journal.resolutionMode='VERIFIED_INTENDED_BYTES'; journal.inspectedRevision=after.revision;
+      journal.resolvedAt=Date.now();
+      await this.store.set(key, journal);
+      void this.trim().catch(()=>undefined); // Housekeeping never turns a verified write UNKNOWN.
       return { status: 'SUCCEEDED', revision: after.revision, committed: writes.map(w => w.path) };
-    } catch { journal.state = nativeWrites.length ? 'PARTIAL' : 'UNKNOWN'; await this.store.set(`${this.prefix}:journal:${journal.id}`, journal); return { status: journal.state, revision: before.revision, committed: nativeResult.committed, error: { code: 'PARTIAL_EFFECT', message: 'Commit or durable terminal record failed; preserve current state.', recovery: 'Inspect local journal and checkpoint. Do not replay uncertain writes.' } }; }
+    } catch (error) {
+      journal.state = nativeWrites.length ? 'PARTIAL' : 'UNKNOWN';
+      await this.store.set(key,journal);
+      return { status: journal.state, revision: before.revision, committed: nativeResult.committed,
+        error: { code: 'PARTIAL_EFFECT', message: 'Native bytes or durable terminal record could not be verified.',
+          recovery: 'The journal retains planned byte hashes. Read-only reconciliation can settle an exact match.' } };
+    }
   }
+
   async checkpoint(label = 'Checkpoint', pinned = false): Promise<{
     id: string; revision: string; sha256: string; bytes: number;
     identity: NativeIdentity; pinned: boolean; fileCount: number; sourceBytes: number;
@@ -111,7 +193,7 @@ export class VirtualFileSystem {
     return result.sort((a,b) => b.createdAt-a.createdAt);
   }
 
-  async restore(id: string, expectedRevision: string): Promise<MutationResult> {
+  async restore(id: string, expectedRevision: string, gatewayOperationId?: string): Promise<MutationResult> {
     if (!/^[a-f0-9-]{36}$/.test(id)) throw new BrowserError('INVALID_INPUT','Invalid Checkpoint ID.');
     const raw=await this.chunks.get(`checkpoint:${id}`);
     if (!raw) throw new BrowserError('FILE_NOT_FOUND','Checkpoint missing.');
@@ -165,13 +247,19 @@ export class VirtualFileSystem {
       .map(path=>({path,bytes:restored[path]??null}));
     // writeBatch atomically preflights the complete write set and preserves
     // the current draft as a separate checkpoint before mutation.
-    return this.writeBatch(writes,expectedRevision);
+    return this.writeBatch(writes,expectedRevision,gatewayOperationId);
   }
   /** Trusted public-source adapter only. Agent write tools cannot mutate this revision-pinned cache. */
   async importSnapshot(id: string, files: Record<string, Uint8Array>, expectedRevision?: string): Promise<{ revision: string; paths: string[]; sha256: string }> {
     return this.serial(async () => {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) || id === '.' || id === '..') throw new BrowserError('PATH_DENIED', 'Invalid import snapshot ID.');
-      if ((await this.unresolved()).length) throw new BrowserError('EFFECT_UNKNOWN','Unresolved native effects block new import publication.');
+      // Imports are local read-only cache entries. They must not be fenced by
+      // unrelated native source journals or imports with another prefix.
+      await this.reconcileRetainedUnlocked();
+      const importPrefix=`imports/${id}/`;
+      if ((await this.unresolved()).some(j=>j.kind==='IMPORT' &&
+          j.paths.some(path=>path.startsWith(importPrefix))))
+        throw new BrowserError('NATIVE_CONFLICT','This import is still settling. Recheck its cache before replacing it.');
       const before = await this.snapshot(); if (expectedRevision && before.revision !== expectedRevision) throw new BrowserError('STALE_REVISION', 'Workspace changed before import publication.');
       const sourcePaths = Object.keys(files).sort(); if (sourcePaths.length > 1000 || !sourcePaths.length) throw new BrowserError('LIMIT_EXCEEDED', 'Import requires 1–1000 files.');
       const prefix = `imports/${id}/`;
@@ -202,7 +290,7 @@ export class VirtualFileSystem {
       for (const path of Object.keys(local.files)) if (path.startsWith(prefix)) delete local.files[path];
       Object.assign(local.files, staged);
       if ((await this.snapshot()).revision !== before.revision) throw new BrowserError('STALE_REVISION', 'Workspace changed during import preflight.');
-      const journal:Journal={id:crypto.randomUUID(),state:'INTENT',kind:'IMPORT',paths:Object.keys(staged),baseRevision:before.revision,createdAt:Date.now()}; const journalKey=`${this.prefix}:journal:${journal.id}`;
+      const journal:Journal={id:crypto.randomUUID(),state:'INTENT',kind:'IMPORT',paths:Object.keys(staged),baseRevision:before.revision,createdAt:Date.now(),identity:before.identity}; const journalKey=`${this.prefix}:journal:${journal.id}`;
       await this.store.set(journalKey,journal); // Durable intent precedes the cache manifest pointer.
       try { await this.chunks.put('local',utf8.encode(JSON.stringify(local))); }
       catch(error) {
@@ -218,6 +306,89 @@ export class VirtualFileSystem {
       }catch{journal.state='UNKNOWN';try{await this.store.set(journalKey,journal);}catch{/* The durable INTENT remains held. */}throw new BrowserError('EFFECT_UNKNOWN','Imported cache may be published; its complete readback or terminal record is unavailable.','Inspect the retained import intent and current cache; do not replay publication.');}
     });
   }
+  /**
+   * Read-only native evidence may close a local write hold, without replaying
+   * any effect. This mutates *only* local journal metadata, under VFS serial.
+   */
+  async reconcileRetained(): Promise<{id:string;mode:string;revision:string}[]> {
+    return this.serial(() => this.reconcileRetainedUnlocked());
+  }
+  private async matchesPlannedPaths(snapshot: WorkspaceSnapshot, journal: Journal): Promise<boolean> {
+    if (!journal.plannedPaths || !journal.plannedHash) return false;
+    for (const [path,hash] of Object.entries(journal.plannedPaths)) {
+      const bytes=snapshot.files[path];
+      if (hash===null ? bytes!==undefined : !bytes || await digest(bytes)!==hash) return false;
+    }
+    return true;
+  }
+  /**
+   * The current native draft is canonical once two independent snapshots
+   * agree and the native editor has no active mutation. A local write journal
+   * records uncertainty about an *old command*, not ownership of future
+   * source revisions. Rebase old uncertain commands without claiming that the
+   * old command succeeded. Preserve both its original state and checkpoint.
+   *
+   * A short grace period guards against delayed native effects. New requests
+   * may still edit unrelated paths while a recent conflicting intent settles.
+   */
+  private async reconcileRetainedUnlocked(): Promise<{id:string;mode:string;revision:string}[]> {
+    const held=await this.unresolved();
+    if (!held.length) return [];
+    let probe:Awaited<ReturnType<NativeAdapter['probe']>>;
+    try { probe=await this.adapter.probe(); }
+    catch{return [];}
+    if (!probe.ready || probe.sourceRead!==true ||
+        (probe.sourceWriteBlocked??[]).length) return [];
+    let first:WorkspaceSnapshot, second:WorkspaceSnapshot;
+    try {
+      first=await this.snapshot();
+      second=await this.snapshot();
+      if (first.revision!==second.revision || first.nativeRevision!==second.nativeRevision ||
+          !equalIdentity(first.identity,second.identity) ||
+          (probe.identity && !equalIdentity(second.identity,probe.identity))) return [];
+    } catch { return []; }
+    const currentHash=second.revision.split(':')[1];
+    const now=Date.now();
+    const result:{id:string;mode:string;revision:string}[]=[];
+    for (const journal of held) {
+      if (journal.resolvedByOperator || journal.resolvedByReadback ||
+          !Number.isSafeInteger(journal.createdAt)) continue;
+      const intended = journal.kind!=='IMPORT' &&
+        !!journal.plannedHash && /^[a-f0-9]{64}$/.test(journal.plannedHash) &&
+        currentHash===journal.plannedHash && await this.matchesPlannedPaths(second,journal);
+      // Exact intended bytes prove the old write outcome immediately. Other
+      // outcomes only become a new baseline after any delayed effect window.
+      if (!intended && now-journal.createdAt < 15000) continue;
+      const mode:NonNullable<Journal['resolutionMode']> = intended
+        ? 'VERIFIED_INTENDED_BYTES'
+        : journal.identity && !equalIdentity(journal.identity,second.identity) ? 'SUPERSEDED_BINDING'
+        : journal.kind==='IMPORT' ? 'ADOPTED_CURRENT_IMPORT_CACHE'
+        : second.saveState==='saved' && !second.dirty
+          ? 'ADOPTED_CURRENT_SAVED_SOURCE' : 'ADOPTED_CURRENT_DRAFT';
+      const key=`${this.prefix}:journal:${journal.id}`;
+      const latest=await this.store.get<Journal>(key);
+      if (!latest || latest.id!==journal.id || latest.state!==journal.state ||
+          latest.resolvedByOperator || latest.resolvedByReadback) continue;
+      const terminal:Journal={...latest,resolvedByReadback:true,
+        resolutionMode:mode,inspectedRevision:second.revision,resolvedAt:Date.now()};
+      // Historical UNKNOWN is deliberately retained when current source is
+      // adopted, because the original command's result remains unknowable.
+      if (intended) terminal.state='SUCCEEDED';
+      await this.store.set(key,terminal);
+      result.push({id:journal.id,mode,revision:second.revision});
+    }
+    return result;
+  }
+  async recentReconciliations():Promise<Array<{id:string;mode:string;revision:string;at:number;paths:string[];originalState:string}>> {
+    const items:Array<{id:string;mode:string;revision:string;at:number;paths:string[];originalState:string}>=[];
+    for(const key of (await this.store.list()).filter(k=>k.startsWith(`${this.prefix}:journal:`))) {
+      const r=await this.store.get<Journal>(key);
+      if(r?.resolvedByReadback && r.resolutionMode && r.inspectedRevision && r.resolvedAt)
+        items.push({id:r.id,mode:r.resolutionMode,revision:r.inspectedRevision,at:r.resolvedAt,
+          paths:r.paths.slice(0,30),originalState:r.resolutionMode==='VERIFIED_INTENDED_BYTES'?'SUCCEEDED':r.state});
+    }
+    return items.sort((a,b)=>b.at-a.at).slice(0,8);
+  }
   async unresolved(): Promise<Journal[]> {
     const result: Journal[] = [];
     for (const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:journal:`))) {
@@ -229,7 +400,7 @@ export class VirtualFileSystem {
           typeof row.baseRevision !== 'string')
         throw new BrowserError('STORAGE_CORRUPT','A local operation journal is malformed. It has not been removed or acknowledged.');
       if (['INTENT','DISPATCHED','PARTIAL','UNKNOWN'].includes(row.state) &&
-          row.resolvedByOperator !== true) result.push(row);
+          row.resolvedByOperator !== true && row.resolvedByReadback !== true) result.push(row);
     }
     return result;
   }

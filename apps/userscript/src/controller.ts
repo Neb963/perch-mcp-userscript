@@ -240,10 +240,11 @@ export class BrowserController {
         this.updateStatus({connection:'connected',workspace:workspaceId,dirty:probe.dirty,
           reason:'Source readback is unavailable ('+code+'). The agent stays connected; source writes remain disabled.'});
       });
-      // Reconcile exact already-acknowledged journals in the background. Native
-      // readback, Activity pagination and storage failures must never kill a
-      // valid lease or stop independent tools.
-      if (this.localPendingHolds) void this.syncResolvedLocal(candidateVfs,workspaceId)
+      // Reconcile retained local source intents against two independent native
+      // snapshots before consulting gateway Activity. Old local UUIDs are not
+      // gateway Operation IDs. Neither readback nor storage outages drop the lease.
+      if (this.localPendingHolds) void candidateVfs.reconcileRetained()
+        .then(()=>this.syncResolvedLocal(candidateVfs,workspaceId))
         .then(async()=>{
           const remaining = (await candidateVfs.unresolved()).length;
           if (this.lease !== claim || this.stopped) return;
@@ -494,7 +495,7 @@ export class BrowserController {
     // Local source acknowledgement is a separate durable record; the original effect status is retained.
     // Only the journal owned by this exact external operation may be
     // acknowledged. Other unknown writes/imports are independent holds.
-    for (const journal of (await vfs.unresolved()).filter(j=>j.id===operationId))
+    for (const journal of (await vfs.unresolved()).filter(j=>j.gatewayOperationId===operationId))
       await vfs.acknowledgeReconciliation(journal.id, snapshot.revision);
     const key = `perch:operation:${workspaceId}:${operationId}`,
       local = await this.store.get<LocalOperation>(key);
@@ -518,6 +519,9 @@ export class BrowserController {
     const w=await this.getRecoveryWorkspace(workspaceId);
     await this.assertRecoveryIdentity(w);
     const vfs=new VirtualFileSystem(this.adapter,this.store,workspaceId);
+    // Read-only native rebase is attempted automatically; this view is only
+    // for genuinely recent or unobservable effects.
+    await vfs.reconcileRetained().catch(()=>[]);
     const holds = await vfs.unresolved();
     // The exact pending records are inspectable even when a foreign page-realm
     // /src buffer cannot be cloned. Resolution still requires full readback.
@@ -980,9 +984,8 @@ export class BrowserController {
     vfs: VirtualFileSystem,
     workspaceId: string,
   ): Promise<void> {
-    const held = await vfs.unresolved();
-    if (!held.length) return;
-    const heldIds = new Set(held.map(j=>j.id));
+    const held = (await vfs.unresolved()).filter(j=>!!j.gatewayOperationId);
+    if (!held.length) return; // Browser-local UUIDs are not Gateway Operation IDs.
     let cursor: string | undefined, revision: number | undefined;
     for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
       const page = (await this.transport.request(
@@ -1001,7 +1004,7 @@ export class BrowserController {
       revision = page.revision;
       const resolved = page.items.find(
         (row) =>
-          row.workspaceId === workspaceId && heldIds.has(String(row.operationId)) &&
+          row.workspaceId === workspaceId && held.some(j=>j.gatewayOperationId===String(row.operationId)) &&
           row.resolution &&
           typeof row.resolution === "object" &&
           (row.resolution as Record<string, unknown>).resolvedByOperator === true,
@@ -1018,7 +1021,7 @@ export class BrowserController {
           throw new Error("Resolution digest differs from current source.");
         // A resolved gateway operation is not authority to erase unrelated
         // local journal failures merely because they predate its timestamp.
-        for (const journal of held.filter(j=>j.id===String(resolved.operationId)))
+        for (const journal of held.filter(j=>j.gatewayOperationId===String(resolved.operationId)))
           await vfs.acknowledgeReconciliation(journal.id, snapshot.revision);
         return;
       }
@@ -1182,7 +1185,10 @@ export class BrowserController {
       const base = await this.source.call(name, args) as Record<string, unknown>;
       const snapshotVerified = base.snapshotVerified === true;
       const localJournalVerified = base.localJournalError === null;
-      const pendingLocal = Array.isArray(base.unresolved) ? base.unresolved.length : 0;
+      const outstanding = Array.isArray(base.unresolved) ? base.unresolved as Array<{kind?:string;paths?:string[]}> : [];
+      const pendingNative = outstanding.filter(row=>row.kind!=='IMPORT');
+      const restrictedPaths = [...new Set(pendingNative.flatMap(row=>row.kind==='SAVE'
+        ? ['main.pjs','index.html','src/**'] : Array.isArray(row.paths) ? row.paths : ['src/**']))].sort();
       const caps = base.capabilities as {
         nativeSave?:boolean;sourceRead?:boolean;sourceWrite?:boolean;
         sourceWriteBlocked?:string[];
@@ -1213,7 +1219,7 @@ export class BrowserController {
         ...((caps?.sourceWriteBlocked ?? []).length ? ['NATIVE_EDITOR_MUTATION_BLOCKED'] : []),
         ...(!snapshotVerified ? ['SOURCE_READBACK_NOT_VERIFIED'] : []),
         ...(!localJournalVerified ? ['LOCAL_JOURNAL_NOT_VERIFIED'] : []),
-        ...(pendingLocal ? ['UNRESOLVED_LOCAL_WRITES'] : []),
+        ...(pendingNative.length ? ['RECENT_NATIVE_EFFECT_SETTLING'] : []),
       ];
       return {
         ...base,
@@ -1230,8 +1236,10 @@ export class BrowserController {
             ...(!snapshotVerified ? {reason:base.sourceReadbackError} : {}) },
           sourceWrite: { detected:caps?.sourceWrite === true,
             authorized:authorized.includes('WRITE_SOURCE'),
-            available:leaseHeld && snapshotVerified && localJournalVerified && pendingLocal===0 && caps?.sourceWrite === true && authorized.includes('WRITE_SOURCE'),
-            reasons:[...(caps?.sourceWriteBlocked ?? []),...(!snapshotVerified ? ['SOURCE_READBACK_NOT_VERIFIED'] : []),...(!localJournalVerified ? ['LOCAL_JOURNAL_NOT_VERIFIED'] : []),...(pendingLocal ? ['UNRESOLVED_LOCAL_WRITES'] : [])] },
+            available:leaseHeld && snapshotVerified && localJournalVerified && caps?.sourceWrite === true && authorized.includes('WRITE_SOURCE'),
+            reasons:[...(caps?.sourceWriteBlocked ?? []),...(!snapshotVerified ? ['SOURCE_READBACK_NOT_VERIFIED'] : []),...(!localJournalVerified ? ['LOCAL_JOURNAL_NOT_VERIFIED'] : []),],
+            restrictedPaths, pendingNativeOperations:pendingNative.length,
+            recovery:'Other files remain editable. Matching current-source readback automatically clears stale local journals.' },
           saveGenerator: {
             detected:nativeDetected,adapterAccepted,gatewayPolicy,
             providerWritesEnabled,nativeActionsEnabled,
@@ -1343,7 +1351,7 @@ export class BrowserController {
         readSavedSnapshot:()=>readback.read(identity.slug,identity),
       }});
     }
-    if (this.source?.supports(name)) return this.source.call(name, args);
+    if (this.source?.supports(name)) return this.source.call(name, args, {operationId:context.envelope.operationId});
     if (this.tools?.supports(name)) return this.tools.call(name, args, context);
     throw Object.assign(
       new Error("No verified authorized adapter for this capability."),

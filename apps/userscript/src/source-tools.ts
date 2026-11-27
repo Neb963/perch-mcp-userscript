@@ -50,15 +50,28 @@ export function parsePatch(patch: string, snapshot: WorkspaceSnapshot): FileWrit
 export class SourceTools {
   constructor(readonly vfs: VirtualFileSystem, readonly adapter: NativeAdapter) {}
   supports(name: string): boolean { return tools.has(name); }
-  async call(name: string, args: Record<string, unknown> = {}, context?: {save?: SaveContext}): Promise<unknown> {
+  async call(name: string, args: Record<string, unknown> = {}, context?: {save?: SaveContext;operationId?:string}): Promise<unknown> {
     if (!tools.has(name)) throw new BrowserError('UNSUPPORTED_INTERFACE', `Source tool ${name} unavailable.`);
     if (name === 'save_generator') {
       if (!context?.save) throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native Save is gated until an independent complete readback driver, saved base and explicit Save permission are supplied.');
       const source = await this.vfs.snapshot(); if (source.revision !== string(args, 'intendedRevision')) throw new BrowserError('STALE_REVISION', 'Intended Workspace revision no longer matches.');
-      if ((await this.vfs.unresolved()).length) throw new BrowserError('EFFECT_UNKNOWN', 'An unresolved native effect blocks Save.');
-      const operationId = context.save.operationId; if (!/^[A-Za-z0-9_-]{1,128}$/.test(operationId)) throw new BrowserError('INVALID_INPUT','Invalid Save Operation ID.');
-      const key = `${this.vfs.prefix}:journal:${operationId}`; if (await this.vfs.store.get(key)) throw new BrowserError('EFFECT_UNKNOWN','Retained Save intent cannot be replayed; reconcile its Operation ID.');
-      const checkpoint = await this.vfs.checkpoint('Before native Save', true); const journal = {id:operationId,state:'INTENT',paths:Object.keys(source.files).filter(path=>!path.startsWith('scratch/')&&!path.startsWith('imports/')),baseRevision:source.revision,checkpointId:checkpoint.id,createdAt:Date.now()}; await this.vfs.store.set(key,journal);
+      const operationId = context.save.operationId;
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(operationId))
+        throw new BrowserError('INVALID_INPUT','Invalid Save Operation ID.');
+      const key = `${this.vfs.prefix}:journal:${operationId}`;
+      // Same operation ID always means status lookup, not a fresh Save. This
+      // check precedes pending-path checks so retry guidance is unambiguous.
+      if (await this.vfs.store.get(key))
+        throw new BrowserError('EFFECT_UNKNOWN','This Save operation was already dispatched. Inspect its status; never repeat the same effect.');
+      await this.vfs.reconcileRetained();
+      // Import-cache uncertainty is irrelevant to native Save. A recent
+      // source/save effect can still be running; old ones are automatically
+      // rebased against two matching current-source observations above.
+      const pending = (await this.vfs.unresolved()).filter(j=>j.kind!=='IMPORT');
+      if (pending.length) throw new BrowserError('NATIVE_CONFLICT',
+        'A recent source operation is settling. Inspect current Workspace status and retry this new Save after it settles.',
+        'No old operation is replayed. Current source remains intact.');
+      const checkpoint = await this.vfs.checkpoint('Before native Save', true); const journal = {id:operationId,gatewayOperationId:operationId,state:'INTENT',kind:'SAVE',paths:Object.keys(source.files).filter(path=>!path.startsWith('scratch/')&&!path.startsWith('imports/')),baseRevision:source.revision,checkpointId:checkpoint.id,createdAt:Date.now(),identity:source.identity}; await this.vfs.store.set(key,journal);
       let dispatched = false;
       try {
         const result = await this.adapter.save(source.nativeRevision, {
@@ -95,19 +108,25 @@ export class SourceTools {
     const expected = typeof args.expectedRevision === 'string' ? args.expectedRevision : undefined;
     if (name === 'checkpoint_list') return {checkpoints:await this.vfs.checkpointList()};
     if (name === 'checkpoint_create') return this.vfs.checkpoint(typeof args.label === 'string' ? args.label : 'Agent checkpoint',args.pinned===true);
-    if (name === 'checkpoint_restore') return this.vfs.restore(string(args,'id'),string(args,'expectedRevision'));
+    if (name === 'checkpoint_restore') return this.vfs.restore(string(args,'id'),string(args,'expectedRevision'),context?.operationId);
     if (name === 'workspace_status' || name === 'generator_info') {
       const capabilities = await this.adapter.probe();
       let unresolved: Awaited<ReturnType<VirtualFileSystem['unresolved']>> = [];
       let localJournalError: string | null = null;
-      try { unresolved = await this.vfs.unresolved(); }
+      try {
+        if ((await this.vfs.unresolved()).length) await this.vfs.reconcileRetained();
+        unresolved = await this.vfs.unresolved();
+      }
       catch(error) { localJournalError = error instanceof BrowserError ? error.code : 'LOCAL_STORE_UNAVAILABLE'; }
       try {
         const snapshot = await this.vfs.snapshot();
         const base = { identity:snapshot.identity,revision:snapshot.revision,
           dirty:snapshot.dirty,saveState:snapshot.saveState,
           snapshotVerified:true,sourceReadbackError:null,localJournalError,
-          capabilities,unresolved };
+          capabilities,unresolved,
+          localJournalNamespace:'BROWSER_LOCAL',
+          localJournalRecovery:'Old local intents are automatically rebased to the verified current editor. These local IDs are not Gateway operation IDs; do not retry the old operation.',
+          recentLocalReconciliations:await this.vfs.recentReconciliations().catch(()=>[]) };
         return name === 'generator_info'
           ? { ...base, ...await this.adapter.generatorMetadata() }
           : base;
@@ -115,7 +134,10 @@ export class SourceTools {
         const code = error instanceof BrowserError ? error.code : 'SOURCE_READBACK_UNAVAILABLE';
         const base = {identity:capabilities.identity ?? await this.adapter.identity(),
           revision:null,dirty:capabilities.dirty,saveState:'unknown',
-          snapshotVerified:false,sourceReadbackError:code,localJournalError,capabilities,unresolved};
+          snapshotVerified:false,sourceReadbackError:code,localJournalError,capabilities,unresolved,
+          localJournalNamespace:'BROWSER_LOCAL',
+          localJournalRecovery:'Native source readback is unavailable. Read and preview may still work; source edits require a verified current editor baseline.',
+          recentLocalReconciliations:await this.vfs.recentReconciliations().catch(()=>[])};
         return name === 'generator_info'
           ? { ...base, ...await this.adapter.generatorMetadata() }
           : base;
@@ -136,19 +158,19 @@ export class SourceTools {
     if (name === 'write' || name === 'save_b64_file') {
       const path=string(args,'path');
       const bytes=name==='write'?utf8.encode(string(args,'content')):base64ToBytes(string(args,'data'));
-      const result=await this.vfs.writeBatch([{path,bytes}],expected??snapshot.revision);
+      const result=await this.vfs.writeBatch([{path,bytes}],expected??snapshot.revision,context?.operationId);
       // The VFS has verified native complete-file readback before SUCCEEDED.
       // Partial/unknown results remain unchanged, without invented byte proofs.
       return result.status==='SUCCEEDED'
         ? {...result,path,bytes:bytes.length,sha256:await digest(bytes)}
         : result;
     }
-    if (name === 'put_files') { if (!Array.isArray(args.files)) throw new BrowserError('INVALID_INPUT','files must be an array.'); const writes=args.files.map((row:unknown)=>{ if (!row||typeof row!=='object') throw new BrowserError('INVALID_INPUT','Invalid file entry.'); const r=row as Record<string,unknown>; if(r.encoding!=='utf8'&&r.encoding!=='base64') throw new BrowserError('INVALID_INPUT','Unknown encoding.'); return {path:string(r,'path'),bytes:r.encoding==='utf8'?utf8.encode(string(r,'content')):base64ToBytes(string(r,'content'))}; }); return this.vfs.writeBatch(writes,string(args,'expectedRevision')); }
-    if (name === 'edit') { const path=string(args,'path'); const text=bytesFor(snapshot,path); const old=string(args,'oldString'); const replacement=string(args,'newString'); if(!old||old===replacement) throw new BrowserError('INVALID_INPUT','oldString must be nonempty and differ from newString.'); const count=text.split(old).length-1; if(count===0||count>1&&args.replaceAll!==true) throw new BrowserError('NATIVE_CONFLICT','Exact edit anchor missing or ambiguous.'); const content=args.replaceAll===true?text.split(old).join(replacement):text.replace(old,()=>replacement); return this.vfs.writeBatch([{path,bytes:utf8.encode(content)}],snapshot.revision); }
-    if (name === 'patch') return this.vfs.writeBatch(parsePatch(string(args,'patchText'),snapshot),expected??snapshot.revision);
-    if (name === 'delete_file') return this.vfs.writeBatch([{path:string(args,'path'),bytes:null}],expected??snapshot.revision);
-    if (name === 'rename_file') { const path=string(args,'path'); const newPath=canonicalPath(string(args,'newPath')); if(snapshot.files[newPath]) throw new BrowserError('NATIVE_CONFLICT','Rename target exists.'); if(path==='main.pjs'||path==='index.html') throw new BrowserError('PATH_DENIED','Native panels cannot be renamed.'); return this.vfs.writeBatch([{path:newPath,bytes:file(snapshot,path)},{path,bytes:null}],expected??snapshot.revision); }
-    if (name === 'copy_lines') { const source=bytesFor(snapshot,string(args,'sourcePath')); const targetPath=string(args,'targetPath'); const target=snapshot.files[targetPath]?bytesFor(snapshot,targetPath):''; const parts=source.match(/[^\n]*\n|[^\n]+$/g)??[]; const start=integer(args.sourceStartLine,1,1,parts.length); const end=integer(args.sourceEndLine,start,start,parts.length); const selected=parts.slice(start-1,end).join(''); const targetParts=target.match(/[^\n]*\n|[^\n]+$/g)??[]; const at=args.targetLine===undefined?targetParts.length:integer(args.targetLine,1,1,targetParts.length+1)-1; const content=targetParts.slice(0,at).join('')+selected+targetParts.slice(at).join(''); return this.vfs.writeBatch([{path:targetPath,bytes:utf8.encode(content)}],snapshot.revision); }
+    if (name === 'put_files') { if (!Array.isArray(args.files)) throw new BrowserError('INVALID_INPUT','files must be an array.'); const writes=args.files.map((row:unknown)=>{ if (!row||typeof row!=='object') throw new BrowserError('INVALID_INPUT','Invalid file entry.'); const r=row as Record<string,unknown>; if(r.encoding!=='utf8'&&r.encoding!=='base64') throw new BrowserError('INVALID_INPUT','Unknown encoding.'); return {path:string(r,'path'),bytes:r.encoding==='utf8'?utf8.encode(string(r,'content')):base64ToBytes(string(r,'content'))}; }); return this.vfs.writeBatch(writes,string(args,'expectedRevision'),context?.operationId); }
+    if (name === 'edit') { const path=string(args,'path'); const text=bytesFor(snapshot,path); const old=string(args,'oldString'); const replacement=string(args,'newString'); if(!old||old===replacement) throw new BrowserError('INVALID_INPUT','oldString must be nonempty and differ from newString.'); const count=text.split(old).length-1; if(count===0||count>1&&args.replaceAll!==true) throw new BrowserError('NATIVE_CONFLICT','Exact edit anchor missing or ambiguous.'); const content=args.replaceAll===true?text.split(old).join(replacement):text.replace(old,()=>replacement); return this.vfs.writeBatch([{path,bytes:utf8.encode(content)}],snapshot.revision,context?.operationId); }
+    if (name === 'patch') return this.vfs.writeBatch(parsePatch(string(args,'patchText'),snapshot),expected??snapshot.revision,context?.operationId);
+    if (name === 'delete_file') return this.vfs.writeBatch([{path:string(args,'path'),bytes:null}],expected??snapshot.revision,context?.operationId);
+    if (name === 'rename_file') { const path=string(args,'path'); const newPath=canonicalPath(string(args,'newPath')); if(snapshot.files[newPath]) throw new BrowserError('NATIVE_CONFLICT','Rename target exists.'); if(path==='main.pjs'||path==='index.html') throw new BrowserError('PATH_DENIED','Native panels cannot be renamed.'); return this.vfs.writeBatch([{path:newPath,bytes:file(snapshot,path)},{path,bytes:null}],expected??snapshot.revision,context?.operationId); }
+    if (name === 'copy_lines') { const source=bytesFor(snapshot,string(args,'sourcePath')); const targetPath=string(args,'targetPath'); const target=snapshot.files[targetPath]?bytesFor(snapshot,targetPath):''; const parts=source.match(/[^\n]*\n|[^\n]+$/g)??[]; const start=integer(args.sourceStartLine,1,1,parts.length); const end=integer(args.sourceEndLine,start,start,parts.length); const selected=parts.slice(start-1,end).join(''); const targetParts=target.match(/[^\n]*\n|[^\n]+$/g)??[]; const at=args.targetLine===undefined?targetParts.length:integer(args.targetLine,1,1,targetParts.length+1)-1; const content=targetParts.slice(0,at).join('')+selected+targetParts.slice(at).join(''); return this.vfs.writeBatch([{path:targetPath,bytes:utf8.encode(content)}],snapshot.revision,context?.operationId); }
     if (name === 'grep') { let regex:RE2JS; try { const pattern=string(args,'pattern'); if(pattern.length>1024) throw new Error(); regex=RE2JS.compile(pattern); } catch { throw new BrowserError('INVALID_INPUT','Invalid or unsupported bounded RE2 expression. Backreferences/lookaround are unsupported.'); } const prefix=typeof args.path==='string'?args.path.replace(/\/$/,''):''; if(prefix&&!['src','scratch','imports'].includes(prefix)) canonicalPath(prefix); const include=typeof args.include==='string'?patternRegex(args.include):undefined; const matches:{path:string;line:number;text:string}[]=[]; let total=0; for(const path of Object.keys(snapshot.files).sort()){if(prefix&&path!==prefix&&!path.startsWith(prefix+'/'))continue;if(include&&!include.test(path))continue;const bytes=snapshot.files[path]!;total+=bytes.length;if(total>8*1024*1024)throw new BrowserError('LIMIT_EXCEEDED','Search exceeds 8 MiB scan budget; narrow path/include.');let text:string;try{text=decodeText(bytes);}catch{continue;} for(const [index,line] of text.split('\n').entries())if(regex.test(line)){matches.push({path,line:index+1,text:line.slice(0,500)});if(matches.length>10000)throw new BrowserError('LIMIT_EXCEEDED','Search exceeds 10000 matches; narrow pattern.');}}const result=page(matches,args.cursor,integer(args.limit,100,1,100));return{matches:result.items,cursor:result.cursor,revision:snapshot.revision}; }
     if (name === 'list_code_definition_names') return this.definitions(snapshot,string(args,'path'));
     if (name === 'editor_undo' || name === 'editor_redo') { const panel=string(args,'panel'); if(panel!=='pjs'&&panel!=='html')throw new BrowserError('INVALID_INPUT','Unknown panel.'); await this.vfs.checkpoint(`Before ${name}`); await this.adapter.undoRedo(panel,name==='editor_undo'?'undo':'redo',snapshot.nativeRevision); return {revision:(await this.vfs.snapshot()).revision}; }

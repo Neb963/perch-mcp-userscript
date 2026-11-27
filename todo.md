@@ -250,3 +250,20 @@ See `docs/verification/epoch12-connection-repair-v0114.md`.
 - [ ] T3 real Firefox native source and T4 external agent continuity: not claimed until observed.
 
 See `docs/verification/epoch13-native-bridge-and-connection-v0115.md`.
+
+## Epoch 14 — continuous developer execution model (v0.1.16)
+
+Authoritative live inputs: SynthPin revision 33 saved/clean, native snapshot verified, gateway 0.1.7 connected. Old browser-local CSS write `4e01ad79-d630-42ab-809e-110fce6e9bce` is UNKNOWN against revision 32; Gateway `operation_status` correctly returns NOT_FOUND for that local-only ID. No real operator source was mutated during this investigation.
+
+- [x] Trace end-to-end local vs gateway operation IDs and the specific Workspace-wide `UNRESOLVED_LOCAL_WRITES` gate.
+- [x] Specify state and ownership boundaries and bounded read-only convergence in `docs/USER_SCRIPT_EXECUTION_MODEL.md`.
+- [x] Implement current-source baseline adoption on two stable native snapshots, with original UNKNOWN audit preserved; recent overlap scoped to affected paths (15s) and no effect replay.
+- [x] Make old import journals independent of native source writes; do not couple foreign Workspace history to current binding.
+- [x] Propagate Gateway IDs in new source/Save/restore journals; avoid useless remote Activity pagination for local UUIDs.
+- [x] Report actionable effective capabilities in `workspace_status`; Recovery attempts safe local convergence before operator review.
+- [x] Add live-failure-shaped synthetic tests, fault injection and negative cases; targeted local VFS harness passed 6/6.
+- [ ] Full CI strict typecheck, complete test matrix, Worker dry-run and packaged artifact hash verification.
+- [ ] Independent visual and user-flow audit after build; verify new successful baseline state and no regression.
+- [ ] Merge only after verified CI; retain real Firefox/live SynthPin mutation as a separately documented acceptance boundary.
+
+Report: `docs/verification/epoch14-continuous-source-development-v0116.md`.

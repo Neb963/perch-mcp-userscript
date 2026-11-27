@@ -2292,7 +2292,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     if (own !== generation) return;
     heading("Activity");
     p(
-      "Operation outcomes are authoritative. UNKNOWN requires reconciliation before another mutation. Cancelling a request cannot undo a dispatched provider effect.",
+      "Operation outcomes are authoritative. An unknown provider effect must not be replayed. Other operations can continue while current editor source is verified. Cancelling cannot undo a dispatched provider effect.",
       body,
       "muted",
     );
