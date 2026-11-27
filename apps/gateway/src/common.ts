@@ -263,6 +263,7 @@ export function binding(value: unknown): Binding {
   };
 }
 export interface Env {
+  SQL_TELEMETRY_ENABLED?: string;
   REGISTRY: DurableObjectNamespace;
   WORKSPACES: DurableObjectNamespace;
   OAUTH_KV: KVNamespace;

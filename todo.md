@@ -300,3 +300,6 @@ See `docs/verification/epoch15-gateway-incident-v0117.md`.
 ## Epoch 18 — durable indexed Workspace lifecycle and SQL budgets
 
 Incident confirmed by Cloudflare dashboard (5.93M rows read) and sanitized runtime exception. Preserve canonical records, identity, bindings and OAuth; no destructive schema migration. Add rebuildable lifecycle index, legacy-write dirty triggers, indexed expiry/outbox/queue/holds and transactional counters; bound maintenance batches; instrument cursor rows. Verify cold restart, rollback writes, non-idle history independence, exact effect fences and production readiness. Registry indexing and transport optimization follow independently. T4 remains blocked by exhausted daily quota until actual recovery.
+
+### Epoch 18 — Registry indexing and observability
+- Derived Registry catalog indexes expiration, entity paging, workspace-scoped grants/holds and Activity ordering/filtering; current Activity appends update the exact changed entries, while rollback writes trigger reconstruction. Canonical history and unresolved notices remain intact. Scheduled bounded cleanup; no new binding. SQL telemetry is per-invocation via AsyncLocalStorage, fixed route/query categories, no source, credentials, or durable metric writes.

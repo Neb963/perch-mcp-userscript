@@ -1,5 +1,6 @@
 import type { DurableObjectStorage } from "@cloudflare/workers-types";
-export interface SqlUsage { reads: number; writes: number; statements: number; unmetered: number }
+import { trackSql, type SqlUsage } from "./sql-meter.js";
+export type { SqlUsage } from "./sql-meter.js";
 export const WORKSPACE_JOURNAL_IDLE_KEY = "workspace-journal-idle/v1";
 /** SQLite-backed chunked records; every mutation runs within transactionSync. */
 export class SqlRecords {
@@ -13,13 +14,15 @@ export class SqlRecords {
   /** All statements consume their cursor before reading Cloudflare's counters. */
   query<T extends Record<string, string | number | null | ArrayBuffer> = Record<string, string | number | null | ArrayBuffer>>(sql: string, ...args: (string | number | null)[]): T[] {
     this.usage.statements++;
-    const cursor = this.storage.sql.exec<T>(sql, ...args);
+    let cursor;
+    try {cursor = this.storage.sql.exec<T>(sql,...args);}
+    catch(error){this.usage.unmetered++;trackSql(sql,{reads:0,writes:0,statements:1,unmetered:1});throw error;}
     try { return cursor.toArray(); }
     finally {
-      if (typeof cursor.rowsRead === "number" && typeof cursor.rowsWritten === "number") {
-        this.usage.reads += cursor.rowsRead;
-        this.usage.writes += cursor.rowsWritten;
-      } else this.usage.unmetered++;
+      const metered=typeof cursor.rowsRead==="number"&&typeof cursor.rowsWritten==="number";
+      const sample={reads:metered?cursor.rowsRead:0,writes:metered?cursor.rowsWritten:0,statements:1,unmetered:metered?0:1};
+      this.usage.reads+=sample.reads;this.usage.writes+=sample.writes;this.usage.unmetered+=sample.unmetered;
+      trackSql(sql,sample);
     }
   }
   snapshotUsage(): SqlUsage { return { ...this.usage }; }

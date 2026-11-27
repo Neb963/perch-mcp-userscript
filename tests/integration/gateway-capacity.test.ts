@@ -490,3 +490,23 @@ test("SQL cursor budgets do not scale with terminal history while idle or active
     assert.ok(invalid.reads<=5);
   } finally {await h.close();}
 });
+
+test("Registry Activity reads only one page and preserves unresolved overlay",async()=>{
+  const h=await createCapacityHarness(1);
+  try{
+    const f=h.fixtures[0]!;
+    for(let n=0;n<150;n++)await h.cycle(f);
+    const usage=async()=>await h.internal(h.registry,"/internal/sql-usage",{}) as unknown as {reads:number;writes:number;unmetered:number};
+    const before=await usage();
+    const page=await h.get("/api/v1/admin/activity");
+    const after=await usage();
+    assert.equal((page.items as unknown[]).length,100);
+    assert.ok(page.cursor);
+    assert.equal(after.unmetered,0);
+    console.log(JSON.stringify({kind:"registry-activity-budget",reads:after.reads-before.reads,writes:after.writes-before.writes}));
+    assert.ok(after.reads-before.reads<=130);
+    assert.equal(after.writes-before.writes,0);
+    const next=await h.get("/api/v1/admin/activity?cursor="+encodeURIComponent(String(page.cursor)));
+    assert.equal((next.items as unknown[]).length,50);
+  }finally{await h.close();}
+});

@@ -1,3 +1,4 @@
+import { withSqlUsage } from "./sql-meter.js";
 import { ImageTransferHandler } from "./image-transfer.js";
 import { MusicHandler } from "./media/handler.js";
 import type { DurableObjectState } from "@cloudflare/workers-types";
@@ -140,6 +141,9 @@ export class Workspace {
     });
   }
   async fetch(request: Request): Promise<Response> {
+    return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","workspace",new URL(request.url).pathname,()=>this.fetchMetered(request));
+  }
+  private async fetchMetered(request: Request): Promise<Response> {
     let response: Response;
     try {
       response = await this.route(request);
@@ -153,8 +157,10 @@ export class Workspace {
     return response;
   }
   async alarm(): Promise<void> {
-    this.expire();
-    await this.drainTerminalOutbox();
+    return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","workspace","alarm",async()=>{
+      this.expire();
+      await this.drainTerminalOutbox();
+    });
   }
   private async scheduleAlarm(retryAt?: number): Promise<void> {
     const deadlines: number[] = [];
