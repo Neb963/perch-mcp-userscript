@@ -224,7 +224,7 @@ export class NativeAdapter {
     return { identity, files, revision: await snapshotRevision(identity, files), dirty: this.dirty(), saveState: typeof this.page.perchanceSaveState === 'string' ? this.page.perchanceSaveState : 'unknown' };
   }
   getSnapshot(): Promise<NativeSnapshot> { return this.snapshot(); }
-  async applyFiles(writes: FileWrite[], expectedRevision: string): Promise<MutationResult> {
+  async applyFiles(writes: FileWrite[], expectedRevision: string, onDispatch?: () => Promise<void>): Promise<MutationResult> {
     const report = await this.probe(); if (!report.ready) throw new BrowserError('TAB_BUSY', 'Native source write interfaces not ready.'); this.assertMutationReady(); if (!report.sourceWrite) throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native source setter interfaces unavailable.');
     let expected = await this.snapshot(); if (expected.revision !== expectedRevision) throw new BrowserError('STALE_REVISION', 'Source changed before native mutation.');
     const names = new Set<string>(); for (const write of writes) { canonicalPath(write.path); if (write.path.startsWith('scratch/') || write.path.startsWith('imports/')) throw new BrowserError('PATH_DENIED', 'Not a native source path.'); if (names.has(write.path.toLowerCase())) throw new BrowserError('PATH_DENIED', 'Duplicate/colliding write path.'); names.add(write.path.toLowerCase()); if ((write.path === 'main.pjs' || write.path === 'index.html') && write.bytes === null) throw new BrowserError('PATH_DENIED', 'Native panels cannot be deleted.'); }
@@ -233,6 +233,7 @@ export class NativeAdapter {
     for (const write of writes) {
       const now = await this.snapshot(); if (now.revision !== expected.revision) return { status: committed.length ? 'PARTIAL' : 'UNKNOWN', revision: now.revision, committed, error: { code: 'STALE_REVISION', message: 'Manual/native change interrupted batch; preserved both versions.', recovery: 'Inspect checkpoint and current source. Do not replay the batch.' } };
       this.assertMutationReady();
+      if (!dispatched) await onDispatch?.(); // Durable fence before the first native effect.
       try {
         dispatched = true;
         if (write.path === 'main.pjs' || write.path === 'index.html') { const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(write.bytes!); const editor = write.path === 'main.pjs' ? this.page.modelTextEditor! : this.page.outputTemplateEditor!; await editor.setValue(text); }
