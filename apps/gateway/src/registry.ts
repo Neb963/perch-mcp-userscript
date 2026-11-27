@@ -282,7 +282,6 @@ export class Registry {
       if (response.status >= 500) {
         const event = incident("registry", new URL(request.url).pathname, response.status, error, traceId);
         // Preserve the root error even when Registry admin/diagnostics is unavailable.
-        console.error(JSON.stringify({ kind: "perch-mcp-registry-exception", ...event }));
         await persistIncident(this.env, event);
       }
       if (new URL(request.url).pathname === "/internal/health") {

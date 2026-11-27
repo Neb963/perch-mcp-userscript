@@ -276,6 +276,11 @@ export function binding(value: unknown): Binding {
   };
 }
 export interface Env {
+  CANONICAL_STORAGE_MODE?: "legacy" | "prepare" | "native";
+  PUSH_NOTIFICATIONS_ENABLED?: string;
+  BINARY_PAYLOADS_ENABLED?: string;
+  ADMISSION_BUDGET_ENABLED?: string;
+  ADMISSION_BUDGET_POLICY?: string;
   SQL_TELEMETRY_ENABLED?: string;
   REGISTRY: DurableObjectNamespace;
   WORKSPACES: DurableObjectNamespace;

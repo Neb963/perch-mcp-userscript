@@ -72,6 +72,7 @@ export class Workspace {
   private maintenance: MaintenanceIndex;
   private music: MusicHandler;
   private images: ImageTransferHandler<Operation>;
+  private terminalDrain?: Promise<void>;
   constructor(
     private state: DurableObjectState,
     private env: Env,
@@ -185,7 +186,16 @@ export class Workspace {
     if (existing === null || existing <= Date.now() || next < existing)
       await this.state.storage.setAlarm(next);
   }
-  private async drainTerminalOutbox(): Promise<void> {
+  private drainTerminalOutbox(): Promise<void> {
+    // Requests may interleave at RPC awaits. Receipt dedup remains durable;
+    // this promise only prevents duplicate concurrent drain attempts in one instance.
+    if (this.terminalDrain) return this.terminalDrain;
+    const pending = this.drainTerminalOutboxOnce();
+    this.terminalDrain = pending;
+    void pending.finally(() => { if (this.terminalDrain === pending) this.terminalDrain = undefined; }).catch(() => {});
+    return pending;
+  }
+  private async drainTerminalOutboxOnce(): Promise<void> {
     let failed = false;
     const retryAt = this.journal.pendingExists() ? this.db.get<number>("outbox-retry-at", 0) : 0;
     if (retryAt > Date.now()) {
@@ -226,7 +236,8 @@ export class Workspace {
         });
         this.db.transaction(() => {
           const current = this.db.get<Operation>("operation/" + op.operationId);
-          if (current && current.phase === op.phase && !current.terminalNotified) {
+          if (current && current.phase === op.phase && current.terminalAt === op.terminalAt &&
+              canonical(current.resolution) === canonical(op.resolution) && !current.terminalNotified) {
             current.terminalNotified = true;
             this.db.put("operation/" + current.operationId, current);
           }
@@ -270,65 +281,68 @@ export class Workspace {
       const musicKeys=maintenance.filter(row=>row.kind==="music").map(row=>row.key);
       if(imageKeys.length)this.images.expire(imageKeys);
       if(musicKeys.length)this.music.expire(musicKeys);
-      for (const op of this.journal.due(now)) {
-        const terminalCode = (
-          op.result as { error?: { code?: unknown } } | undefined
-        )?.error?.code;
-        if (
-          op.terminalAt &&
-          !op.terminalErrorCode &&
-          typeof terminalCode === "string" &&
-          /^[A-Z][A-Z0-9_]{0,63}$/.test(terminalCode)
-        ) {
-          op.terminalErrorCode = terminalCode;
-          this.db.put("operation/" + op.operationId, op);
-        }
-        if (
-          ![
-            "SUCCEEDED",
-            "REJECTED",
-            "UNKNOWN",
-            "PARTIAL",
-            "CANCELLED",
-          ].includes(op.phase) &&
-          op.deadlineMs <= now
-        ) {
-          op.phase = op.phase === "ADMITTED" ? "REJECTED" : "UNKNOWN";
-          op.result = {
-            operationId: op.operationId,
-            status: op.phase,
-            effectState: op.phase === "UNKNOWN" ? "POSSIBLE" : "NONE",
-            error: {
-              retryable: false,
-              recovery:
-                op.phase === "UNKNOWN"
-                  ? "Inspect native source and reconcile the exact operation; do not replay."
-                  : "No dispatch occurred; inspect current status before retry.",
-              code: op.phase === "UNKNOWN" ? "EFFECT_UNKNOWN" : "TIMEOUT",
-              message:
-                op.phase === "UNKNOWN"
-                  ? "Dispatched effect requires reconciliation."
-                  : "Deadline expired before dispatch.",
-            },
-          };
-          op.terminalAt = now;
-          delete op.args;
-          this.db.put("operation/" + op.operationId, op);
-        } else if (
-          op.terminalAt &&
-          op.terminalAt + 600000 <= now &&
-          op.result !== undefined
-        ) {
-          delete op.result;
-          this.db.put("operation/" + op.operationId, op);
-        }
-        if (op.terminalAt && op.terminalNotified &&
-            (!["UNKNOWN","PARTIAL"].includes(op.phase) || op.resolution || isTerminalViewportEffect(op)) &&
-            op.createdAt + 7 * 86400000 <= now)
-          this.db.delete("operation/" + op.operationId);
-      }
+      for (const op of this.journal.due(now)) this.expireOperation(op, now);
       for (const {key} of this.journal.excessRetention()) this.db.delete(key);
     });
+  }
+  /** Expire exactly one canonical record. Returns true only when retention deleted it. */
+  private expireOperation(op: Operation, now: number): boolean {
+    const terminalCode = (
+      op.result as { error?: { code?: unknown } } | undefined
+    )?.error?.code;
+    if (
+      op.terminalAt &&
+      !op.terminalErrorCode &&
+      typeof terminalCode === "string" &&
+      /^[A-Z][A-Z0-9_]{0,63}$/.test(terminalCode)
+    ) {
+      op.terminalErrorCode = terminalCode;
+      this.db.put("operation/" + op.operationId, op);
+    }
+    if (
+      ![
+        "SUCCEEDED",
+        "REJECTED",
+        "UNKNOWN",
+        "PARTIAL",
+        "CANCELLED",
+      ].includes(op.phase) &&
+      op.deadlineMs <= now
+    ) {
+      op.phase = op.phase === "ADMITTED" ? "REJECTED" : "UNKNOWN";
+      op.result = {
+        operationId: op.operationId,
+        status: op.phase,
+        effectState: op.phase === "UNKNOWN" ? "POSSIBLE" : "NONE",
+        error: {
+          retryable: false,
+          recovery:
+            op.phase === "UNKNOWN"
+              ? "Inspect native source and reconcile the exact operation; do not replay."
+              : "No dispatch occurred; inspect current status before retry.",
+          code: op.phase === "UNKNOWN" ? "EFFECT_UNKNOWN" : "TIMEOUT",
+          message:
+            op.phase === "UNKNOWN"
+              ? "Dispatched effect requires reconciliation."
+              : "Deadline expired before dispatch.",
+        },
+      };
+      op.terminalAt = now;
+      delete op.args;
+      this.db.put("operation/" + op.operationId, op);
+    } else if (
+      op.terminalAt &&
+      op.terminalAt + 600000 <= now &&
+      op.result !== undefined
+    ) {
+      delete op.result;
+      this.db.put("operation/" + op.operationId, op);
+    }
+    if (op.terminalAt && op.terminalNotified &&
+        (!["UNKNOWN","PARTIAL"].includes(op.phase) || op.resolution || isTerminalViewportEffect(op)) &&
+        op.createdAt + 7 * 86400000 <= now)
+      { this.db.delete("operation/" + op.operationId); return true; }
+    return false;
   }
   private lease(
     hash: string,
@@ -413,11 +427,11 @@ export class Workspace {
     const path = new URL(request.url).pathname,
       b = await parseBody(request);
     if (path === "/internal/sql-usage") return json(this.db.snapshotUsage());
-    if (path.startsWith("/internal/")) this.expire();
+    if (path.startsWith("/internal/") && !["/internal/status", "/internal/cancel"].includes(path)) this.expire();
     if (path === "/internal/admit") {
       const w = b.workspace as WorkspaceRecord,
         l = this.db.get<Lease>("lease");
-      if (!l || l.expiresAt <= Date.now() || l.epoch !== w.epoch)
+      if (!l || l.expiresAt <= Date.now() || l.epoch !== w.epoch || l.bindingRevision !== w.bindingRevision)
         throw new ApiError("TAB_OFFLINE", "Assigned editor is offline.", 503);
       const tool = str(b.tool, "tool", 100),
         args = b.args as Record<string, unknown>;
@@ -444,6 +458,13 @@ export class Workspace {
         createdAt: Date.now(),
       };
       this.db.transaction(() => {
+        // Argument hashing yields. The initially observed lease cannot authorize
+        // a commit after release, expiry, or a replacement document's claim.
+        const current = this.db.get<Lease>("lease");
+        if (!current || current.expiresAt <= Date.now() || current.workspaceId !== l.workspaceId ||
+            current.epoch !== l.epoch || current.bindingRevision !== l.bindingRevision ||
+            current.tabInstanceId !== l.tabInstanceId || current.secretHash !== l.secretHash)
+          throw new ApiError("STALE_EPOCH", "Lease changed during admission.", 409);
         const all = this.journal.activeStats();
         if (this.journal.pendingFull())
           throw new ApiError(
@@ -501,6 +522,10 @@ export class Workspace {
           "Operation not found in this Workspace.",
           404,
         );
+      // Ordinary status has no history maintenance dependency. Only this
+      // operation's exact deadline/result TTL may change its canonical state.
+      if (this.db.transaction(() => this.expireOperation(op, Date.now())))
+        throw new ApiError("NOT_FOUND", "Operation retention expired.", 404);
       if (path === "/internal/cancel") {
         if (op.phase === "ADMITTED") {
           op.phase = "CANCELLED";
@@ -527,6 +552,9 @@ export class Workspace {
           );
       }
       const summary = this.summary(op);
+      // A pending receipt still gets the normal durable retry path. Clean
+      // active/already-notified status reads do not enumerate outbox/history.
+      maintenance.settled = !op.terminalAt || op.terminalNotified === true;
       return json(
         path === "/internal/status" &&
           typeof b.agentId === "string" &&
@@ -706,12 +734,15 @@ export class Workspace {
       if (
         !current ||
         current.epoch !== l.epoch ||
-        current.tabInstanceId !== l.tabInstanceId
+        current.tabInstanceId !== l.tabInstanceId || current.bindingRevision !== l.bindingRevision ||
+        current.secretHash !== l.secretHash || current.expiresAt <= Date.now()
       )
         throw new ApiError("STALE_EPOCH", "Lease changed during renewal.", 409);
-      current.expiresAt = Date.now() + 180000;
+      const permissionsChanged = canonical(current.permissions) !== canonical(valid.permissions);
+      const renewalDue = current.expiresAt - Date.now() <= 120000;
+      if (renewalDue) current.expiresAt = Date.now() + 180000;
       current.permissions = valid.permissions;
-      this.db.put("lease", current);
+      if (renewalDue || permissionsChanged) this.db.put("lease", current);
       return json({
         expiresAt: current.expiresAt,
         permissions: current.permissions,
@@ -754,37 +785,45 @@ export class Workspace {
           tool: op.tool,
         });
       } catch (error) {
-        op.phase = "REJECTED";
-        op.terminalAt = Date.now();
-        op.result = {
-          error: {
+        this.db.transaction(() => {
+          const current = this.db.get<Operation>("operation/" + op.operationId);
+          // A second poll, deadline, cancel, or terminal reply may have won
+          // while Registry authorization was in flight. Never overwrite it.
+          if (!current || current.phase !== "ADMITTED" || current.epoch !== op.epoch ||
+              current.tabInstanceId !== op.tabInstanceId || current.bindingRevision !== op.bindingRevision) return;
+          current.phase = "REJECTED";
+          current.terminalAt = Date.now();
+          current.result = { error: {
             code: error instanceof ApiError ? error.code : "REVOKED",
             message: "Dispatch rejected after authorization changed.",
-          },
-        };
-        delete op.args;
-        this.db.put("operation/" + op.operationId, op);
+          } };
+          delete current.args;
+          this.db.put("operation/" + current.operationId, current);
+        });
         return json({ operations: [], expiresAt: l.expiresAt });
       }
-      // Lease may be invalidated while the registry permit was in flight.
-      const active = this.db.get<Lease>("lease");
-      if (
-        !active ||
-        active.epoch !== op.epoch ||
-        active.tabInstanceId !== op.tabInstanceId
-      )
-        throw new ApiError(
-          "STALE_EPOCH",
-          "Lease changed before dispatch.",
-          409,
-        );
-      this.db.transaction(() => {
+      // The permit RPC yields. Commit against fresh canonical phase, lease,
+      // binding and deadline in one synchronous transaction before exposure.
+      const dispatched = this.db.transaction(() => {
+        const active = this.db.get<Lease>("lease");
         const fresh = this.db.get<Operation>("operation/" + op.operationId);
-        if (fresh.phase !== "ADMITTED")
+        if (!active || active.expiresAt <= Date.now() || active.epoch !== op.epoch ||
+            active.bindingRevision !== op.bindingRevision || active.tabInstanceId !== op.tabInstanceId ||
+            active.secretHash !== l.secretHash)
+          throw new ApiError("STALE_EPOCH", "Lease changed before dispatch.", 409);
+        if (!fresh || fresh.phase !== "ADMITTED" || fresh.epoch !== op.epoch ||
+            fresh.bindingRevision !== op.bindingRevision || fresh.tabInstanceId !== op.tabInstanceId)
           throw new ApiError("CONFLICT", "Operation already consumed.", 409);
+        if (fresh.deadlineMs <= Date.now()) {
+          this.expireOperation(fresh, Date.now());
+          return;
+        }
         fresh.phase = "DISPATCHED";
         this.db.put("operation/" + fresh.operationId, fresh);
+        return fresh;
       });
+      if (!dispatched || dispatched.phase !== "DISPATCHED")
+        return json({ operations: [], expiresAt: l.expiresAt });
       return json({
         operations: [
           {
@@ -873,8 +912,16 @@ export class Workspace {
           "Binding changed during parent execution.",
           409,
         );
+      const current = this.db.get<Operation>("operation/" + op.operationId);
+      const currentLease = this.db.get<Lease>("lease");
+      if (!current || current.phase !== "RUNNING" || current.deadlineMs <= Date.now() ||
+          current.epoch !== op.epoch || current.bindingRevision !== op.bindingRevision ||
+          current.tabInstanceId !== op.tabInstanceId || !currentLease || currentLease.expiresAt <= Date.now() ||
+          currentLease.epoch !== l.epoch || currentLease.bindingRevision !== l.bindingRevision ||
+          currentLease.tabInstanceId !== l.tabInstanceId || currentLease.secretHash !== l.secretHash)
+        throw new ApiError("STALE_EPOCH", "Parent or lease changed during child authorization.", 409);
       return json({
-        permissions: op.permissions.filter(
+        permissions: current.permissions.filter(
           (p) =>
             fresh.workspace.permissions.includes(p) &&
             fresh.grant.permissions.includes(p),
@@ -940,6 +987,7 @@ export class Workspace {
             "Running mutation cannot be reported cancelled.",
             409,
           );
+        if (phase === "RUNNING" && op.phase === "RUNNING") return;
         op.phase = phase;
         if (phase !== "RUNNING") {
           const retained = this.journal.stats().resultSize;

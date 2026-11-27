@@ -322,8 +322,8 @@ Authority: docs/optimization/PERCH-MCP-OPTIMIZATION-PLAN.md and companion prompt
 
 | Phase | Dependency | Exact offline acceptance | Status |
 |---|---|---|---|
-| O01 | none | pinned runtime baseline; complete ingress and independent SQL/request/KV/alarm counters; hermetic faults/history fixtures | IN_PROGRESS |
-| O02 | O01 | idle <=10/0, invalid <=2/0, status target <=5/0; request-local authorization; awaited fencing and durable outbox | PLANNED |
+| O01 | none | pinned runtime baseline; complete ingress and independent SQL/request/KV/alarm counters; hermetic faults/history fixtures | OFFLINE_VERIFIED baseline377/377; ingress/counter extension verified |
+| O02 | O01 | idle <=10/0, invalid <=2/0, status target <=5/0; request-local authorization; awaited fencing and durable outbox | OFFLINE_VERIFIED targeted30/30+MCP10/10; status2/0 |
 | O03 | O02 | constant Activity append at1000; keyset pages; Resource point lookup independent bodies; bounded verified migration | PLANNED |
 | O04 | O03 | typed sole canonical operations, args/results separate; exact state preservation; target lifecycle <=80 reads/30 writes or explicit unmet evidence | PLANNED |
 | O05 | O04 | opt-in authenticated hibernatable notification; healthy push no idle fetch; <=60s silent-loss reconciliation; fallback | PLANNED |
@@ -331,3 +331,5 @@ Authority: docs/optimization/PERCH-MCP-OPTIMIZATION-PLAN.md and companion prompt
 | O07 | O01–O06 | local conservative admission headroom, no incident OAuth-KV writes; full offline suite/build/dryrun/CI/artifacts/report/operator handoff | PLANNED |
 
 Preparation: remote main matches baseline; readiness workflow pushes main only; PR verify has local test/build/dryrun, no deployment. Existing local checkout retained; new isolated worktree used. npm ci locked install passed. Initial baseline test invocation blocked by automatic approval review because default Miniflare Request.cf bootstrap fetched external metadata. Fixture runtime now explicitly cf:false and rejects all outbound worker requests; rerun only after this correction. No live test completed or claimed.
+
+O02 checkpoint: status now reads only requested operation and exact expired result/deadline. Status no longer expires unrelated rows. Durable pending terminal delivery remains retried. Outbox singleflight rereads exact terminal identity before ack. Admission and heartbeat revalidate lease after awaits; stale dispatch failure cannot overwrite concurrent terminal. Request-local MCP authority snapshot eliminates duplicate browser-tool Registry check; dispatch/child authority stays fresh. Local capacity30/30 and OAuth/MCP+new regression10/10 pass. Baseline branch checkpoint564ac019ea4fee39715e3ca6d2ca3db3060bd6c0 verified remote; CLI push lacked credentials, connected GitHub committed equivalent tree then local branch aligned without altering worktree. Incident independent containment12/12 passed. O03 next.

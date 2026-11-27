@@ -263,6 +263,7 @@ async function mcp(
   const authorized = await rpc<{
     workspace: WorkspaceRecord;
     agent: AgentRecord;
+    grant: { permissions: string[] };
   }>(registry(env), "/internal/authorize", { props, agentId, permissions: [] });
   const factory = () => {
     const server = new Server(
@@ -311,16 +312,21 @@ async function mcp(
           ),
           definition = toolDefinitions.find((t) => t.name === req.params.name)!;
         const needed = permissionsForTool(req.params.name, args);
-        const auth = await rpc<{
-          workspace: WorkspaceRecord;
-          grant: { permissions: string[] };
-        }>(registry(env), "/internal/authorize", {
-          props,
-          agentId,
-          permissions: needed,
-          mutating: definition.mutating,
-          tool: req.params.name,
-        });
+        // This immutable snapshot belongs to this MCP request only. Registry
+        // already checked grant/assignment/revocation; dispatch/child permits
+        // still obtain fresh Registry authority after asynchronous boundaries.
+        const auth = authorized;
+        if (!needed.every((permission) =>
+          auth.grant.permissions.includes(permission) &&
+          auth.workspace.permissions.includes(permission)))
+          throw new ApiError("SCOPE_DENIED", "Required permission was not granted.", 403);
+        if (definition.mutating && needed.some((p) =>
+          ["SAVE", "CREATE", "RENAME", "DUPLICATE", "LISTING", "DELETE",
+            "UPLOAD_PUBLIC", "MEDIA", "PRODUCTION_RESTORE"].includes(p)) &&
+          env.PROVIDER_WRITES_ENABLED !== "true" &&
+          !permitsHarNativeAction(env, req.params.name, needed))
+          throw new ApiError("UNSUPPORTED_INTERFACE",
+            "External provider effects remain disabled until live adapter acceptance.",409);
         if (
           req.params.name === "operation_status" ||
           req.params.name === "cancel_operation"

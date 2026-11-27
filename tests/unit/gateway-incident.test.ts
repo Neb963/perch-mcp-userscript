@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { incident, persistIncident, probeRegistryHealth, registryFailureReason, routeClass } from '../../apps/gateway/src/incident.js';
+import { incident, persistIncident, probeRegistryHealth, registryFailureReason, routeClass, IncidentRecorder, incidentSummary } from '../../apps/gateway/src/incident.js';
 import type { Env } from '../../apps/gateway/src/common.js';
 
 const traceId='72094c21-3272-450a-89ef-969a00b90c18';
@@ -44,9 +44,8 @@ test('incident evidence excludes source, URLs, OAuth tokens and raw error messag
     puts.push({key,value,ttl:options.expirationTtl});
   }}} as unknown as Env;
   await persistIncident(env,row);
-  assert.equal(puts.length,1);
-  assert.equal(puts[0]!.ttl,7*86400);
-  assert.doesNotMatch(puts[0]!.value,/SECRET-DO-NOT-LOG/);
+  assert.equal(puts.length,0,'infrastructure incidents never consume OAuth KV writes');
+  assert.doesNotMatch(JSON.stringify(incidentSummary()),/SECRET-DO-NOT-LOG/);
 });
 
 
@@ -108,4 +107,70 @@ test("exact provider quota signature emits connectivity-only delay, not mutation
   assert.equal(b.code,"GATEWAY_DEGRADED");
   const generic=await errorResponse(new Error("limit exceeded")).json() as Record<string,unknown>;
   assert.equal(generic.connectivityRetryAfterSeconds,undefined);
+});
+
+
+test('incident flood is bounded without SQL, KV or recurring timers',()=>{
+  const logs:string[]=[];
+  const recorder=new IncidentRecorder(value=>logs.push(value));
+  const now=1_800_000_000_000;
+  for(let i=0;i<10_000;i++) recorder.record(incident('registry','/internal/health',503,
+    new Error('SQLITE_FULL private source'),traceId,now+i),now+i);
+  assert.equal(logs.length,1);
+  const summary=recorder.summary();
+  assert.equal(summary.total,10_000);
+  assert.equal(summary.suppressed,9999);
+  assert.equal(summary.categories,1);
+  assert.equal(summary.events[0]!.count,10_000);
+  assert.equal(summary.durable,false);
+  assert.doesNotMatch(logs.join(''),/private source/);
+  recorder.record(incident('registry','/internal/health',503,new Error('SQLITE_FULL'),traceId,now+60_001),now+60_001);
+  assert.equal(logs.length,2);
+  assert.equal(JSON.parse(logs[1]!).suppressedSinceLast,9999);
+});
+
+test('independent isolates bound logs locally without claiming a global cap',()=>{
+  const logs:string[]=[];
+  const now=1_800_000_000_000;
+  const first=new IncidentRecorder(value=>logs.push(value));
+  const second=new IncidentRecorder(value=>logs.push(value));
+  for(let i=0;i<300;i++) {
+    const value=incident('worker','/token',500+i%100,new Error('timeout'),traceId,now);
+    first.record(value,now);
+    second.record(value,now);
+  }
+  assert.equal(logs.length,24,'each isolate independently emits at most12/window');
+  for(const summary of [first.summary(),second.summary()]) {
+    assert.equal(summary.categories,64);
+    assert.equal(summary.events.length,32);
+    assert.ok(summary.evictedCategories>0);
+  }
+});
+
+test('incident summary cannot mutate recorder state and logging failure is auxiliary',()=>{
+  const now=1_800_000_000_000;
+  const recorder=new IncidentRecorder(()=>{throw new Error('unavailable logs');});
+  assert.doesNotThrow(()=>recorder.record(incident('scheduled','/health',503,undefined,traceId,now),now));
+  const summary=recorder.summary();
+  summary.events[0]!.event.status=200;
+  assert.equal(recorder.summary().events[0]!.event.status,503);
+  assert.equal(recorder.summary().total,1);
+});
+
+test('untrusted Error.name is never logged even when syntactically valid',()=>{
+  const error=new Error('unavailable');
+  error.name='SecretCredential';
+  const value=incident('worker','/token',500,error,traceId);
+  assert.equal(value.errorClass,'Unknown');
+  assert.doesNotMatch(JSON.stringify(value),/SecretCredential/);
+});
+
+
+test('wall-clock rollback does not refill the incident logging window',()=>{
+  const logs:string[]=[];
+  const recorder=new IncidentRecorder(value=>logs.push(value));
+  const now=1_800_000_000_000;
+  for(let i=0;i<100;i++) recorder.record(incident('worker','/token',500+i%100,
+    new Error('timeout'),traceId,now-i),now-i);
+  assert.equal(logs.length,12);
 });
