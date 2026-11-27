@@ -34,7 +34,7 @@ test('readiness rejects malformed success bodies and projects only validated pub
   const valid={ok:true,schemaVersion:1,version:VERSION,paired:false,configured:false,
     providerWritesEnabled:false,nativeActionsEnabled:false,protocolVersions:['2026-07-28']};
   for(const body of [{},{...valid,ok:false},{...valid,paired:'false'},
-    {...valid,version:'0.0.0'},{...valid,protocolVersions:['SECRET-private-value']}]) {
+    {...valid,version:'0.0.0'},{...valid,storageSchemaVersion:'2'},{...valid,protocolVersions:[['2026-07-28']]},{...valid,protocolVersions:['SECRET-private-value']}]) {
     const result=await probeRegistryHealth(async()=>Response.json(body));
     assert.equal(result.response.status,503);
     const data=await result.response.text();

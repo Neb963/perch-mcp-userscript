@@ -19,7 +19,9 @@ export class RegistryIndex {
     const mode = options.activityStorageMode ?? "legacy";
     if (!["legacy", "prepare", "native"].includes(mode)) throw new ApiError("INCOMPATIBLE_VERSION", "Unrecognized canonical storage mode.", 409);
     this.activityMode = mode as ActivityStorageMode;
-    const tables = db.query<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('registry_index_version_v1','canonical_activity_meta_v2')");
+    const tables = db.query<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('registry_index_version_v1','canonical_activity_meta_v2','canonical_activity_source_v2','canonical_activity_v2')");
+    const canonicalTables=tables.filter(row=>row.name.startsWith("canonical_activity_"));
+    if(canonicalTables.length!==0&&canonicalTables.length!==3)throw new Error("SQLITE_RECORD_CORRUPT");
     if (mode !== "legacy" || tables.some(row => row.name === "canonical_activity_meta_v2")) this.canonicalActivity = new CanonicalActivity(db);
     if (tables.some(row => row.name === "registry_index_version_v1")) return;
     db.transaction(()=>{

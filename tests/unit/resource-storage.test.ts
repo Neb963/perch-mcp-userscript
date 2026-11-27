@@ -5,7 +5,7 @@ import type { DurableObjectStorage } from '@cloudflare/workers-types';
 import { ResourceLibrary, type LibraryState, type ResourceInput } from '../../packages/resource-library/src/index.js';
 import { SqlRecords } from '../../apps/gateway/src/sql.js';
 import { NativeResourceLibrary, resourceStorageMaintenance, resourceStorageStatus, resourceLibraryRevision } from '../../apps/gateway/src/resource-storage.js';
-import { resourceAdmin, resourceTool } from '../../apps/gateway/src/resources.js';
+import { loadLibrary, resourceAdmin, resourceTool } from '../../apps/gateway/src/resources.js';
 
 function fixture() {
   const sqlite = new DatabaseSync(':memory:');
@@ -26,7 +26,7 @@ function fixture() {
     },
   } as unknown as DurableObjectStorage;
   const db = new SqlRecords(storage);
-  return { db, queries, fail: (pattern: string) => { fail = pattern; }, close: () => sqlite.close() };
+  return { db, queries, reopen: () => new SqlRecords(storage), fail: (pattern: string) => { fail = pattern; }, close: () => sqlite.close() };
 }
 const input = (id: string, body = 'original'): ResourceInput => ({ id, kind: 'skill', body, provenance: 'Synthetic fixture', license: 'test' });
 async function source() {
@@ -299,5 +299,75 @@ test('A Resource publish loaded before native cutover cannot commit into the sta
     assert.equal(resourceStorageStatus(f.db).phase,'NATIVE');
     assert.equal(new NativeResourceLibrary(f.db).get('child').body,'second');
     assert.deepEqual(f.db.get('library'),original);
+  }finally{f.close();}
+});
+
+
+test('Resource schema presence cache excludes transactional installs and observes committed retry', async () => {
+  const f=fixture();try {
+    f.db.put('library',await source());
+    assert.equal(resourceStorageStatus(f.db).phase,'LEGACY');
+    assert.throws(()=>f.db.transaction(()=>{
+      resourceStorageMaintenance(f.db,'prepare',1);
+      assert.notEqual(resourceStorageStatus(f.db).phase,'LEGACY');
+      throw new Error('synthetic outer install rollback');
+    }),/synthetic outer install rollback/);
+    assert.equal(f.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='resource_storage_v2'").length,0);
+    assert.equal(resourceStorageStatus(f.db).phase,'LEGACY','rolled-back schema must not appear cached');
+    migrate(f.db);
+    assert.equal(resourceStorageStatus(f.db).phase,'NATIVE');
+    assert.equal(new NativeResourceLibrary(f.db).get('child').body,'second');
+  }finally{f.close();}
+});
+
+test('Committed Resource schema presence scans once per SqlRecords while native marker remains fresh', async () => {
+  const f=fixture();try {
+    f.db.put('library',await source());migrate(f.db,'prepare');
+    const reopened=f.reopen();f.queries.length=0;
+    for(let n=0;n<5;n++)assert.equal(resourceStorageStatus(reopened).phase,'VERIFY');
+    assert.equal(f.queries.filter(q=>q.sql.includes('sqlite_master')&&q.args.includes('resource_storage_v2')).length,1);
+    resourceStorageMaintenance(reopened,'native',1);
+    assert.equal(resourceStorageStatus(reopened).phase,'NATIVE','cutover marker must not be cached');
+    for(const event of ['insert','update','delete'])reopened.query(`DROP TRIGGER resource_native_guard_${event}_v2`);
+    reopened.put('library',{...(await source()),revision:999});
+    assert.throws(()=>resourceStorageStatus(reopened),/LEGACY_WRITE_AFTER_RESOURCE_CUTOVER/,'source-generation check must not be cached');
+  }finally{f.close();}
+});
+
+test('Committed Resource schema deletion fails its mandatory marker read instead of falling back', async () => {
+  const f=fixture();try {
+    f.db.put('library',await source());migrate(f.db);
+    assert.equal(resourceStorageStatus(f.db).phase,'NATIVE');
+    f.db.query('DROP TABLE resource_storage_v2');
+    assert.throws(()=>resourceStorageStatus(f.db),/no such table.*resource_storage_v2/);
+  }finally{f.close();}
+});
+
+
+test('Cold Resource marker/table loss cannot select the stale retained library snapshot', async () => {
+  for(const lost of ['marker','table'] as const) {
+    const f=fixture();try {
+      const original=await source();f.db.put('library',original);migrate(f.db);
+      const writer=new NativeResourceLibrary(f.db),before=writer.revision;
+      await writer.publish({...input('child','new native content'),dependencies:['base']},2);
+      f.db.transaction(()=>writer.commit(before));
+      if(lost==='marker')f.db.query('DELETE FROM resource_storage_v2 WHERE id=1');
+      else f.db.query('DROP TABLE resource_storage_v2');
+      const cold=f.reopen();
+      assert.throws(()=>resourceStorageStatus(cold),/RESOURCE_STORAGE_CORRUPT/);
+      await assert.rejects(()=>loadLibrary(cold),/RESOURCE_STORAGE_CORRUPT/);
+      assert.deepEqual(f.db.get('library'),original);
+    }finally{f.close();}
+  }
+});
+
+test('An empty native Resource library still requires its marker while unstarted schema remains valid', async () => {
+  const f=fixture();try {
+    resourceStorageMaintenance(f.db,'prepare',1);
+    assert.equal(resourceStorageStatus(f.db).phase,'LEGACY');
+    f.db.put('library',{schemaVersion:1,revision:0,resources:{},assignments:[]});migrate(f.db);
+    assert.deepEqual(new NativeResourceLibrary(f.db).snapshot(),{schemaVersion:1,revision:0,resources:{},assignments:[]});
+    f.db.query('DELETE FROM resource_storage_v2 WHERE id=1');
+    assert.throws(()=>resourceStorageStatus(f.reopen()),/RESOURCE_STORAGE_CORRUPT/);
   }finally{f.close();}
 });

@@ -37,6 +37,7 @@ try {
     await measure('activity-page',history,()=>h.get('/api/v1/admin/activity'));
   }
   const report={source:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),
+    sourceDirty:execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim().length>0,
     runtime:'Miniflare4.20260730.0/workerd1.20260730.1',fixture:'read main.pjs, tiny marker result; actual local SDK OAuth token and MCP HTTP; all outbound denied',
     measuredDimensions:'consumed SQL cursor rows/statements; Worker/DO invocations; KV method calls; alarm API calls; response bytes; wall proxy',
     unavailable:'provider billing/duration GB-s/physical hibernation/cold eviction/log billing DEFERRED_LIVE',startup,migration,activated,oauth,rows};

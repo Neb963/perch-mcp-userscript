@@ -47,8 +47,21 @@ function parser(): Parser {
   return { stage: 'root', token: '', escaped: false, afterComma: false, rootKeys: [], resourceIds: [], resourceRevisions: 0,
     previousRevision: 0, nextContent: 1, resources: 0, revisions: 0, rowBytes: 0, keyBytes: 0, assignments: 0, assignmentBytes: 0 };
 }
+// Cache only committed schema presence, never authority, marker data, or absence.
+// A cached table which is later dropped still fails on the mandatory marker SELECT.
+const installedSchemas = new WeakSet<SqlRecords>();
+const RESOURCE_TABLES = [
+  'resource_storage_v2', 'resource_legacy_generation_v2', 'resource_header_v2',
+  'resource_current_v2', 'resource_revision_v2', 'resource_content_v2',
+  'resource_assignment_v2', 'resource_source_digest_v2', 'resource_content_gc_v2',
+] as const;
 function installed(db: SqlRecords): boolean {
-  return db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='resource_storage_v2'").length !== 0;
+  if (installedSchemas.has(db)) return true;
+  const rows = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name IN (" + RESOURCE_TABLES.map(() => '?').join(',') + ')',...RESOURCE_TABLES);
+  if (!rows.length) return false;
+  if (rows.length !== RESOURCE_TABLES.length) return corrupt();
+  if (!db.inTransaction) installedSchemas.add(db);
+  return true;
 }
 function install(db: SqlRecords): void {
   if (installed(db)) return;
@@ -77,7 +90,12 @@ function legacyGeneration(db: SqlRecords): number {
 }
 function state(db: SqlRecords): Migration | undefined {
   const value = db.query<{ value: string }>('SELECT value FROM resource_storage_v2 WHERE id=1')[0]?.value;
-  if (value === undefined) return undefined;
+  if (value === undefined) {
+    // An installed-but-unstarted schema has no header. Every completed copy,
+    // including an empty native library, has a header and requires its marker.
+    if (db.query('SELECT generation FROM resource_header_v2 LIMIT 1').length) return corrupt();
+    return undefined;
+  }
   const s = parse<Migration>(value);
   if (!s || !['BACKFILL','VERIFY','NATIVE','RESTART','BLOCKED'].includes(s.phase) || !Number.isSafeInteger(s.generation) || s.generation < 1 || !Number.isSafeInteger(s.legacyGeneration) || s.legacyGeneration < 0 || !s.parser || !Number.isSafeInteger(s.sourcePart) || !Number.isSafeInteger(s.sourceOffset)) return corrupt();
   return s;

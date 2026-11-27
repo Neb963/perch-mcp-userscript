@@ -224,9 +224,9 @@ export async function probeRegistryHealth(read: () => Promise<Response>): Promis
       if(upstream.status!==200||!body||body.ok!==true||body.version!==VERSION||body.schemaVersion!==1||
           typeof body.paired!=='boolean'||typeof body.configured!=='boolean'||
           !Array.isArray(protocols)||protocols.length===0||protocols.length>8||
-          protocols.some(value=>!['2026-07-28','2025-11-25','2025-06-18'].includes(String(value)))||
+          protocols.some(value=>typeof value!=='string'||!['2026-07-28','2025-11-25','2025-06-18'].includes(value))||
           typeof body.providerWritesEnabled!=='boolean'||typeof body.nativeActionsEnabled!=='boolean'||
-          (body.storageSchemaVersion!==undefined&&![1,2].includes(Number(body.storageSchemaVersion)))) {
+          (body.storageSchemaVersion!==undefined&&(typeof body.storageSchemaVersion!=='number'||![1,2].includes(body.storageSchemaVersion)))) {
         const traceId=crypto.randomUUID();
         return {response:degraded(traceId,'REGISTRY_STORAGE_CORRUPT','UNKNOWN','CORE_VALIDATE','unavailable'),failure:{traceId}};
       }

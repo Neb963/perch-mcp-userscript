@@ -334,3 +334,20 @@ test("actual Registry terminal, migration, old-client paging and exact receipt d
     assert.equal(f.db.get<unknown[]>("activity").length, 1, "native terminal never rewrites retained legacy array");
   } finally { f.close(); }
 });
+test('missing native Activity metadata cannot select the retained legacy snapshot after restart',()=>{
+  for(const mutation of [
+    'DELETE FROM canonical_activity_meta_v2',
+    'DROP TABLE canonical_activity_meta_v2',
+    'DROP TABLE canonical_activity_v2',
+  ]) {
+    const f=fixture();
+    try {
+      f.db.put('activity',[event(1)]);
+      const store=new CanonicalActivity(f.db);complete(store,'native');store.append(event(2));
+      f.db.query(mutation);
+      assert.throws(()=>new RegistryIndex(new SqlRecords(f.storage),{activityStorageMode:'legacy'})
+        .activityPage(null,null,null,1),/CORRUPT/);
+      assert.equal(f.db.get<unknown[]>('activity').length,1,'no stale snapshot was promoted or changed');
+    } finally {f.close();}
+  }
+});
