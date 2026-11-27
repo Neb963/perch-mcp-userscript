@@ -300,3 +300,15 @@ test('HAR native owner and Save-access predicates are page globals; no fork on n
  }),rejectsCode('SCOPE_DENIED'));
  assert.equal(calls,0,'a nonowner must never trigger the native fork/save dialog');
 });
+
+
+test('foreign-native file snapshots remain exact for mixed empty and binary assets',async()=>{
+ const f=fixture();
+ f.files.set('foreign.bin',runInNewContext('new Uint8Array([0,255,128,17]).buffer'));
+ f.files.set('foreign-empty.bin',runInNewContext('new Uint8Array(0).buffer'));
+ const snapshot=await f.adapter.snapshot();
+ assert.deepEqual([...snapshot.files['src/foreign.bin']!],[0,255,128,17]);
+ assert.equal(snapshot.files['src/foreign-empty.bin']!.byteLength,0);
+ const spoof={byteLength:100,[Symbol.toStringTag]:'ArrayBuffer'};
+ assert.equal(copyArrayBuffer(spoof),null);
+});

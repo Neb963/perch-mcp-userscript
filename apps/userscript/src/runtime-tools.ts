@@ -38,6 +38,11 @@ export class RuntimeTools implements AdditionalTools {
   capabilityReport(context: RuntimeContext): Record<string, unknown> {
     return this.preview(context).availability();
   }
+  async preflightPreview(context: RuntimeContext): Promise<void> {
+    if (!context.envelope.permissions.includes('PREVIEW_CONTROL') &&
+        !context.envelope.permissions.includes('PREVIEW_EXECUTE')) return;
+    await this.preview(context).preflight();
+  }
   supports(name: string): boolean {
     return [
       "generate_image",

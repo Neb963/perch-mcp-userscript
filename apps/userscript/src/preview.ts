@@ -50,11 +50,21 @@ export class PreviewAdapter {
   private readonly attested = new Set<'refresh' | 'evaluate' | 'preamble'>();
   private readonly failedAttestation = new Set<'refresh' | 'evaluate' | 'preamble'>();
   private attestedFrame: HTMLIFrameElement | null = null;
+  private verifiedAt = new Map<'refresh' | 'evaluate' | 'preamble',number>();
+  private viewportResetTimer?: ReturnType<typeof setTimeout>;
+  private readonly viewportIdleMs = 45000;
+  private previewBusy = 0;
+  private readonly onFrameLoad = () => this.invalidateAttestation();
+  private invalidateAttestation(): void {
+    this.attested.clear(); this.failedAttestation.clear(); this.verifiedAt.clear();
+  }
   private syncAttestationFrame(): void {
     const frame = this.options.frame();
     if (frame !== this.attestedFrame) {
-      this.attested.clear(); this.failedAttestation.clear();
+      this.attestedFrame?.removeEventListener('load',this.onFrameLoad);
+      this.invalidateAttestation();
       this.attestedFrame = frame;
+      frame?.addEventListener('load',this.onFrameLoad);
     }
   }
   constructor(private readonly options: PreviewOptions) {}
@@ -62,6 +72,12 @@ export class PreviewAdapter {
     this.syncAttestationFrame();
     const frame = this.attestedFrame;
     if (this.options.verified?.[capability]) return;
+    // The old implementation re-sent a native handshake on *every* preview
+    // call even after attestation. Under a busy reload this intermittently
+    // reported an otherwise working interface as unsupported. Bound cache
+    // is invalidated on iframe load and expires after 15 seconds.
+    if (this.attested.has(capability) &&
+        Date.now() - (this.verifiedAt.get(capability) ?? 0) < 15000) return;
     try {
       if (!this.options.bridge?.attest || !(await this.options.bridge.attest(capability)))
         throw new ExecutionError('UNSUPPORTED_INTERFACE',
@@ -70,9 +86,11 @@ export class PreviewAdapter {
       if (this.attestedFrame !== frame)
         throw new ExecutionError('STALE_EPOCH', 'Preview iframe changed during capability attestation.');
       this.attested.add(capability);
+      this.verifiedAt.set(capability,Date.now());
       this.failedAttestation.delete(capability);
     } catch (error) {
       this.attested.delete(capability);
+      this.verifiedAt.delete(capability);
       this.failedAttestation.add(capability);
       throw error;
     }
@@ -83,7 +101,8 @@ export class PreviewAdapter {
       ? { available:true, state:'available' as const }
       : { available:false, state:'unavailable' as const, reason };
     const capability = (key: 'evaluate'|'refresh', reason: string) => {
-      if (this.options.bridge && (this.options.verified?.[key] || this.attested.has(key)))
+      if (this.options.bridge && (this.options.verified?.[key] || (this.attested.has(key) &&
+        Date.now()-(this.verifiedAt.get(key)??0)<15000)))
         return available(true, reason);
       if (!this.options.bridge?.attest || !this.options.frame()) return available(false, reason);
       return {available:false,
@@ -99,15 +118,41 @@ export class PreviewAdapter {
     };
   }
   supports(name: string): boolean { return this.availability()[name]?.available ?? false; }
+  /** Read-only preflight for workspace_status; an absent native frame is a
+   * capability result, not a Workspace-wide failure or a mutation attempt. */
+  async preflight(): Promise<void> {
+    if (!this.options.bridge || !this.options.frame()) return;
+    for (const capability of ['evaluate','refresh'] as const) {
+      try { await this.requireCapability(capability); }
+      catch { /* Detailed unavailability remains exposed in availability(). */ }
+    }
+  }
+  private async whilePreviewBusy<T>(task:()=>Promise<T>):Promise<T> {
+    this.previewBusy++;
+    try { return await task(); }
+    finally { this.previewBusy--; if(this.viewport)this.armViewportReset(); }
+  }
+  private armViewportReset(): void {
+    if (this.viewportResetTimer) clearTimeout(this.viewportResetTimer);
+    if (!this.viewport) return;
+    this.viewportResetTimer = setTimeout(() => {
+      this.viewportResetTimer = undefined;
+      if (this.previewBusy > 0) { this.armViewportReset(); return; }
+      // Restore CSS only; never perform an unattended native provider action.
+      this.restoreViewport();
+    },this.viewportIdleMs);
+    (this.viewportResetTimer as unknown as {unref?:()=>void}).unref?.();
+  }
   async call(name: string, args: Record<string, unknown>): Promise<unknown> {
+    if (name !== 'set_viewport_size' && this.viewport) this.armViewportReset();
     switch (name) {
-      case 'page_refresh': return this.refresh(body(args, 'preambleJs'));
+      case 'page_refresh': return this.whilePreviewBusy(()=>this.refresh(body(args, 'preambleJs')));
       case 'page_eval': {
         const js = body(args, 'js'), path = body(args, 'path');
         if ((js === undefined) === (path === undefined)) throw new ExecutionError('INVALID_INPUT', 'Provide exactly one of js or path.');
         const source = js ?? (this.options.readText ? await this.options.readText(path!) : undefined);
         if (source === undefined) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Workspace code-file access is unavailable.');
-        return this.evaluate(source, { reload: args.reload === true, timeoutMs: args.timeoutMs as number | undefined, resultPath: body(args, 'resultPath') });
+        return this.whilePreviewBusy(()=>this.evaluate(source, { reload: args.reload === true, timeoutMs: args.timeoutMs as number | undefined, resultPath: body(args, 'resultPath') }));
       }
       case 'set_viewport_size': return this.setViewport(args.width as number, args.height as number, args.reset === true);
       case 'preview_diagnostics': {
@@ -143,6 +188,7 @@ export class PreviewAdapter {
     return { pendingSrcChanges: this.appliedRevision !== undefined && current !== this.appliedRevision, pageFreshnessUnknown: this.appliedRevision === undefined, previewRevision: this.appliedRevision, previewGeneration: this.generation };
   }
   async refresh(preambleJs?: string): Promise<unknown> {
+    if (this.viewport) this.armViewportReset();
     if (!this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview bridge unavailable or not verified.');
     await this.requireCapability('refresh');
     if (preambleJs !== undefined) await this.requireCapability('preamble');
@@ -155,6 +201,7 @@ export class PreviewAdapter {
     return { ...receipt, ...await this.freshness() };
   }
   async evaluate(js: string, options: { reload?: boolean; timeoutMs?: number; resultPath?: string } = {}): Promise<unknown> {
+    if (this.viewport) this.armViewportReset();
     if (!this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview bridge unavailable or not verified.');
     await this.requireCapability('evaluate');
     const timeout = options.timeoutMs ?? 120_000;
@@ -270,6 +317,8 @@ export class PreviewAdapter {
     const frame = this.options.frame(), max = this.options.maxViewport ?? 16384;
     if (!frame) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native output frame is unavailable.');
     if (reset) {
+      if (this.viewportResetTimer) clearTimeout(this.viewportResetTimer);
+      this.viewportResetTimer=undefined;
       const before = this.original?.frame === frame ? this.nativeBaseline : undefined;
       this.restoreViewport();
       // Restoring our CSS is safe even if the child is frozen; it is not
@@ -312,12 +361,22 @@ export class PreviewAdapter {
     const scale = Math.min(1, available > 0 ? available / width : 1);
     frame.style.transform = `scale(${scale})`;
     this.viewport = {width,height};
-    const actual = await this.verifyViewport(frame, () => ({width,height}), 'set');
-    return {width:actual.width,height:actual.height,scale,emulationActive:true,
-      verifiedBy:'native-preview-innerWidth',measuredBrowserLimit:false,measurementAttempts:actual.attempts};
+    this.previewBusy++;
+    try {
+      const actual = await this.verifyViewport(frame, () => ({width,height}), 'set');
+      return {width:actual.width,height:actual.height,scale,emulationActive:true,
+        verifiedBy:'native-preview-innerWidth',measuredBrowserLimit:false,measurementAttempts:actual.attempts,
+        autoResetAfterIdleMs:this.viewportIdleMs};
+    } catch(error) {
+      // A failed sizing request cannot leave the human editor looking broken.
+      this.restoreViewport();
+      throw error;
+    } finally { this.previewBusy--; this.armViewportReset(); }
   }
 
   restoreViewport(): void {
+    if(this.viewportResetTimer) clearTimeout(this.viewportResetTimer);
+    this.viewportResetTimer=undefined;
     if(this.original){
       if(this.original.style===null)this.original.frame.removeAttribute('style');
       else this.original.frame.setAttribute('style',this.original.style);

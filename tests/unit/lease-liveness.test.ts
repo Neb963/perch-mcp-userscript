@@ -82,15 +82,28 @@ test("temporary heartbeat failures preserve the unexpired lease but revoked epoc
   assert.equal(f.statuses.at(-1)?.connection, "blocked");
   assert.equal(f.controller.diagnostics().reasonCode, "STALE_EPOCH");
 });
-test("persistent long-poll outage stops after bounded retries with a causal failure code", async () => {
+test("a transient outage is retried only while the existing lease remains valid", async () => {
   let calls = 0;
-  const f = fixture(async () => {
+  let f:ReturnType<typeof fixture>;
+  f = fixture(async () => {
     calls++;
-    throw new TransportError("GATEWAY_UNAVAILABLE", "synthetic network outage");
+    if(calls<=4) throw new TransportError("GATEWAY_UNAVAILABLE", "synthetic network outage");
+    f.internal.stopped = true;
+    return {operations:[],expiresAt:Date.now()+180000};
   });
-  await assert.rejects(f.internal.poll(), (e: unknown) =>
-    e instanceof TransportError && e.code === "GATEWAY_UNAVAILABLE");
-  assert.equal(calls, 3);
-  assert.equal(f.controller.diagnostics().consecutivePollFailures, 3);
-  assert.equal(f.controller.diagnostics().reasonCode, "GATEWAY_UNAVAILABLE");
+  await f.internal.poll();
+  assert.equal(calls,5,'temporary loss should not permanently stop after the third poll');
+  assert.equal(f.controller.diagnostics().consecutivePollFailures,0);
+  assert.equal(f.controller.diagnostics().reasonCode,null);
+  assert.ok(f.statuses.some(s=>s.connection==='degraded'));
+  assert.ok(f.statuses.some(s=>s.connection==='connected'));
+});
+test("persistent outage expires the lease instead of polling forever or replaying effects", async () => {
+  let calls = 0;
+  const f = fixture(async () => {calls++;throw new TransportError('GATEWAY_UNAVAILABLE','offline');});
+  f.lease.expiresAt=Date.now()+100;
+  await assert.rejects(f.internal.poll(),(e:unknown)=>
+    e instanceof TransportError&&e.code==='GATEWAY_UNAVAILABLE');
+  assert.equal(calls,1);
+  assert.equal(f.controller.diagnostics().reasonCode,'GATEWAY_UNAVAILABLE');
 });

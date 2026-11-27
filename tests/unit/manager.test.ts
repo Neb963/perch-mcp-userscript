@@ -285,7 +285,7 @@ test('unpublished Resource drafts export separately without replacing settings o
     assert.match(f.root.textContent ?? '', /Published Resources and settings are unchanged/);
 });
 
-test('Recovery shows authoritative terminal and running holds with exact operation acknowledgment',async()=>{
+test('Recovery presents a single human-readable action, no unexplained evidence input, and preserves running holds',async()=>{
  const resolutions:Record<string,unknown>[]=[];
  const f=fixture({reconcileOperation:async op=>{resolutions.push(op);}});
  const delegate=f.client.request;
@@ -299,18 +299,18 @@ test('Recovery shows authoritative terminal and running holds with exact operati
    ]
  }:delegate(method,path,body);
  await f.handle.open('Recovery');
+ assert.match(f.root.textContent??'',/Review needed/);
  assert.match(f.root.textContent??'',/running-1/);
  assert.match(f.root.textContent??'',/unknown-1/);
- assert.equal([...f.root.querySelectorAll('button')].filter(b=>b.textContent==='Inspect and resolve…').length,1);
- click(f.root,'Inspect and resolve…');
- click(f.root,'Record resolution');await tick();assert.equal(resolutions.length,0);
- const evidence=f.root.querySelector<HTMLInputElement>('[aria-label="Observed source and provider evidence (required)"]')!;
- evidence.value='Inspected exact revision and independent provider stored bytes.';
- f.root.querySelector<HTMLInputElement>('.check-row input')!.checked=true;
- click(f.root,'Record resolution');await until(()=>resolutions.length===1);
+ assert.equal(f.root.querySelectorAll('input[type=text]').length,0);
+ assert.equal(f.root.querySelectorAll('input[type=checkbox]').length,0);
+ assert.equal([...f.root.querySelectorAll('button')].filter(b=>b.textContent==='I checked the result — continue').length,1);
+ click(f.root,'I checked the result — continue');
+ await until(()=>resolutions.length===1);
  assert.equal(resolutions[0]!.operationId,'unknown-1');
  assert.equal(resolutions[0]!.epoch,3);
  assert.equal(resolutions[0]!.bindingRevision,2);
+ assert.match(String(resolutions[0]!.operatorEvidence),/acknowledged uncertain/);
  assert.equal(f.requests.some(x=>x.method!=='GET'),false);
 });
 
@@ -323,19 +323,19 @@ test('Blocked Reconnect opens Recovery instead of stranding the operator at TAB_
  }:delegate(method,path,body);
  await f.handle.open('Workspaces');
  click(f.root,'Reconnect');
- await until(()=>/Another document.s lease is active/.test(f.root.textContent??''));
+ await until(()=>/Another editor has the lease/.test(f.root.textContent??''));
  assert.match(f.root.textContent??'',/Recovery/);
  assert.match(f.root.textContent??'',/Reconnect blocked \(TAB_BUSY\)/);
 });
 
-test('Recovery presents local journal holds separately and only acknowledges selected journal',async()=>{
+test('Recovery acknowledges one local journal and never clears peers',async()=>{
  const acknowledgments:string[]=[];
  const f=fixture({
   localRecovery:async()=>({revision:'9:'+'b'.repeat(64),holds:[
    {id:'journal-a',kind:'SOURCE',state:'UNKNOWN',createdAt:1,paths:['main.pjs'],baseRevision:'old'},
    {id:'journal-b',kind:'IMPORT',state:'PARTIAL',createdAt:2,paths:['imports/x/main.pjs'],baseRevision:'old'}]}),
   resolveLocalHold:async(_workspace,journal,revision,evidence)=>{
-   assert.equal(revision,'9:'+'b'.repeat(64));assert.match(evidence,/inspected/);
+   assert.equal(revision,'9:'+'b'.repeat(64));assert.match(evidence,/acknowledged/);
    acknowledgments.push(journal);
   },
  });
@@ -347,10 +347,9 @@ test('Recovery presents local journal holds separately and only acknowledges sel
  await f.handle.open('Recovery');
  assert.match(f.root.textContent??'',/journal-a/);
  assert.match(f.root.textContent??'',/journal-b/);
- click(f.root,'Inspect local intent…');
- const evidence=f.root.querySelector<HTMLInputElement>('[aria-label="Local inspection evidence (required)"]')!;
- evidence.value='inspected source and local manifest';
- f.root.querySelector<HTMLInputElement>('.check-row input')!.checked=true;
- click(f.root,'Record local resolution');await until(()=>acknowledgments.length===1);
+ assert.equal(f.root.querySelectorAll('input[type=text]').length,0);
+ assert.equal(f.root.querySelectorAll('input[type=checkbox]').length,0);
+ click(f.root,'I checked these files — continue');
+ await until(()=>acknowledgments.length===1);
  assert.deepEqual(acknowledgments,['journal-a']);
 });

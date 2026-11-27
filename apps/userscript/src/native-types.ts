@@ -30,7 +30,10 @@ export function copyArrayBuffer(value: unknown): Uint8Array | null {
     const length: unknown = arrayBufferLength?.call(value);
     if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0) return null;
     // The native Uint8Array constructor accepts foreign-realm ArrayBuffers.
-    return new Uint8Array(value as ArrayBuffer).slice();
+    const bytes = new Uint8Array(value as ArrayBuffer);
+    // A cross-realm wrapper may be interpreted as an array-like object and
+    // silently produce an empty view. Never accept truncated or phantom bytes.
+    return bytes.byteLength === length ? bytes.slice() : null;
   } catch { return null; }
 }
 export function bytesToBase64(bytes: Uint8Array): string {

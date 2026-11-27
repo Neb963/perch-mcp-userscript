@@ -68,6 +68,13 @@ async function start(): Promise<void> {
   let closing = false;
   let manualConnectionEpoch = 0;
   let connectionQueue: Promise<void> = Promise.resolve();
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let reconnectAttempt = 0;
+  let reconnectWorkspace: string | undefined;
+  const clearReconnect = () => {
+    if(reconnectTimer)clearTimeout(reconnectTimer);
+    reconnectTimer=undefined;
+  };
   const runtime = new RuntimeTools(page, store, document);
   const lifecycle = new NativeLifecycle(adapter,page,
     new LiveLifecycleReadback(adapter),store,{externalWritesVerified:true});
@@ -76,7 +83,19 @@ async function start(): Promise<void> {
     store,
     transport,
     runtime,
-    (status) => manager?.setStatus(status),
+    (status) => {
+      manager?.setStatus(status);
+      if(status.connection==='connected'){
+        clearReconnect();reconnectAttempt=0;reconnectWorkspace=undefined;
+      }else if(status.connection==='offline' &&
+        ['GATEWAY_TIMEOUT','GATEWAY_UNAVAILABLE'].includes(controller.diagnostics().reasonCode??'') &&
+        status.workspace && !closing){
+        reconnectWorkspace=status.workspace;
+        scheduleReconnect();
+      }else if(status.connection==='blocked' || status.connection==='paused'){
+        clearReconnect();
+      }
+    },
     lifecycle,
     (message) => window.confirm(message),
   );
@@ -112,6 +131,60 @@ async function start(): Promise<void> {
     connectionQueue = action.catch(() => undefined);
     return action;
   };
+  /** Persistent, single-flight reconnect for transport-only outages. An
+   * authoritative recovery hold always wins; effects are never replayed. */
+  function scheduleReconnect(expedite=false): void {
+    if(closing || !reconnectWorkspace || reconnectTimer) return;
+    const capturedWorkspace=reconnectWorkspace,epoch=manualConnectionEpoch;
+    const delay=expedite?250:Math.min(60000,1000*2**Math.min(reconnectAttempt++,6));
+    reconnectTimer=setTimeout(async()=>{
+      reconnectTimer=undefined;
+      if(closing || epoch!==manualConnectionEpoch ||
+         reconnectWorkspace!==capturedWorkspace) return;
+      try {
+        const status=await transport.request('GET',
+          '/api/v1/admin/workspaces/'+encodeURIComponent(capturedWorkspace)+'/recovery') as
+          {action?:unknown};
+        if(status.action==='WAIT_FOR_TERMINAL' || status.action==='RECONCILE'){
+          reconnectWorkspace=undefined;
+          manager?.setStatus({connection:'blocked',workspace:capturedWorkspace,
+            reason:'A previous effect requires review. Open Recovery; no action will be replayed.'});
+          return;
+        }
+        if(status.action!=='RECONNECT'){
+          scheduleReconnect();return;
+        }
+        const w=await transport.request('GET',
+          '/api/v1/admin/workspaces/'+encodeURIComponent(capturedWorkspace)) as Record<string,unknown>;
+        if(w.id!==capturedWorkspace)throw new Error('Workspace changed while reconnecting.');
+        if(await store.get<boolean>('perch:autoconnect-stop:'+capturedWorkspace)){
+          reconnectWorkspace=undefined;return;
+        }
+        await connect(w,true,epoch);
+      }catch(error){
+        if(closing || epoch!==manualConnectionEpoch ||
+           reconnectWorkspace!==capturedWorkspace)return;
+        const code=error && typeof error==='object'&&'code'in error
+          ?String((error as {code:unknown}).code):'';
+        if(code==='EFFECT_UNKNOWN'){
+          reconnectWorkspace=undefined;
+          manager?.setStatus({connection:'blocked',workspace:capturedWorkspace,
+            reason:'The previous operation is uncertain. Open Recovery to inspect it.'});
+          return;
+        }
+        // TAB_BUSY and network interruptions are retryable *connection*
+        // states. A new source/provider operation is never dispatched here.
+      }
+      scheduleReconnect();
+    },delay);
+    (reconnectTimer as unknown as {unref?:()=>void}).unref?.();
+  }
+  window.addEventListener('online',()=>{
+    if(reconnectWorkspace){clearReconnect();scheduleReconnect(true);}
+  });
+  window.addEventListener('visibilitychange',()=>{
+    if(!document.hidden && reconnectWorkspace){clearReconnect();scheduleReconnect(true);}
+  });
   const client: ManagerClient = {
     request: (method, path, body) => transport.request(method, path, body),
     health: (origin) => transport.health(origin),
@@ -144,6 +217,7 @@ async function start(): Promise<void> {
     }),
     attach: async (workspace) => {
       manualConnectionEpoch++;
+      reconnectWorkspace=undefined;clearReconnect();reconnectAttempt=0;
       await connect(workspace, false, manualConnectionEpoch);
       if (typeof workspace.id === "string")
         await store.delete("perch:autoconnect-stop:" + workspace.id);
@@ -152,6 +226,7 @@ async function start(): Promise<void> {
       const id = controller.diagnostics().workspaceId;
       // Pause synchronously aborts the local controller before the first
       // asynchronous store write or gateway lease release can stall.
+      reconnectWorkspace=undefined;clearReconnect();reconnectAttempt=0;
       const release = controller.pause();
       let markerFailed = false;
       if (id) {
@@ -298,6 +373,7 @@ async function start(): Promise<void> {
   void resumeBoundEditor();
   window.addEventListener("pagehide", () => {
     closing = true;
+    reconnectWorkspace=undefined;clearReconnect();
     manualConnectionEpoch++;
     connectionQueue = connectionQueue.catch(() => undefined).then(() => controller.pause());
   });

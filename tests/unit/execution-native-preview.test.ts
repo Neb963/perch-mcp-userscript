@@ -168,3 +168,46 @@ test('native syntax unknown object cannot claim a clean or captured result',asyn
  assert.doesNotMatch(JSON.stringify(receipt),/fixture-secret/);
  f.dom.window.close();
 });
+
+
+test('preview capability probes are cached for the same loaded frame and invalidated on reload',async()=>{
+ const f=await fixture();
+ const attest=f.bridge.attest!.bind(f.bridge);
+ let probes=0;
+ const bridge={...f.bridge,attest:async(kind:'evaluate'|'refresh'|'preamble')=>{probes++;return attest(kind);}};
+ // spread loses prototype methods: supply the required native bridge explicitly.
+ const adapter=new PreviewAdapter({frame:()=>f.frame,revision:async()=> 'r1',
+  bridge:{attest:bridge.attest,refresh:(p)=>f.bridge.refresh(p),
+   evaluate:(js,ms)=>f.bridge.evaluate(js,ms),diagnostics:()=>f.bridge.diagnostics!()},verified:{}});
+ await adapter.preflight();
+ assert.equal(probes,2);
+ await adapter.call('page_eval',{js:'return 6 * 7;',timeoutMs:2000});
+ await adapter.call('page_eval',{js:'return 6 * 7;',timeoutMs:2000});
+ assert.equal(probes,2,'a successful frame-bound handshake is not repeated on each call');
+ f.frame.dispatchEvent(new f.dom.window.Event('load'));
+ await adapter.call('page_eval',{js:'return 6 * 7;',timeoutMs:2000});
+ assert.equal(probes,3,'iframe load invalidates native trust');
+});
+
+test('temporary viewport sizing self-restores after inactivity and on failed verification',async()=>{
+ const f=await fixture();
+ const original=f.frame.getAttribute('style');
+ const bridge={attest:async()=>true,
+  refresh:(p:string|undefined)=>f.bridge.refresh(p),
+  evaluate:(js:string,ms:number)=>f.bridge.evaluate(js,ms),
+  measureViewport:async()=>({width:parseInt(f.frame.style.width,10)||640,
+    height:parseInt(f.frame.style.height,10)||480})};
+ const adapter=new PreviewAdapter({frame:()=>f.frame,revision:async()=> 'r1',bridge,verified:{}});
+ (adapter as unknown as {viewportIdleMs:number}).viewportIdleMs=35;
+ const receipt=await adapter.call('set_viewport_size',{width:390,height:844}) as Record<string,unknown>;
+ assert.equal(receipt.emulationActive,true);
+ assert.equal(receipt.autoResetAfterIdleMs,35);
+ assert.equal(f.frame.style.width,'390px');
+ await new Promise<void>(r=>setTimeout(r,90));
+ assert.equal(f.frame.getAttribute('style'),original,'the human editor must not remain shrunken');
+ // No hidden/unknown state claimed as a successful resize.
+ const broken=new PreviewAdapter({frame:()=>f.frame,revision:async()=> 'r1',
+  bridge:{...bridge,measureViewport:async()=>{throw Error('native measurement unavailable')}}});
+ await assert.rejects(broken.call('set_viewport_size',{width:390,height:844}));
+ assert.equal(f.frame.getAttribute('style'),original,'failed viewport verification must restore CSS');
+});
