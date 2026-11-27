@@ -20,3 +20,6 @@ https://violentmonkey.github.io/types/
 https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Sharing_objects_with_page_scripts
 
 These describe supported APIs, not proof of successful integration with Perchance. P01 is the proof gate.
+## 0.2.0 notification candidate
+
+The bundled top-frame controller constructs WebSocket in the isolated userscript context, with a scoped single-use ticket offered as a subprotocol. It never puts credentials in URLs, DOM, page storage or page callbacks. No grants, CSP relaxation or local bridge were added. Healthy push sleeps until availability/heartbeat reconciliation; failure safely uses the existing authenticated HTTPS transport. Worker flag PUSH_NOTIFICATIONS_ENABLED is opt-in; no new UI enable button exists. Real Firefox/Violentmonkey content-world/CSP/background behavior and physical Cloudflare hibernation remain DEFERRED_LIVE. Synthetic bundled-script, dropped wakeup, reconnection, stale generation and permission fixtures are offline evidence only.

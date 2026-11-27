@@ -5,7 +5,7 @@ import { blocksNewLease, blocksNewMutation, isTerminalViewportEffect } from "../
 interface IndexedOperation {
   phase: string; tool: string; sequence: number; createdAt: number; deadlineMs: number;
   terminalAt?: number; terminalNotified?: boolean; resolution?: unknown; result?: unknown;
-  terminalErrorCode?: string; args?: unknown;
+  terminalErrorCode?: string; dispatchAttempt?:{id:string;reconcileAt:number}; args?: unknown;
 }
 type Key = { key: string };
 type ProjectionStats = { eligible: number; resultSize: number };
@@ -65,11 +65,15 @@ export class OperationIndex<T extends IndexedOperation> {
           const normalize = terminal && !o.terminalErrorCode && typeof error === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(error);
           const deadlines: number[] = [];
           if (active) deadlines.push(o.deadlineMs);
+          if (active && o.dispatchAttempt) {
+            if(typeof o.dispatchAttempt.id!=='string'||!Number.isSafeInteger(o.dispatchAttempt.reconcileAt))throw new Error('SQLITE_RECORD_CORRUPT');
+            deadlines.push(o.dispatchAttempt.reconcileAt);
+          }
           if (terminal && o.result !== undefined) deadlines.push(terminal + RESULT_MS);
           if (normalize) deadlines.push(0);
           if (retention !== null) deadlines.push(retention);
           this.db.query("INSERT INTO operation_index_v1 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET sequence=excluded.sequence, created=excluded.created, terminal=excluded.terminal, phase=excluded.phase, active=excluded.active, pending=excluded.pending, hold=excluded.hold, leaseBlock=excluded.leaseBlock, retention=excluded.retention, due=excluded.due, argSize=excluded.argSize, resultSize=excluded.resultSize",
-            key, o.sequence, o.createdAt, terminal, o.phase, active, pending, Number(blocksNewMutation(o)), Number(blocksNewLease(o)), retention,
+            key, o.sequence, o.createdAt, terminal, o.phase, active, pending, Number(blocksNewMutation(o)), Number(blocksNewLease(o)||(active&&!!o.dispatchAttempt)), retention,
             deadlines.length ? Math.min(...deadlines) : null, JSON.stringify(o.args ?? {}).length, JSON.stringify(o.result ?? null).length);
         }
         this.db.query("DELETE FROM operation_dirty_v1 WHERE key=?", key);
@@ -78,8 +82,17 @@ export class OperationIndex<T extends IndexedOperation> {
   }
   private select(sql: string, ...args: number[]): Key[] { this.sync(); return this.db.query<Key>(sql,...args); }
   private load(rows: Key[]): T[] { return rows.map(({key}) => { const o=this.db.get<T>(key); if(!o)throw new Error("SQLITE_RECORD_CORRUPT"); return o; }); }
+  obligationKeys():Key[] {
+    this.sync();
+    const active=this.db.query<Key>("SELECT key FROM operation_index_v1 WHERE active=1 ORDER BY sequence LIMIT 9");
+    const pending=this.db.query<Key>("SELECT key FROM operation_index_v1 WHERE pending=1 ORDER BY created LIMIT 129");
+    const held=this.db.query<Key>("SELECT key FROM operation_index_v1 WHERE hold=1 ORDER BY created LIMIT 129");
+    if(active.length>8||pending.length>128||held.length>128)throw new Error("SQLITE_RECORD_CORRUPT");
+    return [...new Map([...active,...pending,...held].map(row=>[row.key,row])).values()];
+  }
   activeStats(): {argSize:number}[] {this.sync();return this.db.query<{argSize:number}>("SELECT argSize FROM operation_index_v1 WHERE active=1 ORDER BY sequence LIMIT 9");}
   running():boolean {return this.select("SELECT key FROM operation_index_v1 WHERE active=1 AND phase IN ('DISPATCHED','RUNNING') ORDER BY sequence LIMIT 1").length>0;}
+  admittedExists():boolean {return this.select("SELECT key FROM operation_index_v1 WHERE active=1 AND phase='ADMITTED' ORDER BY sequence LIMIT 1").length>0;}
   nextAdmitted():T|undefined {return this.load(this.select("SELECT key FROM operation_index_v1 WHERE active=1 AND phase='ADMITTED' ORDER BY sequence LIMIT 1"))[0];}
   pendingKeys():Key[] {return this.select("SELECT key FROM operation_index_v1 WHERE pending=1 ORDER BY created LIMIT 32");}
   pendingExists(): boolean { return this.select("SELECT key FROM operation_index_v1 WHERE pending=1 ORDER BY created LIMIT 1").length>0; }

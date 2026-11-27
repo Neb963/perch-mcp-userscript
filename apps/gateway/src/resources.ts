@@ -20,13 +20,18 @@ import {
   str,
 } from "./common.js";
 import { SqlRecords } from "./sql.js";
-export async function loadLibrary(db: SqlRecords): Promise<ResourceLibrary> {
+import {
+  NativeResourceLibrary, resourceLibraryIsNative, resourceLibraryRevision,
+} from "./resource-storage.js";
+export async function loadLibrary(db: SqlRecords): Promise<ResourceLibrary | NativeResourceLibrary> {
+  if (resourceLibraryIsNative(db)) return new NativeResourceLibrary(db);
   const saved = db.get<LibraryState | undefined>("library");
+  if (saved === null) throw new ResourceError("INCOMPATIBLE_VERSION", "Invalid resource snapshot");
   const library = new ResourceLibrary(saved);
-  if (!saved) {
+  if (saved === undefined) {
     await library.seed(defaultResources);
     db.transaction(() => {
-      if (!db.get("library")) db.put("library", library.snapshot());
+      if (db.get("library") === undefined) db.put("library", library.snapshot());
     });
     return new ResourceLibrary(db.get<LibraryState>("library"));
   }
@@ -87,7 +92,7 @@ export async function resourceAdmin(
     reauthorize();
     if (request.method === "GET") {
       if (path === prefix)
-        return json(page(library.list().map(metadata), url, library.revision));
+        return json(page((library instanceof NativeResourceLibrary ? library.listMetadata() : library.list()).map(metadata), url, library.revision));
       if (path === prefix + "/export")
         return new Response(library.exportZip() as BodyInit, {
           headers: {
@@ -99,7 +104,7 @@ export async function resourceAdmin(
         });
       if (path === prefix + "/assignments")
         return json(
-          page(library.snapshot().assignments, url, library.revision),
+          page(library instanceof NativeResourceLibrary ? library.assignments() : library.snapshot().assignments, url, library.revision),
         );
       const m = /^\/api\/v1\/admin\/resources\/([a-z0-9-]+)(\/history)?$/.exec(
         path,
@@ -107,7 +112,7 @@ export async function resourceAdmin(
       if (m)
         return json(
           m[2]
-            ? page(library.history(m[1]!).map(metadata), url, library.revision)
+            ? page((library instanceof NativeResourceLibrary ? library.historyMetadata(m[1]!) : library.history(m[1]!)).map(metadata), url, library.revision)
             : library.get(m[1]!),
         );
       throw new ApiError("NOT_FOUND", "Resource route not found.", 404);
@@ -163,7 +168,7 @@ export async function resourceAdmin(
       );
       result = {
         revision: library.revision,
-        items: library.snapshot().assignments,
+        items: library instanceof NativeResourceLibrary ? library.assignments() : library.snapshot().assignments,
       };
     } else if (path === prefix) {
       result = await library.publish(b.resource as ResourceInput, "absent");
@@ -194,8 +199,9 @@ export async function resourceAdmin(
     }
     db.transaction(() => {
       reauthorize();
-      const current = db.get<LibraryState>("library");
-      revision(before, current.revision);
+      if (!(library instanceof NativeResourceLibrary) && resourceLibraryIsNative(db))
+        throw new ApiError("RESOURCE_CONFLICT", "Resource storage changed during the request; retry against the current library.", 409);
+      revision(before, resourceLibraryRevision(db));
       const repeat = db.get<{ hash: string; result: unknown; expires: number }>(
         "idempotency/" + key,
       );
@@ -212,7 +218,8 @@ export async function resourceAdmin(
           409,
         );
       }
-      db.put("library", library.snapshot());
+      if (library instanceof NativeResourceLibrary) library.commit(before);
+      else db.put("library", library.snapshot());
       db.put("idempotency/" + key, {
         hash,
         result,
@@ -282,7 +289,8 @@ export async function resourceTool(
         : name === "get_instructions"
           ? "instruction"
           : undefined;
-  const rows = l.list(context, kind);
+  const rows = l instanceof NativeResourceLibrary && name !== "get_instructions" && name !== "search_documentation"
+    ? l.listMetadata(context, kind) : l.list(context, kind);
   if (name === "get_instructions") {
     if (new TextEncoder().encode(JSON.stringify(rows)).byteLength <= 200000)
       return { items: rows, libraryRevision: l.revision };

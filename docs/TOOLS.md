@@ -52,3 +52,11 @@ JSON structured result {operationId,status,revision?,effectState,data?,error?:{c
 Examples: read({path:"main.pjs",limit:50}); edit({path:"index.html",oldString:"<h1>Old</h1>",newString:"<h1>New</h1>"}); page_eval({js:"return document.title"}); save_generator({intendedRevision:"<revision from workspace_status>"}). Full generated schema/examples and tool docs required prior to release. Never advertise nonfunctional tools as enabled; catalog can expose availability with reason. Mandatory parity remains incomplete until verified, even if tool is hidden.
 
 The self-contained supplement [TOOL_PARITY_DETAILS.md](TOOL_PARITY_DETAILS.md) records additional original behavioral requirements, limitations and example calls. It is mandatory input for implementation and schema generation. The supplied original archive is not needed by the coding agent.
+
+## Quota-conscious file workflows — 0.2.0
+
+Prefer existing put_files for a bounded coherent file set: it requires expectedRevision, validates every path/encoding/size before effects, retains checkpoint/partial-outcome behavior and does not Save. Current bounds remain64files/256KiB decoded aggregate. It is not an arbitrary nested privileged RPC. Use read/glob/grep paging and compact results; do not replace uncertain child effects with automatic retries.
+
+The reproducible10-file fixture compares ten1KiB write lifecycles to one put_files with the same10240decodedbytes and per-file outcomes. It includes actual local MCP/OAuth access validation, RUNNING, terminal receipt and one operation_status per lifecycle, and shows90% fewer measured SQL rows and requests. Startup/OAuth issuance/migration/deferred cleanup are separate costs. See scripts/benchmark-batch.ts and the final report for exact candidate numbers.
+
+On local admission-budget rejection, inspect operation_status for existing handles and manager Recovery; do not loop new workspace_status operations when new admission is restricted. Previously admitted reporting/completion and admin recovery remain available unless provider storage itself fails. No new public tools or weaker permissions were introduced.

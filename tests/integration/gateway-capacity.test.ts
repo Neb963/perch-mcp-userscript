@@ -493,9 +493,9 @@ test("SQL cursor budgets do not scale with terminal history while idle or active
     assert.ok(registryLast.reads<=registryFirst.reads+20,"Registry ordinary operation cost must not scale with history");
     assert.ok(lastCycle.reads<=firstCycle.reads+20, "ordinary cycle history must not amplify reads");
     assert.ok(idleAfter.reads<=idleBefore.reads+10, "idle history must not amplify reads");
-    assert.ok(idleAfter.reads<=10 && active.reads<=40 && status.reads<=35);
-    assert.ok(idleAfter.writes<=2 && active.writes<=2 && invalid.writes===0);
-    assert.ok(invalid.reads<=5);
+    assert.ok(idleAfter.reads<=10 && active.reads<=25 && status.reads<=5);
+    assert.ok(idleAfter.writes===0 && active.writes===0 && invalid.writes===0);
+    assert.ok(invalid.reads<=2);
   } finally {await h.close();}
 });
 
@@ -512,7 +512,7 @@ test("Registry Activity reads only one page and preserves unresolved overlay",as
     assert.ok(page.cursor);
     assert.equal(after.unmetered,0);
     console.log(JSON.stringify({kind:"registry-activity-budget",reads:after.reads-before.reads,writes:after.writes-before.writes}));
-    assert.ok(after.reads-before.reads<=130);
+    assert.ok(after.reads-before.reads<=110);
     assert.equal(after.writes-before.writes,0);
     const next=await h.get("/api/v1/admin/activity?cursor="+encodeURIComponent(String(page.cursor)));
     assert.equal((next.items as unknown[]).length,50);

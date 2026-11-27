@@ -75,7 +75,7 @@ test("newer Registry/Workspace schemas reject downgrade without rewriting data",
   const f = fixture();
   try {
     const records = new SqlRecords(f.storage);
-    records.put("core", { schemaVersion: 2, revision: 1 });
+    records.put("core", { schemaVersion: 3, revision: 1 });
     const registry = new Registry(f.state, {} as Env);
     const response = await registry.fetch(
       new Request("https://internal/internal/health"),
@@ -83,7 +83,7 @@ test("newer Registry/Workspace schemas reject downgrade without rewriting data",
     assert.equal(response.status, 409);
     assert.equal(
       (records.get("core") as { schemaVersion: number }).schemaVersion,
-      2,
+      3,
     );
     records.put("schema", 2);
     assert.throws(() => new Workspace(f.state, {} as Env), /schema is newer/);
@@ -289,7 +289,7 @@ test("Activity preserves an old unresolved hold beyond the rolling terminal wind
       issuer: "https://unit.test",
       paired: true,
       adminHash: await digest(credential),
-      executionHash: "fixture",
+      executionHash: "a".repeat(64),
       browserInstallationId: "fixture",
       credentialEpoch: 1,
     });
@@ -347,7 +347,7 @@ test("Registry safely repairs exactly a legacy terminal viewport writer reservat
     const credential='legacy-fixture-execution-credential';
     const base={
       schemaVersion:1,revision:12,policyRevision:1,paused:false,issuer:'https://gateway.test',
-      paired:true,credentialEpoch:1,executionHash:await digest(credential),
+      paired:true,credentialEpoch:1,adminHash:"b".repeat(64),executionHash:await digest(credential),
       browserInstallationId:'fixture-browser'
     };
     rows.put('core',base);
@@ -473,7 +473,8 @@ test("persisted Registry authority does not evaluate invalid deployment defaults
   try {
     const db = new SqlRecords(f.storage);
     const core = { schemaVersion: 1, revision: 7, policyRevision: 1,
-      paused: false, issuer: "https://fixture.example", paired: true, credentialEpoch: 1 };
+      paused: false, issuer: "https://fixture.example", paired: true, credentialEpoch: 1,
+      adminHash:"a".repeat(64),executionHash:"b".repeat(64),browserInstallationId:"synthetic-browser" };
     db.put("core", core);
     const registry = new Registry(f.state, { ISSUER_URL: "not a URL" } as Env);
     const response = await registry.fetch(new Request("https://internal/internal/health"));

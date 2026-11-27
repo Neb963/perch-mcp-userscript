@@ -12,9 +12,10 @@ export interface CapacityFixture {
 export async function createCapacityHarness(
   count: number,
   budgetOverrides: Record<string, string> = {},
+  fixtureOptions: { entryPoint?: string } = {},
 ) {
   const bundle = await build({
-    entryPoints: ["apps/gateway/src/index.ts"],
+    entryPoints: [fixtureOptions.entryPoint ?? "apps/gateway/src/index.ts"],
     bundle: true,
     write: false,
     format: "esm",
@@ -25,7 +26,7 @@ export async function createCapacityHarness(
   });
   const base = "https://capacity.test",
     bootstrap = "capacity-test-".padEnd(64, "x");
-  const mf = new Miniflare({
+  const mf = new Miniflare({ cf: false, outboundService: () => { throw new Error("OFFLINE_FIXTURE_NETWORK_DENIED"); },
     modules: true,
     script: bundle.outputFiles[0]!.text,
     compatibilityDate: "2026-07-30",

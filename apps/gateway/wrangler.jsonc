@@ -16,12 +16,16 @@
   ],
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
   "vars": {
-    "SQL_TELEMETRY_ENABLED": "true",
+    "SQL_TELEMETRY_ENABLED": "false",
+    "CANONICAL_STORAGE_MODE": "legacy",
+    "PUSH_NOTIFICATIONS_ENABLED": "false",
+    "BINARY_PAYLOADS_ENABLED": "false",
+    "ADMISSION_BUDGET_ENABLED": "false",
     "PROVIDER_WRITES_ENABLED": "false",
     "NATIVE_ACTIONS_ENABLED": "true",
     "ALLOWED_ORIGINS": "https://perchance.org",
   },
   "secrets": { "required": ["BOOTSTRAP_SECRET"] },
-  "observability": { "enabled": true, "redact_query_string": true, "logs": { "enabled": true, "head_sampling_rate": 1, "invocation_logs": true } },
+  "observability": { "enabled": true, "redact_query_string": true, "logs": { "enabled": true, "head_sampling_rate": 1, "invocation_logs": false } },
   "triggers": { "crons": ["*/5 * * * *"] },
 }

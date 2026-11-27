@@ -5,7 +5,7 @@ import { resolveNativePageRealm } from "./page-context.js";
 import { reconnectCandidate } from "./autoconnect.js";
 import { isRetryableGatewayFailure } from "./connection-failures.js";
 import { GMStore } from "./storage.js";
-import { GatewayTransport, gatewayOrigin } from "./transport.js";
+import { GatewayTransport, TransportError, gatewayOrigin } from "./transport.js";
 import { BrowserController } from "./controller.js";
 import { DocumentDraftStore } from "./resource-drafts.js";
 import { RuntimeTools } from "./runtime-tools.js";
@@ -74,6 +74,7 @@ async function start(): Promise<void> {
   let reconnectWorkspace: string | undefined;
   let bootstrapPhase = 'INIT';
   let bootstrapCode: string | null = null;
+  let bootstrapConnectivityRetryable: boolean | null = null;
   let bootstrapWorkspace: string | null = null;
   let bootstrapTimer: ReturnType<typeof setTimeout> | undefined;
   let bootstrapRunning = false;
@@ -107,7 +108,8 @@ async function start(): Promise<void> {
         bootstrapRetryAttempt=0;
         clearReconnect();reconnectAttempt=0;reconnectWorkspace=undefined;
       }else if(status.connection==='offline' &&
-        isRetryableGatewayFailure(controller.diagnostics().reasonCode??'') &&
+        isRetryableGatewayFailure(controller.diagnostics().reasonCode??'',
+          controller.diagnostics().connectivityRetryable ?? undefined) &&
         status.workspace && !closing){
         reconnectWorkspace=status.workspace;
         scheduleReconnect();
@@ -187,6 +189,12 @@ async function start(): Promise<void> {
            reconnectWorkspace!==capturedWorkspace)return;
         const code=error && typeof error==='object'&&'code'in error
           ?String((error as {code:unknown}).code):'';
+        if(error instanceof TransportError && error.connectivityRetryable===false){
+          reconnectWorkspace=undefined;
+          manager?.setStatus({connection:'blocked',workspace:capturedWorkspace,
+            reason:'Gateway storage or configuration needs repair. Automatic connection retries stopped; inspect readiness and diagnostics.'});
+          return;
+        }
         if(code==='EFFECT_UNKNOWN'){
           reconnectWorkspace=undefined;
           manager?.setStatus({connection:'blocked',workspace:capturedWorkspace,
@@ -215,7 +223,7 @@ async function start(): Promise<void> {
     diagnostics: () => ({
       ...transport.diagnostics(),
       browser: {...controller.diagnostics(),
-        bootstrapPhase,bootstrapCode,bootstrapWorkspace,
+        bootstrapPhase,bootstrapCode,bootstrapWorkspace,bootstrapConnectivityRetryable,
         reconnectPending:!!reconnectTimer, reconnectAttempt},
       preview: runtime.diagnostics(),
     }),
@@ -352,7 +360,7 @@ async function start(): Promise<void> {
     if(transport.connectivityRetryDelayMs()>0){retryNativeBootstrap();return;}
     bootstrapRunning=true;
     const epoch = manualConnectionEpoch;
-    bootstrapPhase='NATIVE_EDITOR';bootstrapCode=null;bootstrapWorkspace=null;
+    bootstrapPhase='NATIVE_EDITOR';bootstrapCode=null;bootstrapWorkspace=null;bootstrapConnectivityRetryable=null;
     let matchedWorkspaceId: string | undefined;
     manager?.setStatus({
       connection: "connecting",
@@ -424,12 +432,17 @@ async function start(): Promise<void> {
       bootstrapCode=code;
       bootstrapWorkspace=matchedWorkspaceId??bootstrapWorkspace;
       transport.recordBootstrapFailure(bootstrapPhase,code);
-      const temporary=isRetryableGatewayFailure(code);
+      const connectivityRetryable=error instanceof TransportError ? error.connectivityRetryable : undefined;
+      bootstrapConnectivityRetryable=connectivityRetryable??null;
+      const temporary=isRetryableGatewayFailure(code,connectivityRetryable);
       if(temporary)retryNativeBootstrap();
+      else if(connectivityRetryable===false && bootstrapTimer){clearTimeout(bootstrapTimer);bootstrapTimer=undefined;}
       manager?.setStatus({
-        connection: ["EFFECT_UNKNOWN","TAB_BUSY"].includes(code) ? "blocked" : "offline",
+        connection: connectivityRetryable===false || ["EFFECT_UNKNOWN","TAB_BUSY"].includes(code) ? "blocked" : "offline",
         workspace: bootstrapWorkspace??undefined,
-        reason: temporary ? `Gateway unavailable (${code}). Connection will retry automatically; no source or provider operation will be repeated.`
+        reason: connectivityRetryable===false
+          ? 'Gateway storage or configuration needs repair. Automatic connection retries stopped; inspect readiness and diagnostics.'
+          : temporary ? `Gateway unavailable (${code}). Connection will retry automatically; no source or provider operation will be repeated.`
           : code === "EFFECT_UNKNOWN"
           ? "An unresolved Gateway effect prevents a new lease. Open Recovery for the exact held operation. Never repeat the unknown effect or re-pair to clear it."
           : code === "TAB_BUSY"

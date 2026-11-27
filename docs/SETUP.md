@@ -17,3 +17,9 @@ Manager provides global kill switch, per-Workspace pause, disconnect/rebind, gra
 
 ## Usability acceptance
 Fresh owner can deploy with no local daemon/CLI on supported dashboard path; target <=10 minutes excluding account creation and provider consent, measured not guaranteed. After pairing, creating another connector requires no Cloudflare configuration and <=5 manager actions before external client setup. Every copy action gives exact value and clear feedback. Error state offers direct next action. Accessible keyboard/focus and one-scroll layout at 1024x768 and 1920x1080. No double scroll, overflow, page overlay intercepting editor outside open manager. Native editor remains operable when gateway unavailable.
+
+## Updating this installation to the 0.2.0 candidate
+
+The existing installation actually auto-deploys main and runs a production readiness workflow. The optimization branch/PR is deliberately unmerged; the implementation agent must not merge, deploy, preview or probe production. The Operator owns release authorization and live acceptance. Use the exact candidate RELEASE.json/sourceCommit and SHA256SUMS, preserve existing bindings/named DOs/OAuth/credentials, and follow ../OPERATOR-ACCEPTANCE.md. No re-pair/reset/new installation is required.
+
+Candidate defaults: CANONICAL_STORAGE_MODE=legacy; PUSH_NOTIFICATIONS_ENABLED=false; BINARY_PAYLOADS_ENABLED=false; ADMISSION_BUDGET_ENABLED=false; SQL_TELEMETRY_ENABLED=false. Deploy and verify ordinary compatibility before separate operator-approved storage preparation/cutover and feature activation. Disabling flags after cutover retains native readers; it does not permit an old Worker downgrade. The conservative admission model needs measured background/cleanup/envelope configuration and is more restrictive than observed small-operation cost.

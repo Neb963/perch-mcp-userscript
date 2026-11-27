@@ -1,4 +1,4 @@
-import { Unzip, UnzipInflate, strToU8, zipSync } from 'fflate';
+import { Unzip, UnzipInflate, strToU8, zipSync, deflateSync, type Zippable } from 'fflate';
 
 export type ResourceKind = 'skill' | 'workflow' | 'instruction' | 'document';
 export type ScopeType = 'global' | 'workspace' | 'agent';
@@ -63,6 +63,13 @@ function normalize(input: ResourceInput): Required<Omit<ResourceInput, 'upstream
 function asInput(resource: Resource): ResourceInput {
   return { id: resource.id, kind: resource.kind, title: resource.title, description: resource.description, body: resource.body, files: clone(resource.files), enabled: resource.enabled, dependencies: [...resource.dependencies], provenance: resource.provenance, license: resource.license, ...(resource.upstreamVersion === undefined ? {} : { upstreamVersion: resource.upstreamVersion }) };
 }
+/** Validate a persisted immutable revision without rewriting missing fields or content. */
+export function validateResourceRevision(value: unknown, id: string, previousRevision = 0): asserts value is Resource {
+  if (!record(value) || value.id !== id || !idPattern.test(id) || forbiddenKeys.has(id) || !Number.isSafeInteger(value.revision) || Number(value.revision) <= previousRevision || typeof value.hash !== 'string' || !/^[0-9a-f]{64}$/.test(value.hash) || typeof value.customized !== 'boolean' || typeof value.deleted !== 'boolean') fail('INVALID_RESOURCE', 'Invalid persisted Resource revision');
+  normalize(asInput(value as unknown as Resource));
+}
+/** The exact public input projection used to create a new immutable revision. */
+export function resourceAsInput(resource: Resource): ResourceInput { return asInput(resource) }
 function active(state: LibraryState, id: string): Resource | undefined { const rows = Object.hasOwn(state.resources, id) ? state.resources[id] : undefined; return rows?.[rows.length - 1] }
 function validateGraph(state: LibraryState): void {
   const visited = new Set<string>(), visiting = new Set<string>();
@@ -235,14 +242,21 @@ export class ResourceLibrary {
     this.expected(expectedLibraryRevision); if (result.length) this.commit(next); return clone(result);
   }
   exportZip(): Uint8Array {
-    const files: Record<string, Uint8Array> = {}, resources: unknown[] = [];
+    const files: Zippable = {}, resources: unknown[] = [];
+    const add = (path: string, text: string) => {
+      const data = strToU8(text);
+      // Our own output must obey the same expansion-ratio guard as imports.
+      // The archive and total-byte limits remain unchanged.
+      const compressed = data.length > RESOURCE_LIMITS.ratio ? deflateSync(data, { level: 6 }) : undefined;
+      files[path] = compressed && data.length > Math.max(1, compressed.length) * RESOURCE_LIMITS.ratio ? [data, { level: 0 }] : data;
+    };
     for (const resource of this.list()) {
       const input = asInput(resource), { body, files: refs, ...metadata } = input, path = `resources/${resource.id}/body.md`, refPaths: Record<string, string> = {};
-      files[path] = strToU8(body);
-      for (const [name, content] of Object.entries(refs ?? {})) { const refPath = `resources/${resource.id}/refs/${name}`; files[refPath] = strToU8(content); refPaths[name] = refPath }
+      add(path, body);
+      for (const [name, content] of Object.entries(refs ?? {})) { const refPath = `resources/${resource.id}/refs/${name}`; add(refPath, content); refPaths[name] = refPath }
       resources.push({ id: input.id, kind: input.kind, path, metadata: Object.fromEntries(Object.entries(metadata).filter(([key]) => key !== 'id' && key !== 'kind')), files: refPaths });
     }
-    files['manifest.json'] = strToU8(JSON.stringify({ schemaVersion: 1, packageId: 'perch-mcp-export', libraryRevision: this.state.revision, resources }, null, 2));
+    add('manifest.json', JSON.stringify({ schemaVersion: 1, packageId: 'perch-mcp-export', libraryRevision: this.state.revision, resources }, null, 2));
     return zipSync(files, { level: 6 });
   }
 }

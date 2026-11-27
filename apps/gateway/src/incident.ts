@@ -1,7 +1,7 @@
 import type { ExecutionContext } from '@cloudflare/workers-types';
 import { ApiError, VERSION, type Env } from './common.js';
 
-/** Durable, secret-free incident evidence outside the Registry failure domain. */
+/** Secret-free incident evidence outside the Registry and OAuth storage domains. */
 export type IncidentArea = 'worker' | 'registry' | 'scheduled';
 export type IncidentRoute = 'health' | 'registry-admin' | 'oauth' | 'mcp' | 'tab' | 'other';
 export interface Incident {
@@ -16,7 +16,6 @@ export interface Incident {
   causeClass: string;
   site: string | null;
 }
-const lastPersistentIncident = new Map<string, number>();
 const TRACE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function routeClass(path: string): IncidentRoute {
@@ -28,8 +27,10 @@ export function routeClass(path: string): IncidentRoute {
   return 'other';
 }
 function safeClass(value: unknown): string {
-  return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,47}$/.test(value)
-    ? value : 'Unknown';
+  // A syntactically valid Error.name can still contain a credential.
+  return typeof value === 'string' && ['Error', 'TypeError', 'RangeError',
+    'SyntaxError', 'ReferenceError', 'URIError', 'EvalError', 'ApiError',
+    'ToolError', 'DOMException', 'AggregateError'].includes(value) ? value : 'Unknown';
 }
 function cause(error: unknown): { errorClass: string; causeClass: string; site: string | null } {
   if (!(error instanceof Error)) return { errorClass: 'Unknown', causeClass: 'Unknown', site: null };
@@ -57,27 +58,82 @@ export function incident(
     ...cause(error) };
 }
 
-/** Console first, independent KV second. No dependency on Registry, no recursive failures. */
-export async function persistIncident(env: Env, value: Incident): Promise<void> {
-  const key = `${value.area}/${value.route}/${value.status}/${value.causeClass}`;
-  const now = Date.now();
-  // Bound KV writes during prolonged outages. Console retains every emitted incident.
-  if ((lastPersistentIncident.get(key) ?? 0) + 60_000 > now) return;
-  lastPersistentIncident.set(key, now);
-  if (lastPersistentIncident.size > 96) lastPersistentIncident.clear();
-  try {
-    await env.OAUTH_KV.put(
-      `infra-incident/v1/${value.at}/${value.traceId}`,
-      JSON.stringify(value),
-      { expirationTtl: 7 * 86400 },
-    );
-  } catch {
-    console.error(JSON.stringify({ kind: 'infra-incident-storage-unavailable', traceId: value.traceId }));
+/**
+ * Isolate-local failure bulkhead. It never writes OAuth KV or calls SQL, and its
+ * bounded summary is deliberately not durable or an account-wide rate limit.
+ * Important first occurrences retain a trace; repeated faults retain counts.
+ * No timer runs while the isolate is idle.
+ */
+export class IncidentRecorder {
+  private windowStart: number | undefined;
+  private emitted = 0;
+  private suppressed = 0;
+  private total = 0;
+  private evictedCategories = 0;
+  private readonly categories = new Map<string, {
+    event: Incident; count: number; suppressed: number; lastEmittedAt: number | null;
+  }>();
+  constructor(private readonly emit: (value: string) => void = value => console.error(value)) {}
+
+  record(value: Incident, now = Date.now()): void {
+    // All cardinality-bearing values are fixed classes, never IDs or raw text.
+    const key = `${value.area}/${value.route}/${value.status}/${value.causeClass}`;
+    if (this.windowStart === undefined || now - this.windowStart >= 60_000) {
+      this.windowStart = now;
+      this.emitted = 0;
+    }
+    this.total = Math.min(Number.MAX_SAFE_INTEGER, this.total + 1);
+    let category = this.categories.get(key);
+    if (!category) {
+      if (this.categories.size >= 64) {
+        this.categories.delete(this.categories.keys().next().value!);
+        this.evictedCategories = Math.min(Number.MAX_SAFE_INTEGER, this.evictedCategories + 1);
+      }
+      category = {event: value, count: 0, suppressed: 0, lastEmittedAt: null};
+      this.categories.set(key, category);
+    }
+    category.event = value;
+    category.count = Math.min(Number.MAX_SAFE_INTEGER, category.count + 1);
+    if (this.emitted >= 12 || (category.lastEmittedAt !== null &&
+      now - category.lastEmittedAt < 60_000)) {
+      category.suppressed = Math.min(Number.MAX_SAFE_INTEGER, category.suppressed + 1);
+      this.suppressed = Math.min(Number.MAX_SAFE_INTEGER, this.suppressed + 1);
+      return;
+    }
+    this.emitted++;
+    category.lastEmittedAt = now;
+    const suppressedSinceLast = category.suppressed;
+    category.suppressed = 0;
+    // Logging itself is auxiliary: even an injected logger failure cannot alter
+    // a committed terminal result, readiness response or authorization outcome.
+    try {
+      this.emit(JSON.stringify({kind: 'perch-mcp-incident', ...value, suppressedSinceLast}));
+    } catch { /* Platform logging availability never controls product state. */ }
+  }
+
+  summary(): {
+    scope: 'isolate'; durable: false; total: number; suppressed: number;
+    evictedCategories: number; categories: number;
+    events: {event: Incident; count: number; suppressed: number}[];
+  } {
+    return {scope: 'isolate', durable: false, total: this.total,
+      suppressed: this.suppressed, evictedCategories: this.evictedCategories,
+      categories: this.categories.size,
+      events: [...this.categories.values()].sort((a,b) => b.event.at - a.event.at)
+        .slice(0, 32).map(row => ({event: {...row.event}, count: row.count, suppressed: row.suppressed}))};
   }
 }
-export function reportIncident(env: Env, ctx: ExecutionContext, value: Incident): void {
-  console.error(JSON.stringify({ kind: 'perch-mcp-incident', ...value }));
-  ctx.waitUntil(persistIncident(env, value));
+const incidents = new IncidentRecorder();
+export function incidentSummary(): ReturnType<IncidentRecorder['summary']> {
+  return incidents.summary();
+}
+/** Kept for internal caller compatibility. No persistence or OAuth KV I/O. */
+export async function persistIncident(_env: Env, value: Incident): Promise<void> {
+  incidents.record(value);
+}
+export function reportIncident(env: Env, _ctx: ExecutionContext, value: Incident): void {
+  // Synchronous bounded logging requires no background job or failing storage.
+  void persistIncident(env, value);
 }
 
 /** Fixed public diagnostic vocabulary. Never expose exception text, stack, IDs or storage data. */
@@ -162,7 +218,24 @@ export async function probeRegistryHealth(read: () => Promise<Response>): Promis
 }> {
   try {
     const upstream = await read();
-    if (upstream.ok) return { response: upstream };
+    if (upstream.ok) {
+      const body=await upstream.clone().json().catch(()=>undefined) as Record<string,unknown>|undefined;
+      const protocols=body?.protocolVersions;
+      if(upstream.status!==200||!body||body.ok!==true||body.version!==VERSION||body.schemaVersion!==1||
+          typeof body.paired!=='boolean'||typeof body.configured!=='boolean'||
+          !Array.isArray(protocols)||protocols.length===0||protocols.length>8||
+          protocols.some(value=>typeof value!=='string'||!['2026-07-28','2025-11-25','2025-06-18'].includes(value))||
+          typeof body.providerWritesEnabled!=='boolean'||typeof body.nativeActionsEnabled!=='boolean'||
+          (body.storageSchemaVersion!==undefined&&(typeof body.storageSchemaVersion!=='number'||![1,2].includes(body.storageSchemaVersion)))) {
+        const traceId=crypto.randomUUID();
+        return {response:degraded(traceId,'REGISTRY_STORAGE_CORRUPT','UNKNOWN','CORE_VALIDATE','unavailable'),failure:{traceId}};
+      }
+      return {response:Response.json({ok:true,version:VERSION,schemaVersion:1,
+        paired:body.paired,configured:body.configured,protocolVersions:protocols,
+        providerWritesEnabled:body.providerWritesEnabled,nativeActionsEnabled:body.nativeActionsEnabled,
+        ...(body.storageSchemaVersion===undefined?{}:{storageSchemaVersion:body.storageSchemaVersion})},
+        {headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}})};
+    }
     const record = await upstream.clone().json().catch(() => null) as
       { traceId?: unknown } | null;
     const traceId = typeof record?.traceId === 'string' && TRACE.test(record.traceId)

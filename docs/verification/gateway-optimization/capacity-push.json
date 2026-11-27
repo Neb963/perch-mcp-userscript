@@ -1,0 +1,1843 @@
+{
+  "schemaVersion": 1,
+  "source": "f99b0f313603084cc720c83be974d7fd24f05e49",
+  "sourceDirty": false,
+  "runtime": "Miniflare4.20260730.0/workerd1.20260730.1",
+  "fixture": "read main.pjs, tiny marker result; actual local SDK OAuth token and MCP HTTP; all outbound denied",
+  "measuredCoefficients": {
+    "lifecycle": {
+      "samples": 4,
+      "histories": [
+        0,
+        150,
+        999,
+        1000
+      ],
+      "distribution": {
+        "workerRequests": {
+          "median": 5,
+          "p95": 5,
+          "max": 5
+        },
+        "doRequests": {
+          "median": 11,
+          "p95": 11,
+          "max": 11
+        },
+        "sqlReads": {
+          "median": 180,
+          "p95": 182,
+          "max": 182
+        },
+        "sqlWrites": {
+          "median": 51,
+          "p95": 52,
+          "max": 52
+        },
+        "kvReads": {
+          "median": 2,
+          "p95": 2,
+          "max": 2
+        },
+        "kvWrites": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "kvLists": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "alarmGet": {
+          "median": 6,
+          "p95": 6,
+          "max": 6
+        },
+        "alarmSet": {
+          "median": 0,
+          "p95": 2,
+          "max": 2
+        },
+        "alarmDelete": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "alarmInvocations": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "doWallMsProxy": {
+          "median": 10,
+          "p95": 19,
+          "max": 19
+        },
+        "responseBytes": {
+          "median": 2220,
+          "p95": 2220,
+          "max": 2220
+        }
+      },
+      "projection": {
+        "workerRequests": 5,
+        "doRequests": 11,
+        "sqlReads": 182,
+        "sqlWrites": 52,
+        "kvReads": 2,
+        "kvWrites": 0,
+        "kvLists": 0,
+        "alarmGet": 6,
+        "alarmSet": 2,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 19,
+        "responseBytes": 2220
+      }
+    },
+    "idle": {
+      "samples": 12,
+      "histories": [
+        0,
+        150,
+        999,
+        1000
+      ],
+      "distribution": {
+        "workerRequests": {
+          "median": 1,
+          "p95": 1,
+          "max": 1
+        },
+        "doRequests": {
+          "median": 1,
+          "p95": 1,
+          "max": 1
+        },
+        "sqlReads": {
+          "median": 8,
+          "p95": 8,
+          "max": 8
+        },
+        "sqlWrites": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "kvReads": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "kvWrites": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "kvLists": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "alarmGet": {
+          "median": 1,
+          "p95": 1,
+          "max": 1
+        },
+        "alarmSet": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "alarmDelete": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "alarmInvocations": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "doWallMsProxy": {
+          "median": 0,
+          "p95": 1,
+          "max": 1
+        },
+        "responseBytes": {
+          "median": 61,
+          "p95": 61,
+          "max": 61
+        }
+      },
+      "projection": {
+        "workerRequests": 1,
+        "doRequests": 1,
+        "sqlReads": 8,
+        "sqlWrites": 0,
+        "kvReads": 0,
+        "kvWrites": 0,
+        "kvLists": 0,
+        "alarmGet": 1,
+        "alarmSet": 0,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 1,
+        "responseBytes": 61
+      }
+    },
+    "oauthIssuanceOneTime": {
+      "workerRequests": 6,
+      "doRequests": 14,
+      "sqlReads": 354,
+      "sqlWrites": 68,
+      "kvReads": 4,
+      "kvWrites": 4,
+      "kvLists": 0,
+      "alarmGet": 4,
+      "alarmSet": 0,
+      "alarmDelete": 0,
+      "alarmInvocations": 0,
+      "doWallMsProxy": 13,
+      "responseBytes": 3235
+    },
+    "installationSetupOneTime": {
+      "workerRequests": 7,
+      "doRequests": 11,
+      "sqlReads": 506,
+      "sqlWrites": 232,
+      "kvReads": 0,
+      "kvWrites": 0,
+      "kvLists": 0,
+      "alarmGet": 9,
+      "alarmSet": 2,
+      "alarmDelete": 0,
+      "alarmInvocations": 0,
+      "doWallMsProxy": 35,
+      "responseBytes": 2336
+    },
+    "oauthRefresh": {
+      "samples": 5,
+      "histories": [
+        0
+      ],
+      "distribution": {
+        "workerRequests": {
+          "median": 1,
+          "p95": 1,
+          "max": 1
+        },
+        "doRequests": {
+          "median": 2,
+          "p95": 2,
+          "max": 2
+        },
+        "sqlReads": {
+          "median": 13,
+          "p95": 13,
+          "max": 13
+        },
+        "sqlWrites": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "kvReads": {
+          "median": 2,
+          "p95": 2,
+          "max": 2
+        },
+        "kvWrites": {
+          "median": 2,
+          "p95": 2,
+          "max": 2
+        },
+        "kvLists": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "alarmGet": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "alarmSet": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "alarmDelete": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "alarmInvocations": {
+          "median": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "doWallMsProxy": {
+          "median": 1,
+          "p95": 1,
+          "max": 1
+        },
+        "responseBytes": {
+          "median": 298,
+          "p95": 298,
+          "max": 298
+        }
+      },
+      "projection": {
+        "workerRequests": 1,
+        "doRequests": 3,
+        "sqlReads": 69,
+        "sqlWrites": 4,
+        "kvReads": 2,
+        "kvWrites": 2,
+        "kvLists": 0,
+        "alarmGet": 0,
+        "alarmSet": 0,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 1,
+        "responseBytes": 298,
+        "logs": 0,
+        "wsIncomingRaw": 0,
+        "wsOutgoingRaw": 0
+      },
+      "immediateProjection": {
+        "workerRequests": 1,
+        "doRequests": 2,
+        "sqlReads": 13,
+        "sqlWrites": 0,
+        "kvReads": 2,
+        "kvWrites": 2,
+        "kvLists": 0,
+        "alarmGet": 0,
+        "alarmSet": 0,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 1,
+        "responseBytes": 298
+      },
+      "acceptedAuditProjection": {
+        "workerRequests": 0,
+        "doRequests": 1,
+        "sqlReads": 56,
+        "sqlWrites": 4,
+        "kvReads": 0,
+        "kvWrites": 0,
+        "kvLists": 0,
+        "alarmGet": 0,
+        "alarmSet": 0,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 0,
+        "responseBytes": 0
+      },
+      "auditBasis": "separately measured accepted append at full 100-event ring",
+      "source": "f99b0f313603084cc720c83be974d7fd24f05e49",
+      "sourceDirty": false
+    },
+    "notMeasured": [
+      "logs",
+      "WebSocket messages",
+      "provider duration GB-s",
+      "CPU",
+      "physical storage"
+    ]
+  },
+  "assumptions": {
+    "transport": "push",
+    "pollSeconds": 15,
+    "recentPollSeconds": 5,
+    "recentWindowSeconds": 120,
+    "heartbeatSeconds": 60,
+    "reconnectionsPerEditorHour": 0.25,
+    "retryFraction": 0.02,
+    "unrelatedReserveFraction": 0.2,
+    "heartbeat": {
+      "workerRequests": 1,
+      "doRequests": 2,
+      "sqlReads": 16,
+      "sqlWrites": 4,
+      "doWallMsProxy": 4,
+      "logs": 0
+    },
+    "cleanupPerOperation": {
+      "doRequests": 0.25,
+      "sqlReads": 8,
+      "sqlWrites": 8,
+      "alarmGet": 1,
+      "alarmSet": 0.25,
+      "alarmInvocations": 0.25,
+      "doWallMsProxy": 2
+    },
+    "reconnect": {
+      "workerRequests": 2,
+      "doRequests": 2,
+      "sqlReads": 64,
+      "sqlWrites": 8,
+      "doWallMsProxy": 4,
+      "wsIncomingRaw": 0,
+      "wsOutgoingRaw": 1
+    },
+    "oauthRefresh": {
+      "workerRequests": 1,
+      "doRequests": 3,
+      "sqlReads": 69,
+      "sqlWrites": 4,
+      "kvReads": 2,
+      "kvWrites": 2,
+      "kvLists": 0,
+      "alarmGet": 0,
+      "alarmSet": 0,
+      "alarmDelete": 0,
+      "alarmInvocations": 0,
+      "doWallMsProxy": 1,
+      "responseBytes": 298,
+      "logs": 0,
+      "wsIncomingRaw": 0,
+      "wsOutgoingRaw": 0
+    },
+    "refreshMinutes": 15,
+    "routineLogsPerOperation": 4,
+    "doMemoryGiB": 0.125,
+    "mediaPerWireChunk": {
+      "workerRequests": 2,
+      "doRequests": 4,
+      "sqlReads": 16,
+      "sqlWrites": 12,
+      "doWallMsProxy": 4
+    },
+    "additionalStatusCalls": 0,
+    "additionalStatus": {
+      "workerRequests": 1,
+      "doRequests": 2,
+      "sqlReads": 12,
+      "sqlWrites": 0,
+      "kvReads": 4,
+      "doWallMsProxy": 3
+    }
+  },
+  "storageAssumptions": {
+    "registryBytes": 1048576,
+    "workspaceBaseBytes": 65536,
+    "retainedOrdinaryMetadataBytes": 2048,
+    "activeResultBytes": 1024,
+    "retainedOrdinaryMaximum": 1000,
+    "note": "Does not measure user-library bodies, held/late-observation maxima or migration duplication."
+  },
+  "assumedProviderLimits": {
+    "asOf": "2026-11-27 handoff; operator must recheck",
+    "daily": {
+      "workerRequests": 100000,
+      "doRequests": 100000,
+      "sqlReads": 5000000,
+      "sqlWrites": 100000,
+      "kvReads": 100000,
+      "kvWrites": 1000,
+      "durationGBsProxy": 13000,
+      "storageBytesEstimate": 5000000000
+    }
+  },
+  "missingEvidence": [
+    "Migration coefficients not supplied; subtotal omits migration, not assumed free.",
+    "Heartbeat/cleanup/retry/media coefficients remain assumptions; OAuth refresh uses supplied measured coefficients.",
+    "DO duration uses local wall time and assumed 128 MiB, not Cloudflare billed duration or hibernation evidence.",
+    "Refresh projection adds one accepted audit per refresh. This overestimates append writes after the Registry 256/day cap rather than assuming denied audit probes are free.",
+    "KV mutation estimate combines put+delete conservatively against 1000; KV list count is separate and its limit must be rechecked.",
+    "Logs, external account consumption, actual browser suspension and provider billing remain DEFERRED_LIVE.",
+    "Raw incoming WS count is modeled separately; one-per 20 billing equivalent is not an exact invoice rounding claim.",
+    "Push model assumes healthy opted-in notification; HTTP uses measured empty polls at actual5s recent/15s stable cadence, zero jitter, uniformly distributed ordinary work.",
+    "An admission budget bounds modeled reservations only; defaults disabled. Its 750-write KV envelope reserves 256 for one measured 192-write/day refresh stream plus margin; additional clients require operator configuration. SQL/request envelopes remain 20% and conservative enabled SQL allocation admits about 30 ordinary operations/day before retained-cleanup reserve, not 200."
+  ],
+  "projections": [
+    {
+      "workload": {
+        "name": "one-editor-8h-idle",
+        "editors": 1,
+        "hours": 8,
+        "callsEach": 0,
+        "images": 0,
+        "music": 0
+      },
+      "counts": {
+        "ordinary": 0,
+        "allOperations": 0,
+        "polls": 0,
+        "heartbeats": 480,
+        "reconnects": 2,
+        "refreshes": 32,
+        "wireChunks": 0
+      },
+      "measuredCoefficientPortion": {
+        "workerRequests": 0,
+        "doRequests": 0,
+        "sqlReads": 0,
+        "sqlWrites": 0,
+        "kvReads": 0,
+        "kvWrites": 0,
+        "kvLists": 0,
+        "alarmGet": 0,
+        "alarmSet": 0,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 0,
+        "responseBytes": 0
+      },
+      "modeledComponents": {
+        "background": {
+          "workerRequests": 516,
+          "doRequests": 1060,
+          "sqlReads": 10016,
+          "sqlWrites": 2064,
+          "kvReads": 64,
+          "kvWrites": 64,
+          "kvLists": 0,
+          "alarmGet": 0,
+          "alarmSet": 0,
+          "alarmDelete": 0,
+          "alarmInvocations": 0,
+          "doWallMsProxy": 1960,
+          "responseBytes": 9536,
+          "logs": 0,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 2
+        },
+        "deferredCleanup": {
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "alarmGet": 0,
+          "alarmSet": 0,
+          "alarmInvocations": 0,
+          "doWallMsProxy": 0
+        },
+        "media": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "doWallMsProxy": 0
+        },
+        "additionalStatus": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "kvReads": 0,
+          "doWallMsProxy": 0
+        },
+        "retry": {
+          "workerRequests": 10.32,
+          "doRequests": 21.2,
+          "sqlReads": 200.32,
+          "sqlWrites": 41.28,
+          "kvReads": 1.28,
+          "kvWrites": 1.28,
+          "kvLists": 0,
+          "alarmGet": 0,
+          "alarmSet": 0,
+          "alarmDelete": 0,
+          "alarmInvocations": 0,
+          "doWallMsProxy": 39.2,
+          "responseBytes": 190.72,
+          "logs": 0,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 0.04
+        }
+      },
+      "coefficientSources": {
+        "baseLifecycle": "measured ordinary read path",
+        "idlePoll": "measured empty HTTP poll",
+        "heartbeat": "assumed",
+        "oauthRefresh": "measured SDK rotation",
+        "reconnect": "assumed",
+        "cleanup": "assumed",
+        "media": "assumed incremental chunks",
+        "counts": "scenario and explicit cadence assumptions"
+      },
+      "modeledSubtotal": {
+        "workerRequests": 526.32,
+        "doRequests": 1081.2,
+        "sqlReads": 10216.32,
+        "sqlWrites": 2105.28,
+        "kvReads": 65.28,
+        "kvWrites": 65.28,
+        "kvLists": 0,
+        "alarmGet": 0,
+        "alarmSet": 0,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 1999.2,
+        "responseBytes": 9726.72,
+        "logs": 0,
+        "wsIncomingRaw": 0,
+        "wsOutgoingRaw": 2.04,
+        "storageBytesEstimate": 1114112,
+        "durationGBsProxy": 0.2499,
+        "wsBillableMessageEquivalent": 0
+      },
+      "utilization": {
+        "workerRequests": {
+          "modeledFraction": 0.005263200000000001,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.2052632
+        },
+        "doRequests": {
+          "modeledFraction": 0.010812,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.210812
+        },
+        "sqlReads": {
+          "modeledFraction": 0.002043264,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.202043264
+        },
+        "sqlWrites": {
+          "modeledFraction": 0.021052800000000003,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.22105280000000002
+        },
+        "kvReads": {
+          "modeledFraction": 0.0006528,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.20065280000000002
+        },
+        "kvWrites": {
+          "modeledFraction": 0.06528,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.26528
+        },
+        "durationGBsProxy": {
+          "modeledFraction": 0.000019223076923076923,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.20001922307692308
+        },
+        "storageBytesEstimate": {
+          "modeledFraction": 0.0002228224,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.2002228224
+        }
+      },
+      "limitingModeledDimension": "kvWrites",
+      "migrationIncluded": false,
+      "capacityClaim": "ESTIMATE_ONLY_NOT_ACCOUNT_HEADROOM",
+      "stressOnly": false
+    },
+    {
+      "workload": {
+        "name": "one-editor-8h-200",
+        "editors": 1,
+        "hours": 8,
+        "callsEach": 200,
+        "images": 0,
+        "music": 0
+      },
+      "counts": {
+        "ordinary": 200,
+        "allOperations": 200,
+        "polls": 0,
+        "heartbeats": 480,
+        "reconnects": 2,
+        "refreshes": 32,
+        "wireChunks": 0
+      },
+      "measuredCoefficientPortion": {
+        "workerRequests": 1000,
+        "doRequests": 2200,
+        "sqlReads": 36400,
+        "sqlWrites": 10400,
+        "kvReads": 400,
+        "kvWrites": 0,
+        "kvLists": 0,
+        "alarmGet": 1200,
+        "alarmSet": 400,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 3800,
+        "responseBytes": 444000
+      },
+      "modeledComponents": {
+        "background": {
+          "workerRequests": 516,
+          "doRequests": 1060,
+          "sqlReads": 10016,
+          "sqlWrites": 2064,
+          "kvReads": 64,
+          "kvWrites": 64,
+          "kvLists": 0,
+          "alarmGet": 0,
+          "alarmSet": 0,
+          "alarmDelete": 0,
+          "alarmInvocations": 0,
+          "doWallMsProxy": 1960,
+          "responseBytes": 9536,
+          "logs": 0,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 2
+        },
+        "deferredCleanup": {
+          "doRequests": 50,
+          "sqlReads": 1600,
+          "sqlWrites": 1600,
+          "alarmGet": 200,
+          "alarmSet": 50,
+          "alarmInvocations": 50,
+          "doWallMsProxy": 400
+        },
+        "media": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "doWallMsProxy": 0
+        },
+        "additionalStatus": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "kvReads": 0,
+          "doWallMsProxy": 0
+        },
+        "retry": {
+          "workerRequests": 30.32,
+          "doRequests": 66.2,
+          "sqlReads": 960.32,
+          "sqlWrites": 281.28000000000003,
+          "kvReads": 9.28,
+          "kvWrites": 1.28,
+          "kvLists": 0,
+          "alarmGet": 28,
+          "alarmSet": 9,
+          "alarmDelete": 0,
+          "alarmInvocations": 1,
+          "doWallMsProxy": 123.2,
+          "responseBytes": 9070.72,
+          "logs": 16,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 0.04
+        }
+      },
+      "coefficientSources": {
+        "baseLifecycle": "measured ordinary read path",
+        "idlePoll": "measured empty HTTP poll",
+        "heartbeat": "assumed",
+        "oauthRefresh": "measured SDK rotation",
+        "reconnect": "assumed",
+        "cleanup": "assumed",
+        "media": "assumed incremental chunks",
+        "counts": "scenario and explicit cadence assumptions"
+      },
+      "modeledSubtotal": {
+        "workerRequests": 1546.32,
+        "doRequests": 3376.2,
+        "sqlReads": 48976.32,
+        "sqlWrites": 14345.28,
+        "kvReads": 473.28,
+        "kvWrites": 65.28,
+        "kvLists": 0,
+        "alarmGet": 1428,
+        "alarmSet": 459,
+        "alarmDelete": 0,
+        "alarmInvocations": 51,
+        "doWallMsProxy": 6283.2,
+        "responseBytes": 462606.72,
+        "logs": 816,
+        "wsIncomingRaw": 0,
+        "wsOutgoingRaw": 2.04,
+        "storageBytesEstimate": 3167232,
+        "durationGBsProxy": 0.7854,
+        "wsBillableMessageEquivalent": 0
+      },
+      "utilization": {
+        "workerRequests": {
+          "modeledFraction": 0.0154632,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.21546320000000002
+        },
+        "doRequests": {
+          "modeledFraction": 0.033762,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.23376200000000003
+        },
+        "sqlReads": {
+          "modeledFraction": 0.009795264,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.209795264
+        },
+        "sqlWrites": {
+          "modeledFraction": 0.14345280000000002,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.3434528
+        },
+        "kvReads": {
+          "modeledFraction": 0.0047328,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.20473280000000002
+        },
+        "kvWrites": {
+          "modeledFraction": 0.06528,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.26528
+        },
+        "durationGBsProxy": {
+          "modeledFraction": 0.000060415384615384616,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.2000604153846154
+        },
+        "storageBytesEstimate": {
+          "modeledFraction": 0.0006334464,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.2006334464
+        }
+      },
+      "limitingModeledDimension": "sqlWrites",
+      "migrationIncluded": false,
+      "capacityClaim": "ESTIMATE_ONLY_NOT_ACCOUNT_HEADROOM",
+      "stressOnly": false
+    },
+    {
+      "workload": {
+        "name": "one-editor-24h-1000",
+        "editors": 1,
+        "hours": 24,
+        "callsEach": 1000,
+        "images": 0,
+        "music": 0
+      },
+      "counts": {
+        "ordinary": 1000,
+        "allOperations": 1000,
+        "polls": 0,
+        "heartbeats": 1440,
+        "reconnects": 6,
+        "refreshes": 96,
+        "wireChunks": 0
+      },
+      "measuredCoefficientPortion": {
+        "workerRequests": 5000,
+        "doRequests": 11000,
+        "sqlReads": 182000,
+        "sqlWrites": 52000,
+        "kvReads": 2000,
+        "kvWrites": 0,
+        "kvLists": 0,
+        "alarmGet": 6000,
+        "alarmSet": 2000,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 19000,
+        "responseBytes": 2220000
+      },
+      "modeledComponents": {
+        "background": {
+          "workerRequests": 1548,
+          "doRequests": 3180,
+          "sqlReads": 30048,
+          "sqlWrites": 6192,
+          "kvReads": 192,
+          "kvWrites": 192,
+          "kvLists": 0,
+          "alarmGet": 0,
+          "alarmSet": 0,
+          "alarmDelete": 0,
+          "alarmInvocations": 0,
+          "doWallMsProxy": 5880,
+          "responseBytes": 28608,
+          "logs": 0,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 6
+        },
+        "deferredCleanup": {
+          "doRequests": 250,
+          "sqlReads": 8000,
+          "sqlWrites": 8000,
+          "alarmGet": 1000,
+          "alarmSet": 250,
+          "alarmInvocations": 250,
+          "doWallMsProxy": 2000
+        },
+        "media": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "doWallMsProxy": 0
+        },
+        "additionalStatus": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "kvReads": 0,
+          "doWallMsProxy": 0
+        },
+        "retry": {
+          "workerRequests": 130.96,
+          "doRequests": 288.6,
+          "sqlReads": 4400.96,
+          "sqlWrites": 1323.84,
+          "kvReads": 43.84,
+          "kvWrites": 3.84,
+          "kvLists": 0,
+          "alarmGet": 140,
+          "alarmSet": 45,
+          "alarmDelete": 0,
+          "alarmInvocations": 5,
+          "doWallMsProxy": 537.6,
+          "responseBytes": 44972.16,
+          "logs": 80,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 0.12
+        }
+      },
+      "coefficientSources": {
+        "baseLifecycle": "measured ordinary read path",
+        "idlePoll": "measured empty HTTP poll",
+        "heartbeat": "assumed",
+        "oauthRefresh": "measured SDK rotation",
+        "reconnect": "assumed",
+        "cleanup": "assumed",
+        "media": "assumed incremental chunks",
+        "counts": "scenario and explicit cadence assumptions"
+      },
+      "modeledSubtotal": {
+        "workerRequests": 6678.96,
+        "doRequests": 14718.6,
+        "sqlReads": 224448.96,
+        "sqlWrites": 67515.84,
+        "kvReads": 2235.84,
+        "kvWrites": 195.84,
+        "kvLists": 0,
+        "alarmGet": 7140,
+        "alarmSet": 2295,
+        "alarmDelete": 0,
+        "alarmInvocations": 255,
+        "doWallMsProxy": 27417.6,
+        "responseBytes": 2293580.16,
+        "logs": 4080,
+        "wsIncomingRaw": 0,
+        "wsOutgoingRaw": 6.12,
+        "storageBytesEstimate": 3169280,
+        "durationGBsProxy": 3.4272,
+        "wsBillableMessageEquivalent": 0
+      },
+      "utilization": {
+        "workerRequests": {
+          "modeledFraction": 0.0667896,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.2667896
+        },
+        "doRequests": {
+          "modeledFraction": 0.147186,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.347186
+        },
+        "sqlReads": {
+          "modeledFraction": 0.044889792,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.244889792
+        },
+        "sqlWrites": {
+          "modeledFraction": 0.6751583999999999,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.8751583999999999
+        },
+        "kvReads": {
+          "modeledFraction": 0.0223584,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.2223584
+        },
+        "kvWrites": {
+          "modeledFraction": 0.19584000000000001,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.39584
+        },
+        "durationGBsProxy": {
+          "modeledFraction": 0.00026363076923076925,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.2002636307692308
+        },
+        "storageBytesEstimate": {
+          "modeledFraction": 0.000633856,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.200633856
+        }
+      },
+      "limitingModeledDimension": "sqlWrites",
+      "migrationIncluded": false,
+      "capacityClaim": "ESTIMATE_ONLY_NOT_ACCOUNT_HEADROOM",
+      "stressOnly": false
+    },
+    {
+      "workload": {
+        "name": "5-editors-8h-200-each",
+        "editors": 5,
+        "hours": 8,
+        "callsEach": 200,
+        "images": 0,
+        "music": 0
+      },
+      "counts": {
+        "ordinary": 1000,
+        "allOperations": 1000,
+        "polls": 0,
+        "heartbeats": 2400,
+        "reconnects": 10,
+        "refreshes": 160,
+        "wireChunks": 0
+      },
+      "measuredCoefficientPortion": {
+        "workerRequests": 5000,
+        "doRequests": 11000,
+        "sqlReads": 182000,
+        "sqlWrites": 52000,
+        "kvReads": 2000,
+        "kvWrites": 0,
+        "kvLists": 0,
+        "alarmGet": 6000,
+        "alarmSet": 2000,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 19000,
+        "responseBytes": 2220000
+      },
+      "modeledComponents": {
+        "background": {
+          "workerRequests": 2580,
+          "doRequests": 5300,
+          "sqlReads": 50080,
+          "sqlWrites": 10320,
+          "kvReads": 320,
+          "kvWrites": 320,
+          "kvLists": 0,
+          "alarmGet": 0,
+          "alarmSet": 0,
+          "alarmDelete": 0,
+          "alarmInvocations": 0,
+          "doWallMsProxy": 9800,
+          "responseBytes": 47680,
+          "logs": 0,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 10
+        },
+        "deferredCleanup": {
+          "doRequests": 250,
+          "sqlReads": 8000,
+          "sqlWrites": 8000,
+          "alarmGet": 1000,
+          "alarmSet": 250,
+          "alarmInvocations": 250,
+          "doWallMsProxy": 2000
+        },
+        "media": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "doWallMsProxy": 0
+        },
+        "additionalStatus": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "kvReads": 0,
+          "doWallMsProxy": 0
+        },
+        "retry": {
+          "workerRequests": 151.6,
+          "doRequests": 331,
+          "sqlReads": 4801.6,
+          "sqlWrites": 1406.4,
+          "kvReads": 46.4,
+          "kvWrites": 6.4,
+          "kvLists": 0,
+          "alarmGet": 140,
+          "alarmSet": 45,
+          "alarmDelete": 0,
+          "alarmInvocations": 5,
+          "doWallMsProxy": 616,
+          "responseBytes": 45353.6,
+          "logs": 80,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 0.2
+        }
+      },
+      "coefficientSources": {
+        "baseLifecycle": "measured ordinary read path",
+        "idlePoll": "measured empty HTTP poll",
+        "heartbeat": "assumed",
+        "oauthRefresh": "measured SDK rotation",
+        "reconnect": "assumed",
+        "cleanup": "assumed",
+        "media": "assumed incremental chunks",
+        "counts": "scenario and explicit cadence assumptions"
+      },
+      "modeledSubtotal": {
+        "workerRequests": 7731.6,
+        "doRequests": 16881,
+        "sqlReads": 244881.6,
+        "sqlWrites": 71726.4,
+        "kvReads": 2366.4,
+        "kvWrites": 326.4,
+        "kvLists": 0,
+        "alarmGet": 7140,
+        "alarmSet": 2295,
+        "alarmDelete": 0,
+        "alarmInvocations": 255,
+        "doWallMsProxy": 31416,
+        "responseBytes": 2313033.6,
+        "logs": 4080,
+        "wsIncomingRaw": 0,
+        "wsOutgoingRaw": 10.2,
+        "storageBytesEstimate": 11641856,
+        "durationGBsProxy": 3.927,
+        "wsBillableMessageEquivalent": 0
+      },
+      "utilization": {
+        "workerRequests": {
+          "modeledFraction": 0.07731600000000001,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.277316
+        },
+        "doRequests": {
+          "modeledFraction": 0.16881,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.36880999999999997
+        },
+        "sqlReads": {
+          "modeledFraction": 0.048976320000000004,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.24897632000000003
+        },
+        "sqlWrites": {
+          "modeledFraction": 0.7172639999999999,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.9172639999999999
+        },
+        "kvReads": {
+          "modeledFraction": 0.023664,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.223664
+        },
+        "kvWrites": {
+          "modeledFraction": 0.32639999999999997,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.5264
+        },
+        "durationGBsProxy": {
+          "modeledFraction": 0.0003020769230769231,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.20030207692307694
+        },
+        "storageBytesEstimate": {
+          "modeledFraction": 0.0023283712,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.20232837120000002
+        }
+      },
+      "limitingModeledDimension": "sqlWrites",
+      "migrationIncluded": false,
+      "capacityClaim": "ESTIMATE_ONLY_NOT_ACCOUNT_HEADROOM",
+      "stressOnly": false
+    },
+    {
+      "workload": {
+        "name": "10-editors-8h-200-each",
+        "editors": 10,
+        "hours": 8,
+        "callsEach": 200,
+        "images": 0,
+        "music": 0
+      },
+      "counts": {
+        "ordinary": 2000,
+        "allOperations": 2000,
+        "polls": 0,
+        "heartbeats": 4800,
+        "reconnects": 20,
+        "refreshes": 320,
+        "wireChunks": 0
+      },
+      "measuredCoefficientPortion": {
+        "workerRequests": 10000,
+        "doRequests": 22000,
+        "sqlReads": 364000,
+        "sqlWrites": 104000,
+        "kvReads": 4000,
+        "kvWrites": 0,
+        "kvLists": 0,
+        "alarmGet": 12000,
+        "alarmSet": 4000,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 38000,
+        "responseBytes": 4440000
+      },
+      "modeledComponents": {
+        "background": {
+          "workerRequests": 5160,
+          "doRequests": 10600,
+          "sqlReads": 100160,
+          "sqlWrites": 20640,
+          "kvReads": 640,
+          "kvWrites": 640,
+          "kvLists": 0,
+          "alarmGet": 0,
+          "alarmSet": 0,
+          "alarmDelete": 0,
+          "alarmInvocations": 0,
+          "doWallMsProxy": 19600,
+          "responseBytes": 95360,
+          "logs": 0,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 20
+        },
+        "deferredCleanup": {
+          "doRequests": 500,
+          "sqlReads": 16000,
+          "sqlWrites": 16000,
+          "alarmGet": 2000,
+          "alarmSet": 500,
+          "alarmInvocations": 500,
+          "doWallMsProxy": 4000
+        },
+        "media": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "doWallMsProxy": 0
+        },
+        "additionalStatus": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "kvReads": 0,
+          "doWallMsProxy": 0
+        },
+        "retry": {
+          "workerRequests": 303.2,
+          "doRequests": 662,
+          "sqlReads": 9603.2,
+          "sqlWrites": 2812.8,
+          "kvReads": 92.8,
+          "kvWrites": 12.8,
+          "kvLists": 0,
+          "alarmGet": 280,
+          "alarmSet": 90,
+          "alarmDelete": 0,
+          "alarmInvocations": 10,
+          "doWallMsProxy": 1232,
+          "responseBytes": 90707.2,
+          "logs": 160,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 0.4
+        }
+      },
+      "coefficientSources": {
+        "baseLifecycle": "measured ordinary read path",
+        "idlePoll": "measured empty HTTP poll",
+        "heartbeat": "assumed",
+        "oauthRefresh": "measured SDK rotation",
+        "reconnect": "assumed",
+        "cleanup": "assumed",
+        "media": "assumed incremental chunks",
+        "counts": "scenario and explicit cadence assumptions"
+      },
+      "modeledSubtotal": {
+        "workerRequests": 15463.2,
+        "doRequests": 33762,
+        "sqlReads": 489763.2,
+        "sqlWrites": 143452.8,
+        "kvReads": 4732.8,
+        "kvWrites": 652.8,
+        "kvLists": 0,
+        "alarmGet": 14280,
+        "alarmSet": 4590,
+        "alarmDelete": 0,
+        "alarmInvocations": 510,
+        "doWallMsProxy": 62832,
+        "responseBytes": 4626067.2,
+        "logs": 8160,
+        "wsIncomingRaw": 0,
+        "wsOutgoingRaw": 20.4,
+        "storageBytesEstimate": 22235136,
+        "durationGBsProxy": 7.854,
+        "wsBillableMessageEquivalent": 0
+      },
+      "utilization": {
+        "workerRequests": {
+          "modeledFraction": 0.15463200000000002,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.35463200000000006
+        },
+        "doRequests": {
+          "modeledFraction": 0.33762,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.53762
+        },
+        "sqlReads": {
+          "modeledFraction": 0.09795264000000001,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.29795264
+        },
+        "sqlWrites": {
+          "modeledFraction": 1.4345279999999998,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 1.6345279999999998
+        },
+        "kvReads": {
+          "modeledFraction": 0.047328,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.24732800000000002
+        },
+        "kvWrites": {
+          "modeledFraction": 0.6527999999999999,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.8528
+        },
+        "durationGBsProxy": {
+          "modeledFraction": 0.0006041538461538462,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.20060415384615385
+        },
+        "storageBytesEstimate": {
+          "modeledFraction": 0.0044470272,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.20444702720000002
+        }
+      },
+      "limitingModeledDimension": "sqlWrites",
+      "migrationIncluded": false,
+      "capacityClaim": "ESTIMATE_ONLY_NOT_ACCOUNT_HEADROOM",
+      "stressOnly": false
+    },
+    {
+      "workload": {
+        "name": "20-editors-8h-200-each",
+        "editors": 20,
+        "hours": 8,
+        "callsEach": 200,
+        "images": 0,
+        "music": 0
+      },
+      "counts": {
+        "ordinary": 4000,
+        "allOperations": 4000,
+        "polls": 0,
+        "heartbeats": 9600,
+        "reconnects": 40,
+        "refreshes": 640,
+        "wireChunks": 0
+      },
+      "measuredCoefficientPortion": {
+        "workerRequests": 20000,
+        "doRequests": 44000,
+        "sqlReads": 728000,
+        "sqlWrites": 208000,
+        "kvReads": 8000,
+        "kvWrites": 0,
+        "kvLists": 0,
+        "alarmGet": 24000,
+        "alarmSet": 8000,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 76000,
+        "responseBytes": 8880000
+      },
+      "modeledComponents": {
+        "background": {
+          "workerRequests": 10320,
+          "doRequests": 21200,
+          "sqlReads": 200320,
+          "sqlWrites": 41280,
+          "kvReads": 1280,
+          "kvWrites": 1280,
+          "kvLists": 0,
+          "alarmGet": 0,
+          "alarmSet": 0,
+          "alarmDelete": 0,
+          "alarmInvocations": 0,
+          "doWallMsProxy": 39200,
+          "responseBytes": 190720,
+          "logs": 0,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 40
+        },
+        "deferredCleanup": {
+          "doRequests": 1000,
+          "sqlReads": 32000,
+          "sqlWrites": 32000,
+          "alarmGet": 4000,
+          "alarmSet": 1000,
+          "alarmInvocations": 1000,
+          "doWallMsProxy": 8000
+        },
+        "media": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "doWallMsProxy": 0
+        },
+        "additionalStatus": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "kvReads": 0,
+          "doWallMsProxy": 0
+        },
+        "retry": {
+          "workerRequests": 606.4,
+          "doRequests": 1324,
+          "sqlReads": 19206.4,
+          "sqlWrites": 5625.6,
+          "kvReads": 185.6,
+          "kvWrites": 25.6,
+          "kvLists": 0,
+          "alarmGet": 560,
+          "alarmSet": 180,
+          "alarmDelete": 0,
+          "alarmInvocations": 20,
+          "doWallMsProxy": 2464,
+          "responseBytes": 181414.4,
+          "logs": 320,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 0.8
+        }
+      },
+      "coefficientSources": {
+        "baseLifecycle": "measured ordinary read path",
+        "idlePoll": "measured empty HTTP poll",
+        "heartbeat": "assumed",
+        "oauthRefresh": "measured SDK rotation",
+        "reconnect": "assumed",
+        "cleanup": "assumed",
+        "media": "assumed incremental chunks",
+        "counts": "scenario and explicit cadence assumptions"
+      },
+      "modeledSubtotal": {
+        "workerRequests": 30926.4,
+        "doRequests": 67524,
+        "sqlReads": 979526.4,
+        "sqlWrites": 286905.6,
+        "kvReads": 9465.6,
+        "kvWrites": 1305.6,
+        "kvLists": 0,
+        "alarmGet": 28560,
+        "alarmSet": 9180,
+        "alarmDelete": 0,
+        "alarmInvocations": 1020,
+        "doWallMsProxy": 125664,
+        "responseBytes": 9252134.4,
+        "logs": 16320,
+        "wsIncomingRaw": 0,
+        "wsOutgoingRaw": 40.8,
+        "storageBytesEstimate": 43421696,
+        "durationGBsProxy": 15.708,
+        "wsBillableMessageEquivalent": 0
+      },
+      "utilization": {
+        "workerRequests": {
+          "modeledFraction": 0.30926400000000004,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.509264
+        },
+        "doRequests": {
+          "modeledFraction": 0.67524,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.87524
+        },
+        "sqlReads": {
+          "modeledFraction": 0.19590528000000001,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.39590528
+        },
+        "sqlWrites": {
+          "modeledFraction": 2.8690559999999996,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 3.069056
+        },
+        "kvReads": {
+          "modeledFraction": 0.094656,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.29465600000000003
+        },
+        "kvWrites": {
+          "modeledFraction": 1.3055999999999999,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 1.5055999999999998
+        },
+        "durationGBsProxy": {
+          "modeledFraction": 0.0012083076923076923,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.20120830769230771
+        },
+        "storageBytesEstimate": {
+          "modeledFraction": 0.0086843392,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.2086843392
+        }
+      },
+      "limitingModeledDimension": "sqlWrites",
+      "migrationIncluded": false,
+      "capacityClaim": "ESTIMATE_ONLY_NOT_ACCOUNT_HEADROOM",
+      "stressOnly": false
+    },
+    {
+      "workload": {
+        "name": "50-editors-8h-200-each",
+        "editors": 50,
+        "hours": 8,
+        "callsEach": 200,
+        "images": 0,
+        "music": 0
+      },
+      "counts": {
+        "ordinary": 10000,
+        "allOperations": 10000,
+        "polls": 0,
+        "heartbeats": 24000,
+        "reconnects": 100,
+        "refreshes": 1600,
+        "wireChunks": 0
+      },
+      "measuredCoefficientPortion": {
+        "workerRequests": 50000,
+        "doRequests": 110000,
+        "sqlReads": 1820000,
+        "sqlWrites": 520000,
+        "kvReads": 20000,
+        "kvWrites": 0,
+        "kvLists": 0,
+        "alarmGet": 60000,
+        "alarmSet": 20000,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 190000,
+        "responseBytes": 22200000
+      },
+      "modeledComponents": {
+        "background": {
+          "workerRequests": 25800,
+          "doRequests": 53000,
+          "sqlReads": 500800,
+          "sqlWrites": 103200,
+          "kvReads": 3200,
+          "kvWrites": 3200,
+          "kvLists": 0,
+          "alarmGet": 0,
+          "alarmSet": 0,
+          "alarmDelete": 0,
+          "alarmInvocations": 0,
+          "doWallMsProxy": 98000,
+          "responseBytes": 476800,
+          "logs": 0,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 100
+        },
+        "deferredCleanup": {
+          "doRequests": 2500,
+          "sqlReads": 80000,
+          "sqlWrites": 80000,
+          "alarmGet": 10000,
+          "alarmSet": 2500,
+          "alarmInvocations": 2500,
+          "doWallMsProxy": 20000
+        },
+        "media": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "doWallMsProxy": 0
+        },
+        "additionalStatus": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "kvReads": 0,
+          "doWallMsProxy": 0
+        },
+        "retry": {
+          "workerRequests": 1516,
+          "doRequests": 3310,
+          "sqlReads": 48016,
+          "sqlWrites": 14064,
+          "kvReads": 464,
+          "kvWrites": 64,
+          "kvLists": 0,
+          "alarmGet": 1400,
+          "alarmSet": 450,
+          "alarmDelete": 0,
+          "alarmInvocations": 50,
+          "doWallMsProxy": 6160,
+          "responseBytes": 453536,
+          "logs": 800,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 2
+        }
+      },
+      "coefficientSources": {
+        "baseLifecycle": "measured ordinary read path",
+        "idlePoll": "measured empty HTTP poll",
+        "heartbeat": "assumed",
+        "oauthRefresh": "measured SDK rotation",
+        "reconnect": "assumed",
+        "cleanup": "assumed",
+        "media": "assumed incremental chunks",
+        "counts": "scenario and explicit cadence assumptions"
+      },
+      "modeledSubtotal": {
+        "workerRequests": 77316,
+        "doRequests": 168810,
+        "sqlReads": 2448816,
+        "sqlWrites": 717264,
+        "kvReads": 23664,
+        "kvWrites": 3264,
+        "kvLists": 0,
+        "alarmGet": 71400,
+        "alarmSet": 22950,
+        "alarmDelete": 0,
+        "alarmInvocations": 2550,
+        "doWallMsProxy": 314160,
+        "responseBytes": 23130336,
+        "logs": 40800,
+        "wsIncomingRaw": 0,
+        "wsOutgoingRaw": 102,
+        "storageBytesEstimate": 106981376,
+        "durationGBsProxy": 39.27,
+        "wsBillableMessageEquivalent": 0
+      },
+      "utilization": {
+        "workerRequests": {
+          "modeledFraction": 0.77316,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.97316
+        },
+        "doRequests": {
+          "modeledFraction": 1.6881,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 1.8881
+        },
+        "sqlReads": {
+          "modeledFraction": 0.4897632,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.6897632
+        },
+        "sqlWrites": {
+          "modeledFraction": 7.17264,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 7.3726400000000005
+        },
+        "kvReads": {
+          "modeledFraction": 0.23664,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.43664000000000003
+        },
+        "kvWrites": {
+          "modeledFraction": 3.264,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 3.464
+        },
+        "durationGBsProxy": {
+          "modeledFraction": 0.003020769230769231,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.20302076923076925
+        },
+        "storageBytesEstimate": {
+          "modeledFraction": 0.0213962752,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.22139627520000002
+        }
+      },
+      "limitingModeledDimension": "sqlWrites",
+      "migrationIncluded": false,
+      "capacityClaim": "ESTIMATE_ONLY_NOT_ACCOUNT_HEADROOM",
+      "stressOnly": true
+    },
+    {
+      "workload": {
+        "name": "one-editor-media-heavy",
+        "editors": 1,
+        "hours": 8,
+        "callsEach": 50,
+        "images": 50,
+        "music": 5
+      },
+      "counts": {
+        "ordinary": 50,
+        "allOperations": 105,
+        "polls": 0,
+        "heartbeats": 480,
+        "reconnects": 2,
+        "refreshes": 32,
+        "wireChunks": 515
+      },
+      "measuredCoefficientPortion": {
+        "workerRequests": 525,
+        "doRequests": 1155,
+        "sqlReads": 19110,
+        "sqlWrites": 5460,
+        "kvReads": 210,
+        "kvWrites": 0,
+        "kvLists": 0,
+        "alarmGet": 630,
+        "alarmSet": 210,
+        "alarmDelete": 0,
+        "alarmInvocations": 0,
+        "doWallMsProxy": 1995,
+        "responseBytes": 233100
+      },
+      "modeledComponents": {
+        "background": {
+          "workerRequests": 516,
+          "doRequests": 1060,
+          "sqlReads": 10016,
+          "sqlWrites": 2064,
+          "kvReads": 64,
+          "kvWrites": 64,
+          "kvLists": 0,
+          "alarmGet": 0,
+          "alarmSet": 0,
+          "alarmDelete": 0,
+          "alarmInvocations": 0,
+          "doWallMsProxy": 1960,
+          "responseBytes": 9536,
+          "logs": 0,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 2
+        },
+        "deferredCleanup": {
+          "doRequests": 26.25,
+          "sqlReads": 840,
+          "sqlWrites": 840,
+          "alarmGet": 105,
+          "alarmSet": 26.25,
+          "alarmInvocations": 26.25,
+          "doWallMsProxy": 210
+        },
+        "media": {
+          "workerRequests": 1030,
+          "doRequests": 2060,
+          "sqlReads": 8240,
+          "sqlWrites": 6180,
+          "doWallMsProxy": 2060
+        },
+        "additionalStatus": {
+          "workerRequests": 0,
+          "doRequests": 0,
+          "sqlReads": 0,
+          "sqlWrites": 0,
+          "kvReads": 0,
+          "doWallMsProxy": 0
+        },
+        "retry": {
+          "workerRequests": 41.42,
+          "doRequests": 86.025,
+          "sqlReads": 764.12,
+          "sqlWrites": 290.88,
+          "kvReads": 5.48,
+          "kvWrites": 1.28,
+          "kvLists": 0,
+          "alarmGet": 14.700000000000001,
+          "alarmSet": 4.7250000000000005,
+          "alarmDelete": 0,
+          "alarmInvocations": 0.525,
+          "doWallMsProxy": 124.5,
+          "responseBytes": 4852.72,
+          "logs": 8.4,
+          "wsIncomingRaw": 0,
+          "wsOutgoingRaw": 0.04
+        }
+      },
+      "coefficientSources": {
+        "baseLifecycle": "measured ordinary read path",
+        "idlePoll": "measured empty HTTP poll",
+        "heartbeat": "assumed",
+        "oauthRefresh": "measured SDK rotation",
+        "reconnect": "assumed",
+        "cleanup": "assumed",
+        "media": "assumed incremental chunks",
+        "counts": "scenario and explicit cadence assumptions"
+      },
+      "modeledSubtotal": {
+        "workerRequests": 2112.42,
+        "doRequests": 4387.275,
+        "sqlReads": 38970.12,
+        "sqlWrites": 14834.88,
+        "kvReads": 279.48,
+        "kvWrites": 65.28,
+        "kvLists": 0,
+        "alarmGet": 749.7,
+        "alarmSet": 240.975,
+        "alarmDelete": 0,
+        "alarmInvocations": 26.775,
+        "doWallMsProxy": 6349.5,
+        "responseBytes": 247488.72,
+        "logs": 428.4,
+        "wsIncomingRaw": 0,
+        "wsOutgoingRaw": 2.04,
+        "storageBytesEstimate": 1833984,
+        "durationGBsProxy": 0.7936875,
+        "wsBillableMessageEquivalent": 0
+      },
+      "utilization": {
+        "workerRequests": {
+          "modeledFraction": 0.0211242,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.22112420000000002
+        },
+        "doRequests": {
+          "modeledFraction": 0.043872749999999995,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.24387275
+        },
+        "sqlReads": {
+          "modeledFraction": 0.007794024,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.20779402400000002
+        },
+        "sqlWrites": {
+          "modeledFraction": 0.1483488,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.3483488
+        },
+        "kvReads": {
+          "modeledFraction": 0.0027948,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.2027948
+        },
+        "kvWrites": {
+          "modeledFraction": 0.06528,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.26528
+        },
+        "durationGBsProxy": {
+          "modeledFraction": 0.00006105288461538462,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.2000610528846154
+        },
+        "storageBytesEstimate": {
+          "modeledFraction": 0.0003667968,
+          "unrelatedReserveFraction": 0.2,
+          "fractionIncludingReserve": 0.20036679680000002
+        }
+      },
+      "limitingModeledDimension": "sqlWrites",
+      "migrationIncluded": false,
+      "capacityClaim": "ESTIMATE_ONLY_NOT_ACCOUNT_HEADROOM",
+      "stressOnly": false
+    }
+  ]
+}

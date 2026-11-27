@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "benchmarkSource": "f99b0f313603084cc720c83be974d7fd24f05e49",
+  "workerVersion": "0.2.0",
+  "userscriptVersion": "0.2.0",
+  "network": "Miniflare cf:false; outbound service denies every request; no production calls",
+  "localTests": {
+    "tests": 553,
+    "pass": 553,
+    "fail": 0,
+    "skipped": 0,
+    "wallMs": 46631.872509
+  },
+  "strictTypecheck": "PASS",
+  "lockedInstall": "PASS",
+  "preflightBuild": "PASS",
+  "preflightArtifactVerification": {
+    "files": 318,
+    "txtIdentical": true,
+    "nestedWorkerIdentical": true,
+    "packagedWorkerSyntheticHealth": "PASS",
+    "sourceDirty": false
+  },
+  "preflightWranglerDryRun": "PASS; --dry-run only",
+  "sqlBudgetLegacy": {
+    "firstColdIdle": {
+      "reads": 32,
+      "writes": 1
+    },
+    "stableIdle": {
+      "reads": 10,
+      "writes": 0
+    },
+    "active": {
+      "reads": 25,
+      "writes": 0
+    },
+    "status": {
+      "reads": 2,
+      "writes": 0
+    },
+    "invalidCredential": {
+      "reads": 2,
+      "writes": 0
+    },
+    "activity100": {
+      "reads": 106,
+      "writes": 0
+    }
+  },
+  "pushLatency": {
+    "samples": 12,
+    "medianMs": 25.124795,
+    "p95Ms": 33.599483,
+    "maxMs": 33.599483,
+    "observedOutgoingMessages": 14,
+    "basis": "admission-request-start to HTTP fetch-start upper bound; local synthetic, not Cloudflare/Firefox"
+  },
+  "pushAdmission": {
+    "http": {
+      "reads": 23,
+      "writes": 7
+    },
+    "push": {
+      "reads": 25,
+      "writes": 7
+    }
+  },
+  "activityAppend": {
+    "0": {
+      "reads": 4,
+      "writes": 7
+    },
+    "150": {
+      "reads": 4,
+      "writes": 7
+    },
+    "999": {
+      "reads": 4,
+      "writes": 7
+    },
+    "1000": {
+      "reads": 6,
+      "writes": 8
+    }
+  },
+  "activityKeysetPages": {
+    "first": {
+      "reads": 102,
+      "writes": 0
+    },
+    "deepMaximum": {
+      "reads": 103,
+      "writes": 0
+    },
+    "pages": 10
+  },
+  "resourcePoint": {
+    "migration": {
+      "reads": 267,
+      "writes": 87
+    },
+    "smallGet": {
+      "reads": 11,
+      "writes": 0
+    },
+    "large800KiBGet": {
+      "reads": 22,
+      "writes": 0
+    },
+    "metadataList": {
+      "reads": 8,
+      "writes": 0
+    },
+    "publish": {
+      "reads": 20,
+      "writes": 4
+    },
+    "unmetered": 0
+  },
+  "deferredLive": [
+    "production readiness",
+    "deployment",
+    "real Firefox/Violentmonkey/CSP",
+    "physical DO hibernation and eviction",
+    "provider calls and paid media",
+    "account billing/CPU/GB-s/physical storage"
+  ],
+  "exactFinalCommitAndCI": "Recorded by RELEASE.json and the separate delivered qualification receipt; documentation commit follows measured source without application changes."
+}

@@ -1,0 +1,43 @@
+{
+  "source": "f99b0f313603084cc720c83be974d7fd24f05e49",
+  "sourceDirty": false,
+  "runtime": "Miniflare4.20260730.0/workerd1.20260730.1",
+  "fixture": "Pinned local SQLite, synthetic clocks, deterministic PNG-signature bytes/fake audio; all outbound denied.",
+  "scope": "Physical payload rows exclude metadata/index maintenance. Point reads exclude MCP/OAuth ingress. Maintenance includes bounded discovery and dirty reconciliation, with canonical legacy records retained.",
+  "unavailable": "Production billing, physical hibernation, real Firefox and provider media: DEFERRED_LIVE",
+  "measurements": [
+    {
+      "kind": "o06-payload-rows",
+      "imageBytes": 1048576,
+      "musicBytes": 8388608,
+      "legacy": {
+        "image": 48,
+        "music": 384
+      },
+      "native": {
+        "image": 6,
+        "music": 43
+      },
+      "metadataAndIndexWrites": "excluded"
+    },
+    {
+      "kind": "o06-music-point-read",
+      "clean": {
+        "reads": 7,
+        "writes": 0
+      },
+      "retained": {
+        "reads": 7,
+        "writes": 0
+      },
+      "history": 1000,
+      "chunkBytes": 196608
+    },
+    {
+      "kind": "o06-maintenance-backfill",
+      "legacyJournals": 10000,
+      "steps": 81,
+      "maximumReads": 656
+    }
+  ]
+}
