@@ -71,6 +71,20 @@ async function start(): Promise<void> {
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let reconnectAttempt = 0;
   let reconnectWorkspace: string | undefined;
+  let bootstrapPhase = 'INIT';
+  let bootstrapCode: string | null = null;
+  let bootstrapWorkspace: string | null = null;
+  let bootstrapTimer: ReturnType<typeof setTimeout> | undefined;
+  let bootstrapRunning = false;
+  function retryNativeBootstrap():void{
+    if(closing || bootstrapTimer || !transport.configuration().paired)return;
+    bootstrapTimer=setTimeout(()=>{
+      bootstrapTimer=undefined;
+      if(controller.diagnostics().leasePresent)return;
+      void resumeBoundEditor();
+    },30000);
+    (bootstrapTimer as unknown as {unref?:()=>void}).unref?.();
+  }
   const clearReconnect = () => {
     if(reconnectTimer)clearTimeout(reconnectTimer);
     reconnectTimer=undefined;
@@ -116,7 +130,8 @@ async function start(): Promise<void> {
   // creating competing leases for the same tab/Workspace.
   const connect = (workspace: Record<string, unknown>, automatic: boolean, epoch: number) => {
     const action = connectionQueue.catch(() => undefined).then(async () => {
-      if (closing || (automatic && (manualConnectionEpoch !== epoch))) return;
+      if (closing || manualConnectionEpoch !== epoch)
+        throw Object.assign(new Error('Connection request was superseded by Stop or a newer request.'),{code:'CONNECTION_CANCELLED'});
       const held = controller.diagnostics();
       if ((held.connection === "connected" || held.connection === "degraded") &&
           held.workspaceId === workspace.id && held.leasePresent) return;
@@ -125,7 +140,8 @@ async function start(): Promise<void> {
       const health = await transport.health() as { schemaVersion?: number };
       if (health.schemaVersion !== 1)
         throw new Error("Gateway protocol/schema incompatible.");
-      if (closing || (automatic && manualConnectionEpoch !== epoch)) return;
+      if (closing || manualConnectionEpoch !== epoch)
+        throw Object.assign(new Error('Connection request was superseded.'),{code:'CONNECTION_CANCELLED'});
       await controller.attach(workspace);
     });
     connectionQueue = action.catch(() => undefined);
@@ -190,7 +206,9 @@ async function start(): Promise<void> {
     health: (origin) => transport.health(origin),
     diagnostics: () => ({
       ...transport.diagnostics(),
-      browser: controller.diagnostics(),
+      browser: {...controller.diagnostics(),
+        bootstrapPhase,bootstrapCode,bootstrapWorkspace,
+        reconnectPending:!!reconnectTimer, reconnectAttempt},
       preview: runtime.diagnostics(),
     }),
     promptSecret: async (purpose) => {
@@ -207,6 +225,7 @@ async function start(): Promise<void> {
     },
     pair: (origin, secret) => transport.pair(origin, secret),
     recover: async (origin, secret) => {
+      manualConnectionEpoch++;
       await controller.pause();
       await transport.recover(origin, secret);
     },
@@ -218,11 +237,17 @@ async function start(): Promise<void> {
     attach: async (workspace) => {
       manualConnectionEpoch++;
       reconnectWorkspace=undefined;clearReconnect();reconnectAttempt=0;
+      if(bootstrapTimer)clearTimeout(bootstrapTimer);
+      bootstrapTimer=undefined;
       await connect(workspace, false, manualConnectionEpoch);
+      if(controller.diagnostics().connection!=='connected')
+        throw new Error('The editor did not receive a verified lease. Check the connection status.');
       if (typeof workspace.id === "string")
         await store.delete("perch:autoconnect-stop:" + workspace.id);
     },
     pauseLocal: async () => {
+      // Stop fences queued health checks and late native claim responses.
+      manualConnectionEpoch++;
       const id = controller.diagnostics().workspaceId;
       // Pause synchronously aborts the local controller before the first
       // asynchronous store write or gateway lease release can stall.
@@ -259,6 +284,9 @@ async function start(): Promise<void> {
       externalVerification: "HAR-confirmed native Save/Rename/Listing enabled by operator; gateway native-actions policy, owner, Grant and exact post-effect readback remain required.",
     }),
     disconnect: async () => {
+      manualConnectionEpoch++;
+      if(bootstrapTimer)clearTimeout(bootstrapTimer);
+      bootstrapTimer=undefined;
       await controller.pause();
       await transport.disconnect();
     },
@@ -269,6 +297,7 @@ async function start(): Promise<void> {
       controller.resolveLocalHold(workspaceId,journalId,expectedRevision,evidence),
     restoreSourceBackup: (backup) => controller.restoreSourceBackup(backup),
     importSettings: async (settings) => {
+      manualConnectionEpoch++;
       const origin = gatewayOrigin(settings.gatewayOrigin);
       await controller.pause();
       await transport.disconnect();
@@ -300,8 +329,11 @@ async function start(): Promise<void> {
     void manager?.open();
   });
   async function resumeBoundEditor(): Promise<void> {
-    if (initializationError || !transport.configuration().paired || closing) return;
+    if (initializationError || !transport.configuration().paired || closing ||
+        bootstrapRunning || controller.diagnostics().leasePresent)return;
+    bootstrapRunning=true;
     const epoch = manualConnectionEpoch;
+    bootstrapPhase='NATIVE_EDITOR';bootstrapCode=null;bootstrapWorkspace=null;
     let matchedWorkspaceId: string | undefined;
     manager?.setStatus({
       connection: "connecting",
@@ -320,13 +352,15 @@ async function start(): Promise<void> {
         await new Promise<void>((resolve) => setTimeout(resolve, 500));
       }
       if (!identity || closing || manualConnectionEpoch !== epoch) {
-        if (!closing && manualConnectionEpoch === epoch)
-          manager?.setStatus({
-            connection: "offline",
-            reason: "Native editor did not become ready within 20 seconds. Use the read-only editor probe.",
-          });
+        if (!closing && manualConnectionEpoch === epoch){
+          bootstrapCode='NATIVE_EDITOR_NOT_READY';
+          manager?.setStatus({connection:'offline',
+            reason:'Editor not detected yet. Open the generator in Edit mode; connection detection will retry.'});
+          retryNativeBootstrap();
+        }
         return;
       }
+      bootstrapPhase='WORKSPACE_LOOKUP';
       const remote = await transport.request("GET", "/api/v1/admin/workspaces") as {
         items?: unknown[]; cursor?: string | null;
       };
@@ -338,25 +372,29 @@ async function start(): Promise<void> {
       );
       if (closing || manualConnectionEpoch !== epoch) return;
       if (!candidate) {
-        manager?.setStatus({
-          connection: "offline",
-          reason: "No unique, active Workspace Binding matches this generator, draft and paired browser. Select Reconnect explicitly.",
-        });
+        bootstrapCode='NO_UNIQUE_BINDING';
+        manager?.setStatus({connection:'offline',
+          reason:'This editor has no unique matching Workspace. Open Workspaces to link or reconnect it.'});
         return;
       }
       matchedWorkspaceId = typeof candidate.id === 'string' ? candidate.id : undefined;
+      bootstrapWorkspace=matchedWorkspaceId??null;
       if (await store.get<boolean>("perch:autoconnect-stop:" + candidate.id)) {
-        manager?.setStatus({
-          connection: "paused",
-          reason: "The operator stopped this Workspace. Reconnect explicitly to resume.",
-        });
+        bootstrapCode='OPERATOR_STOP';
+        manager?.setStatus({connection:'paused',workspace:matchedWorkspaceId,
+          reason:'This Workspace was stopped in the browser. Select Connect this editor to resume.'});
         return;
       }
+      bootstrapPhase='GATEWAY_CLAIM';
       await connect(candidate, true, epoch);
+      bootstrapPhase='CONNECTED';bootstrapCode=null;
     } catch (error) {
       if (closing || manualConnectionEpoch !== epoch) return;
       const code = error && typeof error === "object" && "code" in error &&
         typeof error.code === "string" ? error.code : "RECONNECT_FAILED";
+      bootstrapCode=code;
+      bootstrapWorkspace=matchedWorkspaceId??null;
+      if(['RECONNECT_FAILED','GATEWAY_TIMEOUT','GATEWAY_UNAVAILABLE'].includes(code))retryNativeBootstrap();
       manager?.setStatus({
         connection: ["EFFECT_UNKNOWN","TAB_BUSY"].includes(code) ? "blocked" : "offline",
         workspace: matchedWorkspaceId,
@@ -366,6 +404,8 @@ async function start(): Promise<void> {
             ? "A lease or claim is still active. Open Recovery to inspect its expiry and owner-safe next action; do not force takeover."
             : `Automatic reconnect did not complete (${code}). Open Recovery and inspect Gateway and local state.`,
       });
+    } finally {
+      bootstrapRunning=false;
     }
   }
   // Native edit mode is checked inside the adapter; a new page/tab never
@@ -373,6 +413,8 @@ async function start(): Promise<void> {
   void resumeBoundEditor();
   window.addEventListener("pagehide", () => {
     closing = true;
+    if(bootstrapTimer)clearTimeout(bootstrapTimer);
+    bootstrapTimer=undefined;
     reconnectWorkspace=undefined;clearReconnect();
     manualConnectionEpoch++;
     connectionQueue = connectionQueue.catch(() => undefined).then(() => controller.pause());

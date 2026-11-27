@@ -326,6 +326,11 @@ export async function buildDiagnosticReport(
     manager: {
       connection: current?.connection ?? "unknown",
       workspaceSelected: !!current?.workspace,
+      // Exact errors are projected to stable codes, not raw native/provider text.
+      reasonCode: (()=>{
+        const match=/\(([A-Z_]{3,48})\)/.exec(current?.reason??'');
+        return match?match[1]:null;
+      })(),
     },
     health: {
       ok: health.ok,
@@ -381,6 +386,13 @@ export async function buildDiagnosticReport(
         consecutivePollFailures: num(b.consecutivePollFailures),
         lastPollSuccessAt: typeof b.lastPollSuccessAt === "number" ? b.lastPollSuccessAt : null,
         reasonCode: /^[A-Z][A-Z0-9_]{0,47}$/.test(str(b.reasonCode)) ? b.reasonCode : null,
+        attachFailureCode: /^[A-Z][A-Z0-9_]{0,47}$/.test(str(b.attachFailureCode)) ? b.attachFailureCode : null,
+        failureStage: /^[A-Z][A-Z0-9_]{0,47}$/.test(str(b.failureStage)) ? b.failureStage : null,
+        bootstrapPhase: /^[A-Z][A-Z0-9_]{0,47}$/.test(str(b.bootstrapPhase)) ? b.bootstrapPhase : null,
+        bootstrapCode: /^[A-Z][A-Z0-9_]{0,47}$/.test(str(b.bootstrapCode)) ? b.bootstrapCode : null,
+        bootstrapWorkspaceSelected: typeof b.bootstrapWorkspace==='string',
+        reconnectPending: b.reconnectPending===true,
+        reconnectAttempt: Math.max(0,Math.min(1000,num(b.reconnectAttempt))),
       };
     })(),
     note: "OAuth events do not appear in MCP operation Activity; inspect oauthAudit and transport.",
@@ -745,7 +757,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       workspaces = base.w;
       agents = base.a;
       body.replaceChildren();
-      if (tab === "Workspaces") renderWorkspaces();
+      if (tab === "Workspaces") await renderWorkspaces(own);
       if (tab === "Agents") await renderAgents(own);
       if (tab === "Library") await renderLibrary(own);
       if (tab === "Activity") await renderActivity(own);
@@ -795,10 +807,129 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         .filter(([, cb]) => cb.checked)
         .map(([permission]) => permission);
   }
-  function renderWorkspaces() {
+  /** One explicit connection action; remote pause changes use readback and are
+   * never replayed after a lost acknowledgement. */
+  async function connectWorkspace(w: Row): Promise<void> {
+    const id=str(w.id);
+    if(!id)throw new Error('Choose a Workspace first.');
+    const current=record(await client.request('GET',`${ADMIN}/workspaces/${encodeURIComponent(id)}`));
+    if(str(current.id)!==id)throw new Error('Workspace changed; refresh the list.');
+    if(state.paused===true){
+      // The button explicitly says that all Workspaces will be resumed.
+      try{await client.request('POST',`${ADMIN}/pause`,{
+        expectedRevision:num(state.policyRevision),paused:false,
+      });}catch(error){
+        const actual=record(await client.request('GET',`${ADMIN}/state`));
+        if(actual.paused===true)throw error;
+      }
+    }
+    let ready=current;
+    if(current.paused===true){
+      try{await client.request('PATCH',`${ADMIN}/workspaces/${encodeURIComponent(id)}`,{
+        expectedRevision:num(current.revision),paused:false,
+      });}catch(error){
+        const actual=record(await client.request('GET',`${ADMIN}/workspaces/${encodeURIComponent(id)}`));
+        if(actual.paused===true)throw error;
+      }
+      ready=record(await client.request('GET',`${ADMIN}/workspaces/${encodeURIComponent(id)}`));
+      if(ready.paused!==false)throw new Error('Workspace is still paused. Refresh its status.');
+    }
+    try {
+      if(!client.attach)throw new Error('The native browser connection is unavailable.');
+      await client.attach(ready);
+      await refresh();
+      announce('Editor connected. The agent can continue.');
+    }catch(error){
+      const code=error&&typeof error==='object'&&'code'in error
+        ?String((error as {code:unknown}).code):'';
+      if(code==='EFFECT_UNKNOWN'||code==='TAB_BUSY'){
+        recoveryWorkspaceId=id;
+        tab='Recovery';updateTabs();await refresh();
+        announce(`Connection held (${code}). Recovery shows the next action.`,true);
+        return;
+      }
+      throw error;
+    }
+  }
+  async function bindEditorWorkspace(w:Row,replace:boolean):Promise<void>{
+    const probed=client.probe?record(await client.probe()):null;
+    if(probed&&(probed.ready!==true||!probed.identity))
+      throw new Error('This editor is not ready. Open its Edit view and try again.');
+    const identity=await client.currentIdentity();
+    const configured=client.configuration();
+    const binding={...identity,browserInstallationId:
+      identity.browserInstallationId??configured.browserInstallationId};
+    if(!binding.browserInstallationId)
+      throw new Error('Browser installation identity is unavailable. Inspect pairing in Settings.');
+    const id=str(w.id),live=record(await client.request('GET',`${ADMIN}/workspaces/${encodeURIComponent(id)}`));
+    if(live.id!==id)throw new Error('Workspace was changed or removed. Refresh.');
+    const result=record(await client.request('POST',
+      `${ADMIN}/workspaces/${encodeURIComponent(id)}/bind`,
+      {expectedRevision:num(live.revision),binding,replace}));
+    await connectWorkspace({...live,...result});
+  }
+  async function renderWorkspaces(own:number) {
     heading("Workspaces");
-    p(`Local browser connection: ${status.connection}${status.reason ? ` · ${status.reason}` : ""}. Remote Workspace Active is not proof of a live browser lease.`, body, "muted");
-    p('Choose a Workspace to connect. Advanced binding and permission changes are under Workspace settings.',body,'muted');
+    p(`Connection: ${status.connection}${status.reason ? ` · ${status.reason}` : ""}`,body,'muted');
+    let detectedIdentity:ManagerIdentity|undefined;
+    const quick=el('section',undefined,'recovery-status');
+    quick.append(el('strong',status.connection==='connected'?'Editor connected':'Connect the current editor'));
+    if(status.connection==='connected'){
+      p('This tab has a verified lease. Leave it open for the agent.',quick,'muted');
+    }else{
+      let native:ManagerIdentity|undefined;
+      try {
+        const probe=client.probe?record(await client.probe()):null;
+        if(probe && (probe.ready!==true || !probe.identity))
+          throw new Error('Native editor is not ready.');
+        native=await client.currentIdentity();
+      }catch{
+        p('Open the generator in Edit mode, then select Retry editor detection. Pairing and Gateway are independent of editor readiness.',quick);
+        quick.append(button('Retry editor detection',async()=>refresh(),'primary'));
+      }
+      if(native){
+        detectedIdentity=native;
+        const matches=(w:Row)=>{
+          const b=record(w.binding);
+          return b.generatorId===native!.generatorId&&b.draftId===native!.draftId&&
+            b.slug===native!.slug;
+        };
+        const exact=workspaces.items.filter(w=>matches(w)&&
+          record(w.binding).browserInstallationId===native!.browserInstallationId);
+        const sameGenerator=workspaces.items.filter(w=>{
+          const b=record(w.binding);
+          return b.generatorId===native!.generatorId&&b.draftId===native!.draftId;
+        });
+        const unused=workspaces.items.filter(w=>!w.binding);
+        if(exact.length===1){
+          const w=exact[0]!;
+          p(`Matched Workspace: ${str(w.label)}. The current editor will be verified again before claiming a lease.`,quick,'muted');
+          if(state.paused===true)
+            p('Gateway-wide execution is paused; connecting will resume all Workspaces.',quick,'muted');
+          else if(w.paused===true)
+            p('This Workspace is paused; connecting will resume it.',quick,'muted');
+          quick.append(button(state.paused===true?'Resume all Workspaces and connect':
+            w.paused===true?'Resume Workspace and connect':'Connect this editor',
+            async()=>connectWorkspace(w),'primary'));
+        }else if(exact.length>1){
+          p('Several Workspaces match this editor. Choose the intended Workspace in the list below.',quick);
+        }else if(sameGenerator.length===1){
+          const w=sameGenerator[0]!;
+          p(`The editor matches ${str(w.label)} but its saved browser installation differs. Rebinding revokes the old connector Grants; authorize the agent again afterward.`,quick);
+          quick.append(button('Rebind this editor',async()=>bindEditorWorkspace(w,true),'primary'));
+        }else if(sameGenerator.length>1){
+          p('Multiple Workspaces refer to this generator. Choose one explicitly below; no automatic takeover.',quick);
+        }else if(unused.length===1){
+          const w=unused[0]!;
+          p(`One unbound Workspace is available: ${str(w.label)}. Link it to this editor to begin.`,quick,'muted');
+          quick.append(button('Link Workspace and connect',async()=>bindEditorWorkspace(w,false),'primary'));
+        }else{
+          p('No Workspace is linked to this generator. Link an unbound Workspace, or choose Workspace settings → Rebind current editor to replace an existing binding.',quick,'muted');
+        }
+      }
+    }
+    if(own!==generation)return;
+    body.append(quick);
     const form = el("form"),
       row = el("div", undefined, "row"),
       name = field("Workspace name"),
@@ -897,36 +1028,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           key: "revision",
           label: "Actions",
           render(w, td) {
-            const bind = async (replace: boolean) => {
-              // Do not change the authoritative remote Binding until the
-              // current editor has passed a read-only native capability check.
-              const probed = client.probe ? record(await client.probe()) : null;
-              if (probed && (probed.ready !== true || !probed.identity))
-                throw new Error(
-                  "The native editor is not ready for attachment. Open Settings → Read-only editor probe to inspect the missing capability.",
-                );
-              const identity = await client.currentIdentity();
-              const configured = client.configuration();
-              const binding = {
-                ...identity,
-                browserInstallationId:
-                  identity.browserInstallationId ??
-                  configured.browserInstallationId,
-              };
-              if (!binding.browserInstallationId)
-                throw new Error(
-                  "The browser installation identity is unavailable; pair again before attaching.",
-                );
-              const result = record(
-                await client.request(
-                  "POST",
-                  `${ADMIN}/workspaces/${encodeURIComponent(str(w.id))}/bind`,
-                  { expectedRevision: num(w.revision), binding, replace },
-                ),
-              );
-              await client.attach?.({ ...w, ...result });
-              await refresh();
-            };
+            const bind=(replace:boolean)=>bindEditorWorkspace(w,replace);
             actions(
               td,
               ...(w.binding?[]:[button(
@@ -948,21 +1050,15 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
                 );
                 await refresh();
               }),
-              button("Reconnect", async () => {
-                try {
-                  await client.attach?.(w);
-                  announce("Connected to the verified native editor.");
-                } catch (error) {
-                  const code = error && typeof error === 'object' && 'code' in error
-                    ? String((error as {code:unknown}).code) : '';
-                  if (code !== 'EFFECT_UNKNOWN' && code !== 'TAB_BUSY') throw error;
-                  recoveryWorkspaceId = str(w.id);
-                  tab = 'Recovery';
-                  updateTabs();
-                  await refresh();
-                  announce(`Reconnect blocked (${code}). The Recovery view shows the exact hold and available next action.`,true);
-                }
-              }),
+              ...(w.binding?[button(w.paused?'Resume & connect':'Reconnect',async()=>connectWorkspace(w))]:[]),
+              ...(w.binding && detectedIdentity &&
+                  record(w.binding).generatorId===detectedIdentity.generatorId &&
+                  record(w.binding).draftId===detectedIdentity.draftId && (
+                  record(w.binding).slug!==detectedIdentity.slug ||
+                  record(w.binding).browserInstallationId!==detectedIdentity.browserInstallationId
+                )?[button('Replace binding…',async()=>{
+                  confirmAction('Replace this Workspace binding with the current editor? Existing connector Grants will be revoked. No source will be overwritten.',()=>bind(true));
+                })]:[]),
               ...(status.connection==='blocked' && status.workspace===w.id ? [button('Fix connection',async()=>{
                 recoveryWorkspaceId=str(w.id);
                 tab='Recovery';updateTabs();await refresh();
@@ -2076,15 +2172,34 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     heading('Connection recovery');
     p('This screen checks what stopped the agent. It never repeats a Save or source edit.',body,'muted');
     if(!workspaces.items.length){p('No Workspaces are configured.',body);return;}
-    const chooser=select('Workspace',workspaces.items.map(w=>({
-      value:str(w.id),label:str(w.label)+' · '+str(record(w.binding).slug||record(record(w.recoveryBinding).binding).slug||'unbound')
-    })),workspaces.items.some(w=>w.id===recoveryWorkspaceId)?recoveryWorkspaceId:str(workspaces.items[0]!.id));
+    if(!workspaces.items.some(w=>w.id===recoveryWorkspaceId)){
+      try{
+        const native=await client.currentIdentity();
+        const exact=workspaces.items.filter(w=>{
+          const b=record(w.binding);
+          return b.generatorId===native.generatorId && b.draftId===native.draftId &&
+            b.slug===native.slug && b.browserInstallationId===native.browserInstallationId;
+        });
+        recoveryWorkspaceId=exact.length===1?str(exact[0]!.id):
+          workspaces.items.length===1?str(workspaces.items[0]!.id):'';
+      }catch{recoveryWorkspaceId='';}
+    }
+    if(!recoveryWorkspaceId){
+      p('Choose the Workspace to inspect. No operation will be cleared by selecting it.',body);
+    }
+    const chooser=select('Workspace',[
+      {value:'',label:'Select Workspace'},
+      ...workspaces.items.map(w=>({
+        value:str(w.id),label:str(w.label)+' · '+str(record(w.binding).slug||record(record(w.recoveryBinding).binding).slug||'unbound')
+      })),
+    ],recoveryWorkspaceId);
     recoveryWorkspaceId=chooser.input.value;
     const toolbar=el('div',undefined,'row recovery-toolbar');
     toolbar.append(chooser.label,button('Refresh status',async()=>refresh()));
     on(chooser.input,'change',()=>{recoveryWorkspaceId=chooser.input.value;void refresh();});
     body.append(toolbar);
     const workspaceId=recoveryWorkspaceId;
+    if(!workspaceId)return;
     const snapshot=record(await client.request('GET',`${ADMIN}/workspaces/${encodeURIComponent(workspaceId)}/recovery`));
     if(own!==generation || workspaceId!==recoveryWorkspaceId)return;
     const lease=record(snapshot.activeLease),pending=num(snapshot.pendingClaimUntil);
@@ -2109,8 +2224,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     if(action==='RECONNECT')statusPanel.append(button('Connect now',async()=>{
       const w=workspaces.items.find(item=>item.id===workspaceId);
       if(!w)throw new Error('Workspace changed. Refresh first.');
-      await client.attach?.(w);
-      await refresh();announce('Connected.');
+      await connectWorkspace(w);
     },'primary'));
     else if(action==='WAIT_FOR_TERMINAL')statusPanel.append(button('Check again',async()=>refresh()));
     body.append(statusPanel);
