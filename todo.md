@@ -290,3 +290,9 @@ See `docs/verification/epoch15-gateway-incident-v0117.md`.
 - [x] Prevent idle Workspace schema/backoff/alarm writes and enforce persisted retry deadlines even during incoming request traffic.
 - [x] Add synthetic regression tests for stored core vs malformed deployment default, idle maintenance, durable outbox retry, and redacted quota/storage classification.
 - [ ] Run full CI and verify deployment readiness on the original Worker; live MCP workspace status remains the acceptance gate. No reset, migration, new bindings, or userscript reinstall required for this Worker-only change.
+
+## Epoch 17 — Correct ambiguous quota diagnosis (Worker 0.1.11)
+
+- Operator confirms available account quota; deployment log confirms version upload and bindings. Previous REGISTRY_QUOTA classification was overly broad, not proof of exhausted account quota.
+- Discriminate runtime limits, generic limits, overload and explicit account quota; expose only fixed vocabulary and stage for read-only health failures. Preserve canonical state and fail closed.
+- Extend independent production deployment check to accommodate slower Cloudflare builds. Root cause and end-to-end recovery pending production evidence.

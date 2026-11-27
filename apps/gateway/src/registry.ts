@@ -24,7 +24,7 @@ import {
   type Env,
 } from "./common.js";
 import { SqlRecords } from "./sql.js";
-import { incident, persistIncident, registryFailureReason, registryQuotaDimension } from "./incident.js";
+import { incident, persistIncident, registryFailureReason, registryQuotaDimension, registryFailureSignal } from "./incident.js";
 import { requiresGeneratorReservation } from "../../../packages/contracts/src/effect-policy.js";
 import { resourceAdmin, resourceTool } from "./resources.js";
 export interface WorkspaceRecord {
@@ -230,7 +230,13 @@ export class Registry {
     return c;
   }
   async fetch(request: Request): Promise<Response> {
+    let healthStage = "SQL_INIT";
     try {
+      if (new URL(request.url).pathname === "/internal/health") {
+        // Track the exact failure boundary without reading or exposing unrelated data.
+        void this.db;
+        healthStage = "CORE_READ";
+      }
       return await this.route(request);
     } catch (error) {
       const traceId = crypto.randomUUID();
@@ -251,6 +257,8 @@ export class Registry {
         const headers = new Headers(response.headers);
         headers.set("X-Perch-Registry-Failure", registryFailureReason(error));
         headers.set("X-Perch-Registry-Quota", registryQuotaDimension(error));
+        headers.set("X-Perch-Registry-Stage", healthStage);
+        headers.set("X-Perch-Registry-Signal", registryFailureSignal(error));
         return new Response(response.body, { status: response.status, headers });
       }
       return response;
