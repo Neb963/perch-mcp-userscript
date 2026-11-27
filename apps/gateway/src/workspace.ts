@@ -72,14 +72,14 @@ export class Workspace {
     private env: Env,
   ) {
     this.db = new SqlRecords(state.storage);
-    const schema = this.db.get<number>("schema", 1);
-    if (schema !== 1)
+    const schema = this.db.get<number>("schema");
+    if (schema !== undefined && schema !== 1)
       throw new ApiError(
         "INCOMPATIBLE_VERSION",
         "Workspace schema is newer than this Worker.",
         409,
       );
-    this.db.put("schema", 1);
+    if (schema === undefined) this.db.put("schema", 1);
     this.images = new ImageTransferHandler(this.db, {
       getLease: () => this.db.get<Lease>("lease"),
       getOperation: (operationId) =>
@@ -149,7 +149,7 @@ export class Workspace {
     this.expire();
     await this.drainTerminalOutbox();
   }
-  private async scheduleAlarm(retryMs?: number): Promise<void> {
+  private async scheduleAlarm(retryAt?: number): Promise<void> {
     const rows = this.operations(),
       deadlines = rows.filter((o) => !o.terminalAt).map((o) => o.deadlineMs);
     for (const row of rows)
@@ -158,21 +158,28 @@ export class Workspace {
     for (const expiry of [this.images.nextExpiry(), this.music.nextExpiry()])
       if (expiry !== undefined) deadlines.push(expiry);
     if (rows.some((o) => o.terminalAt && !o.terminalNotified))
-      deadlines.push(Date.now() + (retryMs ?? 1000));
+      deadlines.push(retryAt ?? Date.now() + 1000);
+    const existing = await this.state.storage.getAlarm();
     if (!deadlines.length) {
-      await this.state.storage.deleteAlarm();
+      if (existing !== null) await this.state.storage.deleteAlarm();
       return;
     }
-    const next = Math.max(Date.now() + 10, Math.min(...deadlines)),
-      existing = await this.state.storage.getAlarm();
+    const next = Math.max(Date.now() + 10, Math.min(...deadlines));
     if (existing === null || existing <= Date.now() || next < existing)
       await this.state.storage.setAlarm(next);
   }
   private async drainTerminalOutbox(): Promise<void> {
     let failed = false;
-    for (const op of this.operations().filter(
+    const pending = this.operations().filter(
       (row) => row.terminalAt && !row.terminalNotified,
-    )) {
+    );
+    const retryAt = pending.length ? this.db.get<number>("outbox-retry-at", 0) : 0;
+    if (retryAt > Date.now()) {
+      // Ordinary traffic must not bypass a durable outage backoff.
+      try { await this.scheduleAlarm(retryAt); } catch { /* Retain durable outbox. */ }
+      return;
+    }
+    for (const op of pending) {
       const error = (op.result as { error?: { code?: unknown } } | undefined)
         ?.error;
       const errorCode =
@@ -213,12 +220,24 @@ export class Workspace {
         break;
       }
     }
-    const delay = failed
-      ? Math.min(60000, this.db.get<number>("outbox-backoff", 500) * 2)
-      : 1000;
-    this.db.put("outbox-backoff", delay);
+    let nextRetry: number | undefined;
+    if (failed) {
+      this.db.transaction(() => {
+        const delay = Math.min(60000, this.db.get<number>("outbox-backoff", 500) * 2);
+        nextRetry = Date.now() + delay;
+        this.db.put("outbox-backoff", delay);
+        this.db.put("outbox-retry-at", nextRetry);
+      });
+    } else if (this.db.get<number>("outbox-backoff") !== undefined ||
+               this.db.get<number>("outbox-retry-at") !== undefined) {
+      // Clear historical backoff only once; idle polling never rewrites it.
+      this.db.transaction(() => {
+        this.db.delete("outbox-backoff");
+        this.db.delete("outbox-retry-at");
+      });
+    }
     try {
-      await this.scheduleAlarm(failed ? delay : undefined);
+      await this.scheduleAlarm(nextRetry);
     } catch {
       /* Persistent terminal rows remain the outbox for the next request/alarm. */
     }

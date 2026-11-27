@@ -1,5 +1,5 @@
 import type { ExecutionContext } from '@cloudflare/workers-types';
-import { VERSION, type Env } from './common.js';
+import { ApiError, VERSION, type Env } from './common.js';
 
 /** Durable, secret-free incident evidence outside the Registry failure domain. */
 export type IncidentArea = 'worker' | 'registry' | 'scheduled';
@@ -80,26 +80,59 @@ export function reportIncident(env: Env, ctx: ExecutionContext, value: Incident)
   ctx.waitUntil(persistIncident(env, value));
 }
 
+/** Fixed public diagnostic vocabulary. Never expose exception text, stack, IDs or storage data. */
+const REGISTRY_REASONS = [
+  'REGISTRY_QUOTA', 'REGISTRY_OVERLOADED', 'REGISTRY_STORAGE_FULL',
+  'REGISTRY_STORAGE_CORRUPT', 'REGISTRY_STORAGE_UNAVAILABLE',
+  'REGISTRY_SCHEMA_INCOMPATIBLE', 'REGISTRY_CONFIGURATION_INVALID',
+  'REGISTRY_TIMEOUT', 'REGISTRY_HTTP_ERROR', 'REGISTRY_UNCLASSIFIED',
+] as const;
+export type RegistryFailureReason = typeof REGISTRY_REASONS[number];
+function knownReason(value: unknown): value is RegistryFailureReason {
+  return typeof value === 'string' && (REGISTRY_REASONS as readonly string[]).includes(value);
+}
+export function registryFailureReason(error: unknown): RegistryFailureReason {
+  if (error instanceof ApiError) {
+    if (error.code === 'INCOMPATIBLE_VERSION') return 'REGISTRY_SCHEMA_INCOMPATIBLE';
+    if (error.code === 'INVALID_INPUT') return 'REGISTRY_CONFIGURATION_INVALID';
+  }
+  if (!(error instanceof Error)) return 'REGISTRY_UNCLASSIFIED';
+  const message = error.message.toLowerCase();
+  if (/quota|free tier|free-tier|daily (?:row|request|storage)|spending limit|exceeded.*limit|limit.*exceeded/.test(message)) return 'REGISTRY_QUOTA';
+  if (/overload|too many (?:requests|queued)|queue.*full/.test(message)) return 'REGISTRY_OVERLOADED';
+  if (/sqlite_full|database or disk is full|storage.*full/.test(message)) return 'REGISTRY_STORAGE_FULL';
+  if (/sqlite_record_corrupt|sqlite_corrupt|database.*(?:corrupt|malformed)/.test(message)) return 'REGISTRY_STORAGE_CORRUPT';
+  if (/invalid url|canonical https gateway origin/.test(message)) return 'REGISTRY_CONFIGURATION_INVALID';
+  if (/timeout|timed out|aborted/.test(message)) return 'REGISTRY_TIMEOUT';
+  if (/sqlite|database|storage|durable object namespace|durable object binding/.test(message)) return 'REGISTRY_STORAGE_UNAVAILABLE';
+  return 'REGISTRY_UNCLASSIFIED';
+}
+function degraded(traceId: string, reason: RegistryFailureReason): Response {
+  return Response.json({ ok: false, code: 'GATEWAY_DEGRADED',
+    dependency: 'registry', retryable: ![
+      'REGISTRY_SCHEMA_INCOMPATIBLE', 'REGISTRY_CONFIGURATION_INVALID',
+      'REGISTRY_STORAGE_CORRUPT',
+    ].includes(reason), traceId, version: VERSION, reason },
+    {status: 503, headers: {'Cache-Control':'no-store'}});
+}
+
 /** Registry-independent readiness computation used by both HTTP and scheduled checks. */
 export async function probeRegistryHealth(read: () => Promise<Response>): Promise<{
   response: Response; failure?: { traceId: string; error?: unknown };
 }> {
   try {
     const upstream = await read();
-    if (upstream.status < 500) return { response: upstream };
+    if (upstream.ok) return { response: upstream };
     const record = await upstream.clone().json().catch(() => null) as
       { traceId?: unknown } | null;
     const traceId = typeof record?.traceId === 'string' && TRACE.test(record.traceId)
       ? record.traceId : crypto.randomUUID();
-    return { response: Response.json({ ok: false, code: 'GATEWAY_DEGRADED',
-      dependency: 'registry', retryable: true, traceId },
-      {status: 503, headers: {'Cache-Control':'no-store'}}),
-      failure: { traceId } };
+    const classified = upstream.headers.get('X-Perch-Registry-Failure');
+    const reason = knownReason(classified) ? classified : 'REGISTRY_HTTP_ERROR';
+    return { response: degraded(traceId, reason), failure: { traceId } };
   } catch (error) {
     const traceId = crypto.randomUUID();
-    return { response: Response.json({ ok: false, code: 'GATEWAY_DEGRADED',
-      dependency: 'registry', retryable: true, traceId },
-      {status: 503, headers: {'Cache-Control':'no-store'}}),
+    return { response: degraded(traceId, registryFailureReason(error)),
       failure: { traceId, error } };
   }
 }

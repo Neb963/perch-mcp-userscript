@@ -281,3 +281,12 @@ Report: `docs/verification/epoch14-continuous-source-development-v0116.md`.
 - [ ] **Deferred operator acceptance:** deploy Worker v0.1.8 in original Cloudflare account, then verify real `/health`, Cloudflare logs, actual Firefox automatic reconnect; cannot claim from CI
 
 See `docs/verification/epoch15-gateway-incident-v0117.md`.
+
+## Epoch 16 — Registry outage repair and storage-load containment (Worker 0.1.9)
+
+- [x] Reproduce public /health HTTP 503; deployed v0.1.8 is fail-closed but not healthy. Original root exception and account quota are unverified.
+- [x] Preserve canonical Registry identity; initialize storage within the fetch error boundary and evaluate issuer defaults only when no persisted core exists.
+- [x] Return allowlisted Registry readiness failure reason and Worker version without raw error, credentials or data; reject all non-2xx upstream responses.
+- [x] Prevent idle Workspace schema/backoff/alarm writes and enforce persisted retry deadlines even during incoming request traffic.
+- [x] Add synthetic regression tests for stored core vs malformed deployment default, idle maintenance, durable outbox retry, and redacted quota/storage classification.
+- [ ] Run full CI and verify deployment readiness on the original Worker; live MCP workspace status remains the acceptance gate. No reset, migration, new bindings, or userscript reinstall required for this Worker-only change.
