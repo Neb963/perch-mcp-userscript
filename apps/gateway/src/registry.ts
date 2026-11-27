@@ -1093,6 +1093,11 @@ export class Registry {
       requestHash = await digest(
         canonical({ path, method: request.method, body: b }),
       );
+    const upgrade = request.method === 'POST' && /^\/api\/v1\/admin\/connectors\/([A-Za-z0-9_-]{1,128})\/upgrade$/.exec(path);
+    if (upgrade) {
+      this.assertManagementKey(key);
+      return json(await this.upgradeConnector(hash,path,upgrade[1]!,key,requestHash,b));
+    }
     const abort = request.method === 'POST' && /^\/api\/v1\/admin\/workspaces\/([A-Za-z0-9_-]{1,128})\/abort-transition$/.exec(path);
     if (abort) {
       this.assertManagementKey(key);
@@ -1135,6 +1140,99 @@ export class Registry {
       });
       this.bump(c);
       return json(result);
+    });
+  }
+  private async upgradeConnector(authHash: string, path: string, connectorId: string, key: string, requestHash: string,
+      body: Record<string,unknown>): Promise<unknown> {
+    fields(body,['expectedRevision','expectedWorkspaceRevision','acknowledgeReauthorization']);
+    if (body.acknowledgeReauthorization !== true)
+      throw new ApiError('APPROVAL_REQUIRED','Confirm replacement of the fixed-scope v1 Grant.',409);
+    if (this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true')
+      throw new ApiError('UPGRADE_REQUIRED','The v2 assignment contract is disabled.',409);
+    const resultKey='idempotency/'+key;
+    const previous=()=>{
+      const receipt=this.db.get<{hash:string;result:unknown;expires:number}|undefined>(resultKey);
+      if (!receipt || receipt.expires<=Date.now()) return undefined;
+      if (receipt.hash!==requestHash) throw new ApiError('IDEMPOTENCY_CONFLICT','Management key belongs to a different request.',409);
+      return receipt;
+    };
+    const started=this.db.transaction(()=>{
+      const core=this.auth(authHash);
+      const receipt=previous();
+      if (receipt) return {receipt} as const;
+      const a=this.getAgent(connectorId);
+      if (a.contractVersion!==undefined || a.suspended)
+        throw new ApiError('CONFLICT','Connector is not an active fixed-scope v1 Connector.',409);
+      const w=this.getWorkspace(a.workspaceId);
+      if (w.contractVersion!==undefined || w.agentId!==a.id || !w.binding)
+        throw new ApiError('BINDING_MISMATCH','A matching existing v1 Binding is required.',409);
+      revision(body.expectedRevision,a.revision);
+      revision(body.expectedWorkspaceRevision,w.revision);
+      if (w.transition && (w.transition.id!==key || w.transition.requestHash!==requestHash || w.transition.path!==path))
+        throw new ApiError('TRANSITION_BLOCKED','A different Workspace transition is pending.',409);
+      if (!w.transition) {
+        if (this.catalog.bindingBlocked(w.id) || this.db.get('reservation/'+w.binding.generatorId))
+          throw new ApiError('TRANSITION_BLOCKED','Settle old dispatched effects before Connector upgrade.',409);
+        this.cleanup();
+        if (this.catalog.count('idempotency')>=1024) throw new ApiError('QUOTA_EXCEEDED','Management idempotency budget reached.',429);
+        if (w.binding.browserInstallationId!==core.browserInstallationId)
+          throw new ApiError('BINDING_MISMATCH','Legacy Binding belongs to a different installation.',409);
+        w.transitionSerial=nextGeneration(w.transitionSerial??0);
+        w.transition={id:key,requestHash,path,startedAt:Date.now(),serial:w.transitionSerial};
+        this.db.put('workspace/'+w.id,w);
+      }
+      return {current:w} as const;
+    });
+    if ('receipt' in started && started.receipt) return started.receipt.result;
+    const before=started.current!;
+    await rpc(workspace(this.env,before.id),'/internal/settle-transition',{
+      workspaceId:before.id,transitionId:key,serial:before.transition!.serial,
+      epoch:before.epoch,bindingRevision:before.bindingRevision,
+    });
+    return this.db.transaction(()=>{
+      const core=this.auth(authHash);
+      const receipt=previous();
+      if (receipt) return receipt.result;
+      const a=this.getAgent(connectorId),w=this.getWorkspace(before.id);
+      revision(body.expectedRevision,a.revision);
+      revision(body.expectedWorkspaceRevision,w.revision);
+      if (a.contractVersion!==undefined || a.suspended || a.workspaceId!==w.id || w.agentId!==a.id ||
+          w.transition?.id!==key || w.transition.requestHash!==requestHash || w.epoch!==before.epoch ||
+          w.bindingRevision!==before.bindingRevision || !w.binding ||
+          this.catalog.bindingBlocked(w.id) || this.db.get('reservation/'+w.binding.generatorId))
+        throw new ApiError('TRANSITION_BLOCKED','Matching v1 scope did not remain settled.',409);
+      const bindingOwner=this.db.get<{workspaceId:string}|undefined>(bindingOwnerKey(w.binding.generatorId));
+      if (bindingOwner && bindingOwner.workspaceId!==w.id)
+        throw new ApiError('TAB_BUSY','Another v2 Workspace owns this Generator.',409);
+      const retainedPermissions=w.permissions.filter(permission=>permission!=='READ_RESOURCES' &&
+        !['CREATE','RENAME','DUPLICATE','LISTING','DELETE','MEDIA','UPLOAD_PUBLIC','PRODUCTION_READ','PRODUCTION_RESTORE','EXPORT_ARTIFACT'].includes(permission));
+      w.permissions=permissionCeiling(retainedPermissions);
+      w.contractVersion=2;
+      w.connectorId=a.id;
+      w.assignmentGeneration=1;
+      w.bindingGeneration=nextGeneration(w.bindingRevision);
+      w.bindingRevision=w.bindingGeneration;
+      w.epoch=nextGeneration(w.epoch);
+      w.revision=nextGeneration(w.revision);
+      w.permissionRevision=1;
+      delete w.transition;
+      delete w.agentId;
+      a.contractVersion=2;
+      a.workspaceId='';
+      a.revision=nextGeneration(a.revision);
+      a.permissionCeiling=w.permissions;
+      initializeAssignments(this.db,a.id);
+      changeAssignmentIndex(this.db,a.id,w.id,true);
+      this.revokeWorkspace(w.id);
+      this.db.put(bindingOwnerKey(w.binding.generatorId),{workspaceId:w.id});
+      this.db.put('workspace/'+w.id,w);
+      this.db.put('agent/'+a.id,a);
+      core.schemaVersion=3;
+      core.assignmentContractVersion=2;
+      const result={connector:a,workspace:w,reauthorizationRequired:true};
+      this.db.put(resultKey,{hash:requestHash,result,expires:Date.now()+86_400_000});
+      this.bump(core);
+      return result;
     });
   }
   private assertManagementKey(key: string): void {
@@ -1459,7 +1557,7 @@ export class Registry {
         canonical(permissionCeiling(connector.permissionCeiling)) === canonical(approval.permissionSnapshot);
     } else if (approval.contractVersion === undefined && connector.contractVersion === undefined) {
       const w = this.getWorkspace(approval.workspaceId);
-      matches = !!w.binding && !w.paused && w.contractVersion === undefined &&
+      matches = !!w.binding && !w.paused && !w.transition && w.contractVersion === undefined &&
         w.id === connector.workspaceId && w.bindingRevision === approval.bindingRevision &&
         canonical(w.permissions) === canonical(approval.permissionSnapshot);
     }
@@ -1623,7 +1721,8 @@ export class Registry {
       const isV2 = b.contractVersion === 2;
       if (!isV2 && (b.contractVersion !== undefined || b.connectorId !== undefined || b.expectedConnectorRevision !== undefined))
         throw new ApiError('INVALID_INPUT', 'Assignment fields require contractVersion 2.');
-      if (isV2) this.requireDevelopmentContract(c);
+      if (isV2 && this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true')
+        throw new ApiError('UPGRADE_REQUIRED','The v2 assignment contract is disabled.',409);
       if (
         this.catalog.count("workspace") >=
         configuredBudget(this.env.REGISTRY_WORKSPACE_BUDGET, isV2 ? 50 : 1000)
@@ -1647,6 +1746,8 @@ export class Registry {
         epoch: 0,
       };
       if (isV2) {
+        c.schemaVersion=3;
+        c.assignmentContractVersion=2;
         w.contractVersion = 2;
         w.connectorId = null;
         w.assignmentGeneration = 0;

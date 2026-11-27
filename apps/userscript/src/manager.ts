@@ -14,7 +14,9 @@ export interface ManagerConfiguration {
 }
 export interface ManagerClient {
   /** Adds management credential, JSON type and a fresh Idempotency-Key for writes. Never redirects credentials. */
-  request(method: string, path: string, body?: unknown): Promise<unknown>;
+  request(method: string, path: string, body?: unknown,
+    options?: {signal?: AbortSignal; idempotencyKey?: string}): Promise<unknown>;
+  bindingProof?(workspace: Record<string,unknown>, binding: ManagerIdentity): Promise<unknown>;
   health(origin?: string): Promise<unknown>;
   /** Read-only, bounded redacted local request outcomes; never returns credentials. */
   diagnostics?(): unknown;
@@ -456,6 +458,9 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     },
     tab: Tab = client.configuration().paired ? "Workspaces" : "Settings";
   let resourceLoad = 0;
+  let viewAbort: AbortController | undefined;
+  const v2Requests = new Map<string, {path:string; key:string; body:Record<string,unknown>}>();
+  const mutationPending = new Set<string>();
   let approvalRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   function stopApprovalRefresh() {
     if (approvalRefreshTimer !== undefined) clearTimeout(approvalRefreshTimer);
@@ -504,11 +509,12 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     options.onError?.(e);
   }
   async function run(action: () => Promise<void>, target?: HTMLButtonElement) {
+    const view = generation;
     if (target) target.disabled = true;
     try {
       await action();
     } catch (e) {
-      report(e);
+      if (view===generation || state.assignmentContractVersion!==2) report(e);
     } finally {
       if (target?.isConnected) target.disabled = false;
     }
@@ -714,8 +720,8 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     row.append(f.label, button("Refresh", refresh));
     parent.append(row);
   }
-  async function loadList(path: string): Promise<List> {
-    let response = list(await client.request("GET", path));
+  async function loadList(path: string, signal = viewAbort?.signal): Promise<List> {
+    let response = list(await client.request("GET", path, undefined, {signal}));
     const items = [...response.items],
       seen = new Set<string>();
     while (response.cursor) {
@@ -727,7 +733,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       const next = list(
         await client.request(
           "GET",
-          `${path}?cursor=${encodeURIComponent(response.cursor)}`,
+          `${path}?cursor=${encodeURIComponent(response.cursor)}`,undefined,{signal},
         ),
       );
       if (next.revision !== response.revision)
@@ -739,17 +745,20 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     }
     return { items, revision: response.revision, cursor: null };
   }
-  async function baseData() {
-    const [s, w, a] = await Promise.all([
-      client.request("GET", `${ADMIN}/state`),
-      loadList(`${ADMIN}/workspaces`),
-      loadList(`${ADMIN}/agents`),
+  async function baseData(signal?: AbortSignal) {
+    const [raw, w] = await Promise.all([
+      client.request("GET", `${ADMIN}/state`,undefined,{signal}),
+      loadList(`${ADMIN}/workspaces`,signal),
     ]);
-    return { s: record(s), w: list(w), a: list(a) };
+    const s = record(raw);
+    const a = await loadList(`${ADMIN}/${s.assignmentContractVersion===2?'connectors':'agents'}`,signal);
+    return {s,w,a};
   }
   async function refresh() {
     stopApprovalRefresh();
     const own = ++generation;
+    viewAbort?.abort();
+    viewAbort = new AbortController();
     if (!opened || destroyed) return;
     announce("Loading…");
     if (tab === "Settings") {
@@ -766,18 +775,30 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         announce("Pair this installation to begin.");
         return;
       }
-      const base = await baseData();
+      const base = await baseData(viewAbort.signal);
       if (own !== generation || destroyed) return;
       state = base.s;
       workspaces = base.w;
       agents = base.a;
       body.replaceChildren();
-      if (tab === "Workspaces") await renderWorkspaces(own);
+      if (state.assignmentContractVersion===2 && tab==='Library') tab='Settings';
+      updateTabs();
+      if (tab === "Workspaces") {
+        if (state.assignmentContractVersion===2) await renderDevelopmentWorkspaces(own);
+        else await renderWorkspaces(own);
+      }
       if (tab === "Agents") await renderAgents(own);
       if (tab === "Library") await renderLibrary(own);
       if (tab === "Activity") await renderActivity(own);
       if (tab === "Recovery") await renderRecovery(own);
-      if (tab === "Settings") renderSettings();
+      if (tab === "Settings") {
+        renderSettings();
+        if (state.assignmentContractVersion===2 && client.exportResources)
+          body.append(button('Export legacy Resource archive',async()=>{
+            const bytes=await client.exportResources!();
+            client.download('perch-resource-archive.zip',bytes,'application/zip');
+          }));
+      }
       if (own === generation) announce("Updated.");
     } catch (e) {
       if (own !== generation) return;
@@ -801,8 +822,11 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   function updateTabs() {
     body.setAttribute("role", "tabpanel");
     body.setAttribute("aria-label", tab);
-    for (const [name, b] of buttons)
+    for (const [name, b] of buttons) {
       b.setAttribute("aria-selected", String(name === tab));
+      if (name==='Agents') b.textContent=state.assignmentContractVersion===2?'Connectors':'Agents';
+      if (name==='Library') b.hidden=state.assignmentContractVersion===2;
+    }
   }
   function permissionEditor(parent: HTMLElement, values: string[]) {
     const box = el("div", undefined, "permissions");
@@ -882,6 +906,134 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       `${ADMIN}/workspaces/${encodeURIComponent(id)}/bind`,
       {expectedRevision:num(live.revision),binding,replace}));
     await connectWorkspace({...live,...result});
+  }
+  async function transitionWorkspace(w: Row, action: string, args: Row, own: number) {
+    const id = str(w.id);
+    if (mutationPending.has(id)) throw new Error('A change is pending for this Workspace.');
+    const path = `${ADMIN}/workspaces/${encodeURIComponent(id)}/${action}`;
+    const current = agents.items.find(item=>item.id===w.connectorId);
+    const cached = v2Requests.get(id);
+    if (cached && cached.path!==path) throw new Error('Inspect or resume the pending Workspace transition.');
+    const request = cached ?? {path,key:crypto.randomUUID(),body:{
+      expectedRevision:w.revision,...(current ? {expectedConnectorRevision:current.revision} : {}),...args,
+    }};
+    v2Requests.set(id,request);
+    mutationPending.add(id);
+    try {
+      let next: Row;
+      try {
+        next=record(await client.request('POST',request.path,request.body,{idempotencyKey:request.key}));
+      } catch (error) {
+        const code = error && typeof error==='object' && 'code' in error ? String(error.code) : '';
+        if (['STALE_REVISION','APPROVAL_REQUIRED','SCOPE_DENIED','BINDING_MISMATCH','TAB_BUSY','INVALID_INPUT','CONFLICT'].includes(code)) {
+          v2Requests.delete(id);
+          throw error;
+        }
+        try {
+          const receipt=record(await client.request('GET',`${ADMIN}/receipts/${request.key}`));
+          next=record(receipt.result);
+          if (next.id!==id) throw new Error('Receipt did not identify the requested Workspace.');
+        } catch {
+          throw new Error('Transition may still be pending. Inspect the exact Workspace and retry the same action.');
+        }
+      }
+      v2Requests.delete(id);
+      if (action==='rebind' && next.binding && client.attach && own===generation) {
+        try { await client.attach(next); }
+        catch { if (own===generation) announce('Binding committed. Reconnect this verified editor to acquire its lease.',true); return; }
+      }
+      if (own===generation) await refresh();
+    } finally { mutationPending.delete(id); }
+  }
+  async function renderDevelopmentWorkspaces(own: number) {
+    heading('Workspaces');
+    const create = field('Workspace name');
+    actions(body,create.label,button('Create Workspace',async()=>{
+      if (!create.input.value.trim()) throw new Error('Enter a Workspace name.');
+      await client.request('POST',`${ADMIN}/workspaces`,{contractVersion:2,label:create.input.value.trim()});
+      if (own===generation) await refresh();
+    }));
+    const nextIdentity = await client.currentIdentity().catch(()=>undefined);
+    if (own!==generation || destroyed) return;
+    const choices = agents.items.filter(item=>item.contractVersion===2 && item.suspended!==true);
+    search();
+    table([
+      {key:'label',label:'Workspace',render(w,td){
+        td.append(el('strong',str(w.label)));
+        const connector=agents.items.find(item=>item.id===w.connectorId || item.workspaceId===w.id);
+        p(connector ? str(connector.label) : 'Unassigned',td,'muted');
+      }},
+      {key:'binding',label:'Binding and status',render(w,td){
+        const previous=record(w.binding);
+        const observation=record(w.observation);
+        const fresh=observation.epoch===w.epoch && num(observation.observedAt)+60000>Date.now();
+        p(w.binding ? `${str(previous.slug)} · ${str(previous.generatorId)} · draft ${str(previous.draftId)||'(default)'}` : 'Unbound',td);
+        p(w.paused?'Paused':fresh?'Last heartbeat verified':'Offline or unverified',td,'muted');
+        p(fresh ? observation.dirty===true?'Draft has unsaved edits':observation.dirty===false?'Draft clean':'Draft state unknown' :
+          'Draft state unknown',td,'muted');
+        if (w.transition) p('Transition awaiting settlement',td,'muted');
+      }},
+      {key:'action',label:'Actions',render(w,td){
+        if (w.contractVersion!==2) {
+          td.append(button('Reconnect legacy Workspace',async()=>connectWorkspace(w)));
+          return;
+        }
+        const id=str(w.id),wd=w.binding!==null && w.binding!==undefined;
+        const observation=record(w.observation);
+        const dirty=wd && !(observation.epoch===w.epoch && observation.dirty===false &&
+          num(observation.observedAt)+60000>Date.now());
+        if (nextIdentity && client.bindingProof) {
+          p(`This tab · ${nextIdentity.slug} · ${nextIdentity.generatorId} · draft ${nextIdentity.draftId||'(default)'}`,td,'muted');
+          td.append(button(wd?'Reassign to this tab':'Assign this tab',async()=>{
+            const rebind=async()=>{
+              const cached=v2Requests.get(id);
+              if (cached) return transitionWorkspace(w,'rebind',{},own);
+              const exact=await client.currentIdentity();
+              if (JSON.stringify(exact)!==JSON.stringify(nextIdentity))
+                throw new Error('This editor changed after the actions were shown. Refresh Workspaces.');
+              const probe=client.probe ? record(await client.probe()) : null;
+              if (probe && probe.ready!==true) throw new Error('This editor is not ready.');
+              const proof=record(await client.bindingProof!(w,exact));
+              await transitionWorkspace(w,'rebind',{binding:exact,bindingProof:proof.proof,acknowledgeDirty:dirty},own);
+            };
+            if (dirty && !v2Requests.has(id)) confirmAction('Leave the previous native draft in its current state and reassign?',rebind);
+            else await rebind();
+          }));
+        }
+        if (wd) {
+          td.append(button('Reconnect',async()=>connectWorkspace(w)),
+            button('Detach',()=>confirmAction('Detach this Binding and preserve the native draft?',async()=>
+              transitionWorkspace(w,'detach',{acknowledgeDirty:true},own))));
+        }
+        td.append(button(w.paused?'Resume':'Pause',async()=>{
+          await client.request('PATCH',`${ADMIN}/workspaces/${encodeURIComponent(id)}`,
+            {expectedRevision:w.revision,paused:!w.paused});
+          if (own===generation) await refresh();
+        }));
+        const other=choices.filter(item=>item.id!==w.connectorId);
+        if (other.length) {
+          const chosen=select('Destination Connector',other.map(item=>({value:str(item.id),label:str(item.label)})));
+          td.append(chosen.label,button(w.connectorId?'Transfer':'Assign Connector',async()=>{
+            const selected=other.find(item=>item.id===chosen.input.value);
+            if (!selected) throw new Error('Choose a Connector.');
+            const args={connectorId:selected.id,expectedDestinationConnectorRevision:selected.revision,acknowledgeDirty:dirty};
+            if (w.connectorId) confirmAction('Transfer to the selected Connector and leave the old native draft in place?',async()=>
+              transitionWorkspace(w,'transfer',args,own));
+            else if (dirty) confirmAction('Assign this Connector while preserving the previous draft?',async()=>transitionWorkspace(w,'assign',args,own));
+            else await transitionWorkspace(w,'assign',args,own);
+          }));
+        }
+        if (w.connectorId) td.append(button('Unassign',()=>confirmAction('Remove this Connector assignment and preserve the draft?',async()=>
+          transitionWorkspace(w,'unassign',{acknowledgeDirty:true},own))));
+        if (w.transition && !mutationPending.has(id)) td.append(button('Cancel pending transition',()=>
+          confirmAction('Cancel this transition only after pending effects settle?',async()=>{
+            await client.request('POST',`${ADMIN}/workspaces/${encodeURIComponent(id)}/abort-transition`,
+              {expectedRevision:w.revision,transitionId:record(w.transition).id},{idempotencyKey:crypto.randomUUID()});
+            v2Requests.delete(id);
+            if (own===generation) await refresh();
+          })));
+      }},
+    ],workspaces.items);
   }
   async function renderWorkspaces(own:number) {
     heading("Workspaces");
@@ -1135,9 +1287,11 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     );
   }
   async function renderAgents(own: number) {
-    heading("Agents and OAuth");
+    const v2=state.assignmentContractVersion===2;
+    heading(v2?"Connectors":"Agents and OAuth");
     p(
-      "One Agent targets one Workspace. Connector reuse across conversations shares its Grant and queue.",
+      v2 ? "A Connector can reach multiple assigned Workspaces. Chats using the same Connector share its Grant." :
+        "One Agent targets one Workspace. Connector reuse across conversations shares its Grant and queue.",
       body,
       "muted",
     );
@@ -1150,7 +1304,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         "muted",
       );
     const row = el("div", undefined, "row"),
-      name = field("Agent name"),
+      name = field(v2?"Connector name":"Agent name"),
       target = select(
         "Workspace",
         workspaces.items
@@ -1160,13 +1314,13 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     name.input.maxLength = 80;
     row.append(
       name.label,
-      target.label,
-      button("Create Agent", async () => {
-        if (!name.input.value.trim() || !target.input.value)
-          throw new Error("Enter a name and select an unassigned Workspace.");
-        await client.request("POST", `${ADMIN}/agents`, {
+      ...(v2 ? [] : [target.label]),
+      button(v2?"Create Connector":"Create Agent", async () => {
+        if (!name.input.value.trim() || !v2 && !target.input.value)
+          throw new Error(v2?"Enter a Connector name.":"Enter a name and select an unassigned Workspace.");
+        await client.request("POST", `${ADMIN}/${v2?'connectors':'agents'}`, {
           label: name.input.value.trim(),
-          workspaceId: target.input.value,
+          ...(v2 ? {expectedRevision:state.revision} : {workspaceId:target.input.value}),
         });
         await refresh();
       }),
@@ -1181,6 +1335,14 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           render(a, td) {
             p(str(a.label), td);
             p(str(a.id), td, "muted");
+            const legacyWorkspace=workspaces.items.find(w=>w.id===a.workspaceId);
+            if (v2 && a.contractVersion===1 && legacyWorkspace?.binding)
+              td.append(button('Upgrade to v2',()=>confirmAction('Preserve this Binding and require new OAuth consent on the same endpoint?',async()=>{
+                await client.request('POST',`${ADMIN}/connectors/${encodeURIComponent(str(a.id))}/upgrade`,{
+                  expectedRevision:a.revision,expectedWorkspaceRevision:legacyWorkspace.revision,acknowledgeReauthorization:true,
+                },{idempotencyKey:crypto.randomUUID()});
+                if (own===generation) await refresh();
+              })));
           },
         },
         {
@@ -1200,7 +1362,8 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
               ),
             );
             p(
-              `Workspace: ${str(workspaces.items.find((w) => w.id === a.workspaceId)?.label, str(a.workspaceId))}`,
+              a.contractVersion===2 ? `${num(a.assignmentCount)} assigned Workspaces · v2` :
+                `Workspace: ${str(workspaces.items.find((w) => w.id === a.workspaceId)?.label, str(a.workspaceId))}`,
               td,
               "muted",
             );
@@ -1217,7 +1380,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
               button("Rename", async () => {
                 await client.request(
                   "PATCH",
-                  `${ADMIN}/agents/${encodeURIComponent(str(a.id))}`,
+                  `${ADMIN}/${a.contractVersion===2?'connectors':'agents'}/${encodeURIComponent(str(a.id))}`,
                   {
                     expectedRevision: num(a.revision),
                     label: label.input.value.trim(),
@@ -1230,7 +1393,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
                 async () => {
                   await client.request(
                     "PATCH",
-                    `${ADMIN}/agents/${encodeURIComponent(str(a.id))}`,
+                    `${ADMIN}/${a.contractVersion===2?'connectors':'agents'}/${encodeURIComponent(str(a.id))}`,
                     {
                       expectedRevision: num(a.revision),
                       suspended: !a.suspended,
@@ -2939,6 +3102,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   function close() {
     if (!opened) return;
     stopApprovalRefresh();
+    viewAbort?.abort();
     opened = false;
     ++generation;
     try {

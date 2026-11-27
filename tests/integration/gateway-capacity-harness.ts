@@ -52,7 +52,7 @@ export async function createCapacityHarness(
     body: unknown,
     credential = admin,
     method = "POST",
-    idempotencyKey = crypto.randomUUID(),
+    idempotencyKey: string = crypto.randomUUID(),
   ) {
     const response = await mf.dispatchFetch(base + path, {
       method,

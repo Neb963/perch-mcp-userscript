@@ -143,6 +143,8 @@ export class BrowserController {
       consecutivePollFailures: this.consecutivePollFailures,
       lastPollSuccessAt: this.lastPollSuccessAt ?? null,
       leasePresent: !!this.lease,
+      bindingGeneration: this.lease?.bindingGeneration ?? null,
+      assignmentGeneration: this.lease?.assignmentGeneration ?? null,
       leaseRemainingMs: this.lease ? Math.max(0, this.lease.expiresAt - Date.now()) : 0,
       stopped: this.stopped,
       notifications: this.push?.diagnostics() ?? {state: "http"},
@@ -273,6 +275,7 @@ export class BrowserController {
       this.pollAbort = new AbortController();
       if (claim.notifications?.version === 1 && typeof this.transport.notifications === "function")
         this.push = this.transport.notifications(claim);
+      if (scoped) void this.renew(claim);
       this.heartbeat = setInterval(() => {void this.renew(claim);}, 60000);
       (this.heartbeat as unknown as {unref?:()=>void}).unref?.();
       this.updateStatus({connection:"connected",workspace:workspaceId,dirty:probe.dirty,

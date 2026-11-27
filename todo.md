@@ -21,8 +21,8 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 | V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Scoped execution verified; grouped publication and expanded integration pending |
 | V06 | V05 | Preview freshness, diagnostics, viewport, actual-pixel feasibility and verified Save | Pending |
 | V07 | V01–V06 | Exact v2 catalog, archive/export compatibility, retirement and agent knowledge | v2 catalog and knowledge verified; compatibility retirement deferred |
-| V08 | V02–V07 | Manager, compatible migration/rollback and one-click rebind | In progress |
-| V09 | V01–V08 | Native/legacy workload, capacity, OAuth and fault measurements | Pending |
+| V08 | V02–V07 | Manager, compatible migration/rollback and one-click rebind | Bundled manager and upgrade verified; OWNER rollout deferred |
+| V09 | V01–V08 | Native/legacy workload, capacity, OAuth and fault measurements | In progress |
 | V10 | V00–V09 | Exact-head offline qualification, artifacts and unmerged PR | Pending |
 
 ### V00 evidence
@@ -115,6 +115,17 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 - Expose a v2 Workspaces and Connectors view only when the gateway reports an explicit compatible assignment contract. Preserve exact previous and intended Binding, native-ready proof, management CAS and idempotent receipt recovery.
 - Keep one click for a clean or unbound Workspace. Require acknowledgement when old draft state is dirty or unknown. Separate assign/rebind, reconnect, pause, detach and transfer.
 - Use the current rendered generation to suppress stale manager responses, and keep conflicts or unresolved effects visible. Test the bundled synthetic UI and document the migration and rollback gates.
+
+### V08 evidence
+
+- Typecheck and 37 focused tests passed. The bundled manager rendered 30 Workspaces in a synthetic document, displayed the v2 navigation, and issued one clean rebind before reconnecting. The real local Worker verified same-endpoint v1 upgrade, v1 token denial and new SDK consent. New tab proof and segment routes pass the actual userscript transport allowlist.
+- The operator migration document covers retained data, pause, version skew, fresh consent and compatible-only rollback. Real Firefox interaction and production verification remain DEFERRED_OWNER. Legacy upgrade requires new consent after the fixed-scope Grant fence commits.
+
+### V09 plan
+
+- Measure v2 production SDK ingress and private dispatch lifecycle in local workerd with metered SQL, Worker/DO, alarm and KV usage. Compare legacy/native with the v0.2 replay and use the actual workload denominator when projecting traffic.
+- Run discovery at multiple Connector and Workspace counts, and report exact target-versus-measured status. Retain the current OAuth TTL and disabled admission estimate if the full budget and interoperability trade-offs remain unverified.
+- Record raw measurements, account quota assumptions, nondeterministic timing and owner-only billing/hibernation evidence. Results remain local observations.
 
 ## Historical v0.1–v0.2.0 implementation ledger
 

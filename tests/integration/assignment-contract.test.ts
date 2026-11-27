@@ -202,3 +202,26 @@ test('Binding transition holds dispatched effects, preserves original Grant acce
     await h.close();
   }
 });
+
+test('v1 Connector upgrade preserves the endpoint and native Binding while requiring fresh consent',async()=>{
+  const h=await createCapacityHarness(1,{DEVELOPMENT_CONTRACT_V2_ENABLED:'true'});
+  try {
+    const old=h.fixtures[0]!;
+    const w=await h.get(admin+'/workspaces/'+old.workspaceId);
+    const a=await h.get(admin+'/agents/'+old.agentId);
+    const oldToken=await issueSyntheticToken(h,old);
+    const key=crypto.randomUUID();
+    const route=admin+'/connectors/'+old.agentId+'/upgrade';
+    const body={expectedRevision:a.revision,expectedWorkspaceRevision:w.revision,acknowledgeReauthorization:true};
+    const next=await h.request(route,body,undefined,'POST',key);
+    assert.deepEqual(await h.request(route,body,undefined,'POST',key),next);
+    assert.equal((next.connector as Record<string,unknown>).endpoint,a.endpoint);
+    assert.deepEqual((next.workspace as Record<string,unknown>).binding,old.binding);
+    assert.equal(next.reauthorizationRequired,true);
+    await assert.rejects(h.internal(h.registry,'/internal/authorize',{props:old.props,agentId:old.agentId}),/REVOKED/);
+    const denied=await h.mf.dispatchFetch(String(a.endpoint),{method:'POST',headers:{Authorization:'Bearer '+oldToken,
+      'Content-Type':'application/json',Accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'})});
+    assert.equal(denied.status,403);
+    await issueSyntheticToken(h,old);
+  } finally {await h.close();}
+});

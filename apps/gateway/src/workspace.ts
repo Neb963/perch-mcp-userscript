@@ -738,7 +738,7 @@ export class Workspace {
             current.epoch !== l.epoch || current.bindingRevision !== l.bindingRevision ||
             current.tabInstanceId !== l.tabInstanceId || current.secretHash !== l.secretHash)
           throw new ApiError("STALE_EPOCH", "Lease changed during admission.", 409);
-        const fence = w.contractVersion === 2 ? this.db.get<TransitionFence>('binding-transition/v2') : undefined;
+        const fence = this.env.DEVELOPMENT_CONTRACT_V2_ENABLED === 'true' ? this.db.get<TransitionFence>('binding-transition/v2') : undefined;
         if (fence && !fence.aborted && fence.bindingRevision === w.bindingRevision)
           throw new ApiError('TRANSITION_BLOCKED', 'Workspace is fenced for a Binding change.', 409);
         const all = this.journal.activeStats();
@@ -1163,6 +1163,11 @@ export class Workspace {
         if (!fresh || fresh.phase !== "ADMITTED" || fresh.epoch !== op.epoch ||
             fresh.bindingRevision !== op.bindingRevision || fresh.tabInstanceId !== op.tabInstanceId || fresh.dispatchAttempt?.id!==attempt.id)
           throw new ApiError("CONFLICT", "Operation already consumed.", 409);
+        if (fresh.cancelRequested) {
+          delete fresh.dispatchAttempt;
+          this.cancelUndispatched(fresh,'Operation was cancelled before the browser received dispatch.');
+          return;
+        }
         if (fresh.deadlineMs <= Date.now() || attempt.reconcileAt<=Date.now()) {
           this.expireOperation(fresh, Date.now());
           return;
