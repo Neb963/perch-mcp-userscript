@@ -20,8 +20,8 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 | V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | Primitives verified; wire integration pending |
 | V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Scoped execution verified; grouped publication and expanded integration pending |
 | V06 | V05 | Preview freshness, diagnostics, viewport, actual-pixel feasibility and verified Save | Pending |
-| V07 | V01–V06 | Exact v2 catalog, archive/export compatibility, retirement and agent knowledge | In progress |
-| V08 | V02–V07 | Manager, compatible migration/rollback and one-click rebind | Pending |
+| V07 | V01–V06 | Exact v2 catalog, archive/export compatibility, retirement and agent knowledge | v2 catalog and knowledge verified; compatibility retirement deferred |
+| V08 | V02–V07 | Manager, compatible migration/rollback and one-click rebind | In progress |
 | V09 | V01–V08 | Native/legacy workload, capacity, OAuth and fault measurements | Pending |
 | V10 | V00–V09 | Exact-head offline qualification, artifacts and unmerged PR | Pending |
 
@@ -103,6 +103,18 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 - Package the 11 checked-in skills, reference and advisory workflow with standalone Markdown install/use guidance and generated exact runtime tool schemas.
 - Gate all public v2 calls by the 19-tool catalog. Keep unchanged legacy Grant readers and operator Resource archive/export. Verify v2 denials and document what must remain during compatibility rollout.
 - Verify package hashes, provenance and standalone file counts. Treat retirement of compatibility v1 runtime and remaining operator end-to-end automation as separate release gates until verified.
+
+### V07 evidence
+
+- The v2 MCP catalog is limited to the 19 generated schemas. Resource/media methods are excluded for v2 callers. Legacy fixed-scope Grant compatibility and operator Resource archive/export retain their existing authority and records.
+- The knowledge package builds exact schema JSON, Markdown tool reference and examples, eleven repository skill files, local instructions, advisory workflow and manifest SHA-256 digests. Local package verification exercised the Worker health and all inner/external digests. The intermediate package was dirty and was used only to verify packaging mechanics.
+- Legacy Resource and paid-media implementations remain for staged v1 compatibility. Do not purge or retire recovery data during v2 preparation. Physical legacy runtime and dependency retirement is still open.
+
+### V08 plan
+
+- Expose a v2 Workspaces and Connectors view only when the gateway reports an explicit compatible assignment contract. Preserve exact previous and intended Binding, native-ready proof, management CAS and idempotent receipt recovery.
+- Keep one click for a clean or unbound Workspace. Require acknowledgement when old draft state is dirty or unknown. Separate assign/rebind, reconnect, pause, detach and transfer.
+- Use the current rendered generation to suppress stale manager responses, and keep conflicts or unresolved effects visible. Test the bundled synthetic UI and document the migration and rollback gates.
 
 ## Historical v0.1–v0.2.0 implementation ledger
 

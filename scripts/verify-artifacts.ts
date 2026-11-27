@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { unzipSync } from "fflate";
 import { Miniflare } from "miniflare";
+import { developmentToolDefinitions } from "../packages/contracts/src/development-v2.js";
 const bytes = await readFile("dist/perch-mcp-candidate.zip"),
   files = unzipSync(bytes);
 const checksums = new TextDecoder().decode(files["SHA256SUMS.txt"]);
@@ -31,6 +32,21 @@ for (const [path, contents] of Object.entries(cloud)) assert.deepEqual(contents,
 const release = JSON.parse(new TextDecoder().decode(files["RELEASE.json"]));
 if (process.env.PERCH_REQUIRE_CLEAN_ARTIFACT === "1") assert.equal(release.sourceDirty, false);
 assert.deepEqual(files["perch-mcp.user.js"], files["perch-mcp.user.txt"]);
+const knowledge = unzipSync(files["perch-agent-knowledge.zip"]!);
+const knowledgeManifest = JSON.parse(new TextDecoder().decode(knowledge["manifest.json"]));
+assert.equal(knowledgeManifest.contractVersion,2);
+assert.equal(knowledgeManifest.sourceTree,release.sourceTree);
+assert.equal(knowledgeManifest.packageVersion,release.version);
+assert.equal(knowledgeManifest.entries.length,Object.keys(knowledge).length-1);
+for (const item of knowledgeManifest.entries) {
+  const bytes = knowledge[item.path]!;
+  assert.ok(bytes);
+  assert.equal(bytes.length,item.bytes);
+  assert.equal(createHash("sha256").update(bytes).digest("hex"),item.sha256);
+  assert.deepEqual(bytes,files["perch-agent-knowledge/"+item.path]);
+}
+assert.deepEqual(JSON.parse(new TextDecoder().decode(knowledge["tool-schemas.json"])).tools,
+  JSON.parse(JSON.stringify(developmentToolDefinitions)));
 assert.ok(
   new TextDecoder()
     .decode(files["perch-mcp.user.js"])
