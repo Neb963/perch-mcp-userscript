@@ -14,16 +14,16 @@ export class RegistryIndex {
   constructor(private db:SqlRecords) {
     if (db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='registry_index_version_v1'").length) return;
     db.transaction(()=>{
-      db.query("CREATE TABLE registry_entity_v1 (key TEXT PRIMARY KEY, kind TEXT NOT NULL, due INTEGER, expires INTEGER, workspace TEXT NOT NULL, state TEXT NOT NULL, hold INTEGER NOT NULL, revision INTEGER, endpoint TEXT)");
+      db.query("CREATE TABLE registry_entity_v1 (key TEXT PRIMARY KEY, kind TEXT NOT NULL, due INTEGER, expires INTEGER, workspace TEXT NOT NULL, state TEXT NOT NULL, hold INTEGER NOT NULL, revision INTEGER, endpoint TEXT) WITHOUT ROWID");
       db.query("CREATE INDEX registry_kind_v1 ON registry_entity_v1(kind,key)");
       db.query("CREATE INDEX registry_due_v1 ON registry_entity_v1(kind,due) WHERE due IS NOT NULL");
       db.query("CREATE INDEX registry_workspace_v1 ON registry_entity_v1(kind,workspace,state,hold)");
       db.query("CREATE INDEX registry_approval_v1 ON registry_entity_v1(kind,expires,key) WHERE kind='approval'");
-      db.query("CREATE TABLE registry_dirty_v1 (key TEXT PRIMARY KEY)");
-      db.query("CREATE TABLE registry_counts_v1 (kind TEXT PRIMARY KEY, count INTEGER NOT NULL)");
+      db.query("CREATE TABLE registry_dirty_v1 (key TEXT PRIMARY KEY) WITHOUT ROWID");
+      db.query("CREATE TABLE registry_counts_v1 (kind TEXT PRIMARY KEY, count INTEGER NOT NULL) WITHOUT ROWID");
       db.query("CREATE TRIGGER registry_count_insert_v1 AFTER INSERT ON registry_entity_v1 BEGIN INSERT INTO registry_counts_v1 VALUES(NEW.kind,1) ON CONFLICT(kind) DO UPDATE SET count=count+1; END");
       db.query("CREATE TRIGGER registry_count_delete_v1 AFTER DELETE ON registry_entity_v1 BEGIN UPDATE registry_counts_v1 SET count=count-1 WHERE kind=OLD.kind; END");
-      db.query("CREATE TABLE registry_activity_v1 (key TEXT PRIMARY KEY, base TEXT, notice TEXT, workspace TEXT NOT NULL, phase TEXT NOT NULL, held INTEGER NOT NULL, updated INTEGER NOT NULL)");
+      db.query("CREATE TABLE registry_activity_v1 (key TEXT PRIMARY KEY, base TEXT, notice TEXT, workspace TEXT NOT NULL, phase TEXT NOT NULL, held INTEGER NOT NULL, updated INTEGER NOT NULL) WITHOUT ROWID");
       db.query("CREATE INDEX registry_activity_order_v1 ON registry_activity_v1(held DESC,updated DESC,key)");
       db.query("CREATE INDEX registry_activity_workspace_v1 ON registry_activity_v1(workspace,held DESC,updated DESC,key)");
       db.query("CREATE INDEX registry_activity_phase_v1 ON registry_activity_v1(phase,held DESC,updated DESC,key)");

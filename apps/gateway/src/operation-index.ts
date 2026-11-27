@@ -17,8 +17,8 @@ export class OperationIndex<T extends IndexedOperation> {
     if (db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='operation_index_state_v1'").length &&
         db.query("SELECT id FROM operation_index_state_v1 WHERE id=1").length) return;
     db.transaction(() => {
-      db.query("CREATE TABLE IF NOT EXISTS operation_index_v1 (key TEXT PRIMARY KEY, sequence INTEGER NOT NULL, created INTEGER NOT NULL, terminal INTEGER NOT NULL, phase TEXT NOT NULL, active INTEGER NOT NULL, pending INTEGER NOT NULL, hold INTEGER NOT NULL, leaseBlock INTEGER NOT NULL, retention INTEGER, due INTEGER, argSize INTEGER NOT NULL, resultSize INTEGER NOT NULL)");
-      db.query("CREATE TABLE IF NOT EXISTS operation_dirty_v1 (key TEXT PRIMARY KEY)");
+      db.query("CREATE TABLE IF NOT EXISTS operation_index_v1 (key TEXT PRIMARY KEY, sequence INTEGER NOT NULL, created INTEGER NOT NULL, terminal INTEGER NOT NULL, phase TEXT NOT NULL, active INTEGER NOT NULL, pending INTEGER NOT NULL, hold INTEGER NOT NULL, leaseBlock INTEGER NOT NULL, retention INTEGER, due INTEGER, argSize INTEGER NOT NULL, resultSize INTEGER NOT NULL) WITHOUT ROWID");
+      db.query("CREATE TABLE IF NOT EXISTS operation_dirty_v1 (key TEXT PRIMARY KEY) WITHOUT ROWID");
       db.query("CREATE TABLE IF NOT EXISTS operation_index_state_v1 (id INTEGER PRIMARY KEY, eligible INTEGER NOT NULL, resultSize INTEGER NOT NULL)");
       db.query("CREATE INDEX IF NOT EXISTS op_active_v1 ON operation_index_v1(active,sequence) WHERE active=1");
       db.query("CREATE INDEX IF NOT EXISTS op_pending_v1 ON operation_index_v1(pending,created) WHERE pending=1");

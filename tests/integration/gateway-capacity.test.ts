@@ -460,6 +460,7 @@ test("SQL cursor budgets do not scale with terminal history while idle or active
     const f = h.fixtures[0]!;
     const stub = h.wns.get(h.wns.idFromName(f.workspaceId));
     const usage = async () => await h.internal(stub,"/internal/sql-usage",{}) as unknown as {reads:number;writes:number;unmetered:number;statements:number};
+    const registryUsage=async()=>await h.internal(h.registry,"/internal/sql-usage",{}) as unknown as {reads:number;writes:number;unmetered:number;statements:number};
     const measure = async (fn:()=>Promise<unknown>) => {
       const before=await usage(); await fn(); const after=await usage();
       assert.equal(after.unmetered,0,"real SQL cursors must be metered");
@@ -469,9 +470,15 @@ test("SQL cursor budgets do not scale with terminal history while idle or active
     };
     const idle=()=>h.browser(f,"poll",{waitMs:0});
     const idleBefore=await measure(idle);
+    const registryBefore=await registryUsage();
     const firstCycle = await measure(()=>h.cycle(f));
+    const registryAfter=await registryUsage();
+    const registryFirst={reads:registryAfter.reads-registryBefore.reads,writes:registryAfter.writes-registryBefore.writes};
     for(let n=1;n<150;n++)await h.cycle(f);
+    const registryLastBefore=await registryUsage();
     const lastCycle = await measure(()=>h.cycle(f));
+    const registryLastAfter=await registryUsage();
+    const registryLast={reads:registryLastAfter.reads-registryLastBefore.reads,writes:registryLastAfter.writes-registryLastBefore.writes};
     const idleAfter=await measure(idle);
     const admitted=await h.admit(f);
     await h.browser(f,"poll",{waitMs:0});
@@ -482,7 +489,8 @@ test("SQL cursor budgets do not scale with terminal history while idle or active
       const r=await stub.fetch("https://internal/api/v1/tab/poll",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+"x".repeat(64)},body:JSON.stringify({workspaceId:f.workspaceId,epoch:f.lease.epoch,tabInstanceId:f.lease.tabInstanceId,waitMs:0})});
       assert.equal(r.status,409);
     });
-    console.log(JSON.stringify({kind:"sql-budget",idleBefore,idleAfter,active,status,invalid,firstCycle,lastCycle}));
+    console.log(JSON.stringify({kind:"sql-budget",idleBefore,idleAfter,active,status,invalid,firstCycle,lastCycle,registryFirst,registryLast}));
+    assert.ok(registryLast.reads<=registryFirst.reads+20,"Registry ordinary operation cost must not scale with history");
     assert.ok(lastCycle.reads<=firstCycle.reads+20, "ordinary cycle history must not amplify reads");
     assert.ok(idleAfter.reads<=idleBefore.reads+10, "idle history must not amplify reads");
     assert.ok(idleAfter.reads<=30 && active.reads<=40 && status.reads<=35);

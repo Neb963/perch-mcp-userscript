@@ -155,7 +155,10 @@ export class Workspace {
     // Invalid public requests must not amplify maintenance work. An alarm or
     // next authorized request drains any pending canonical terminal state.
     const path = new URL(request.url).pathname;
-    if (path !== "/internal/sql-usage" && (response.ok || path.startsWith("/internal/"))) await this.drainTerminalOutbox();
+    if (path !== "/internal/sql-usage" && (response.ok || path.startsWith("/internal/"))) {
+      try {await this.drainTerminalOutbox();}
+      catch {console.error(JSON.stringify({kind:"workspace-maintenance-deferred"}));}
+    }
     return response;
   }
   async alarm(): Promise<void> {
@@ -222,7 +225,7 @@ export class Workspace {
         });
         this.db.transaction(() => {
           const current = this.db.get<Operation>("operation/" + op.operationId);
-          if (current && current.phase === op.phase) {
+          if (current && current.phase === op.phase && !current.terminalNotified) {
             current.terminalNotified = true;
             this.db.put("operation/" + current.operationId, current);
           }
@@ -552,36 +555,30 @@ export class Workspace {
           "Adapter protocol version 1 required.",
           409,
         );
-      const current = this.db.get<Lease>("lease");
-      if (current && current.expiresAt > Date.now())
-        throw new ApiError(
-          "TAB_BUSY",
-          "Another document has an active lease. Release it or wait for expiry.",
-          409,
-        );
+      // Authenticate installation and binding before writing a claim guard or
+      // running expiry. Recheck local ownership after the asynchronous RPC.
+      const approved = await rpc<{
+        workspace: WorkspaceRecord;
+        credentialEpoch: number;
+      }>(registry(this.env), "/internal/claim", {
+        workspaceId,
+        binding: b.binding,
+        credential,
+      });
       const guard = crypto.randomUUID();
       this.db.transaction(() => {
+        this.expire();
+        const current = this.db.get<Lease>("lease");
+        if(current&&current.expiresAt>Date.now())
+          throw new ApiError("TAB_BUSY","Another document has an active lease.",409);
+        if(this.journal.leaseBlocked())
+          throw new ApiError("EFFECT_UNKNOWN","Previous document has an unresolved operation. Reconciliation required before reconnect.",409);
         const claiming = this.db.get<{ expiresAt: number }>("claiming");
-        if (claiming && claiming.expiresAt > Date.now())
-          throw new ApiError(
-            "TAB_BUSY",
-            "Lease claim already in progress.",
-            409,
-          );
-        this.db.put("claiming", { guard, expiresAt: Date.now() + 30000 });
+        if(claiming&&claiming.expiresAt>Date.now())
+          throw new ApiError("TAB_BUSY","Lease claim already in progress.",409);
+        this.db.put("claiming",{guard,expiresAt:Date.now()+30000});
       });
       try {
-        const approved = await rpc<{
-          workspace: WorkspaceRecord;
-          credentialEpoch: number;
-        }>(registry(this.env), "/internal/claim", {
-          workspaceId,
-          binding: b.binding,
-          credential,
-        });
-        this.expire();
-        if (this.journal.leaseBlocked())
-          throw new ApiError("EFFECT_UNKNOWN", "Previous document has an unresolved operation. Reconciliation required before reconnect.", 409);
         const fresh = await rpc<{ epoch: number }>(
           registry(this.env),
           "/internal/epoch",
@@ -601,6 +598,9 @@ export class Workspace {
           permissions: approved.workspace.permissions,
         };
         this.db.transaction(() => {
+          const claim=this.db.get<{guard:string;expiresAt:number}>("claiming");
+          if(claim?.guard!==guard||claim.expiresAt<=Date.now())
+            throw new ApiError("STALE_EPOCH","Claim was superseded or expired.",409);
           this.db.put("lease", l);
           this.db.delete("claiming");
         });
@@ -614,7 +614,9 @@ export class Workspace {
           permissions: l.permissions,
         });
       } catch (error) {
-        this.db.delete("claiming");
+        this.db.transaction(()=>{
+          if(this.db.get<{guard:string}>("claiming")?.guard===guard)this.db.delete("claiming");
+        });
         throw error;
       }
     }

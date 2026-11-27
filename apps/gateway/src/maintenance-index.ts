@@ -9,9 +9,9 @@ export class MaintenanceIndex {
   constructor(private db:SqlRecords){
     if(db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='workspace_maintenance_version_v1'").length)return;
     db.transaction(()=>{
-      db.query("CREATE TABLE workspace_maintenance_v1 (key TEXT PRIMARY KEY,kind TEXT NOT NULL,due INTEGER)");
+      db.query("CREATE TABLE workspace_maintenance_v1 (key TEXT PRIMARY KEY,kind TEXT NOT NULL,due INTEGER) WITHOUT ROWID");
       db.query("CREATE INDEX workspace_maintenance_due_v1 ON workspace_maintenance_v1(due) WHERE due IS NOT NULL");
-      db.query("CREATE TABLE workspace_maintenance_dirty_v1 (key TEXT PRIMARY KEY)");
+      db.query("CREATE TABLE workspace_maintenance_dirty_v1 (key TEXT PRIMARY KEY) WITHOUT ROWID");
       for(const [event,row] of [["INSERT","NEW"],["DELETE","OLD"]] as const)
         db.query(`CREATE TRIGGER workspace_maintenance_dirty_${event.toLowerCase()}_v1 AFTER ${event} ON records WHEN ${tracked(row)} BEGIN INSERT OR IGNORE INTO workspace_maintenance_dirty_v1 VALUES(${row}.key); END`);
       db.query(`CREATE TRIGGER workspace_maintenance_dirty_update_v1 AFTER UPDATE ON records BEGIN INSERT OR IGNORE INTO workspace_maintenance_dirty_v1 SELECT OLD.key WHERE ${tracked("OLD")}; INSERT OR IGNORE INTO workspace_maintenance_dirty_v1 SELECT NEW.key WHERE ${tracked("NEW")}; END`);

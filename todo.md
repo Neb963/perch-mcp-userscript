@@ -307,3 +307,5 @@ Incident confirmed by Cloudflare dashboard (5.93M rows read) and sanitized runti
 - Active expiration has a separate selection path so historical backlog cannot hide expired execution. Chunk updates now use conditional UPSERT and delete only obsolete parts; rollback readers retain the same canonical record format.
 
 - Added indexed media/retired-lease deadlines and bounded cleanup, preserving indefinite uncertain paid media intents. Ordinary polls no longer enumerate media history.
+
+- Authenticate claims before local maintenance and guard writes; fence expired/superseded claim completions. Failed auxiliary outbox maintenance does not rewrite a committed operation response. New derived tables use compact WITHOUT ROWID layout; canonical tables unchanged.
