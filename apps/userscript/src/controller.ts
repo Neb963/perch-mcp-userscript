@@ -15,6 +15,7 @@ import { NativeLifecycle, SavedSourceReader, lifecycleApprovalDigest, type Lifec
 import { GatewayTransport, TransportError } from "./transport.js";
 import { ArtifactStore } from "./artifacts.js";
 import {
+  BrowserError,
   base64ToBytes,
   canonicalPath,
   digest,
@@ -510,7 +511,7 @@ export class BrowserController {
     });
   }
   /** Read-only local journal status; does not require a live gateway lease. */
-  async localRecovery(workspaceId:string):Promise<{revision:string;holds:Array<{
+  async localRecovery(workspaceId:string):Promise<{revision:string;sourceError?:string;holds:Array<{
     id:string;kind:string;state:string;createdAt:number;paths:string[];baseRevision:string;
   }>}> {
     if(!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId))throw new Error('Invalid Workspace ID.');
