@@ -315,17 +315,26 @@ test('Recovery presents a single human-readable action, no unexplained evidence 
 });
 
 test('Blocked Reconnect opens Recovery instead of stranding the operator at TAB_BUSY',async()=>{
- const f=fixture({attach:async()=>{throw Object.assign(new Error('Active lease'),{code:'TAB_BUSY'});}});
+ const identity={generatorId:'generator-1',slug:'synthetic',draftId:'',browserInstallationId:'installation-1'};
+ const w={id:'workspace-1',label:'Synthetic',revision:1,bindingRevision:1,binding:identity,
+   permissions:['READ_SOURCE'],paused:false};
+ const f=fixture({probe:async()=>({ready:true,identity}),
+   attach:async()=>{throw Object.assign(new Error('Active lease'),{code:'TAB_BUSY'});}});
  const delegate=f.client.request;
- f.client.request=async(method,path,body)=>path.endsWith('/recovery')?{
-   workspaceId:'workspace-1',activeLease:{epoch:8,expiresAt:Date.now()+180000},
-   pendingClaimUntil:null,action:'WAIT_FOR_LEASE',blockingOperations:[],
- }:delegate(method,path,body);
+ f.client.request=async(method,path,body)=>{
+   if(path.endsWith('/recovery'))return{
+     workspaceId:'workspace-1',activeLease:{epoch:8,expiresAt:Date.now()+180000},
+     pendingClaimUntil:null,action:'WAIT_FOR_LEASE',blockingOperations:[],
+   };
+   if(path.endsWith('/workspaces'))return{items:[w],revision:1};
+   if(path.endsWith('/workspaces/workspace-1'))return w;
+   return delegate(method,path,body);
+ };
  await f.handle.open('Workspaces');
  click(f.root,'Reconnect');
  await until(()=>/Another editor has the lease/.test(f.root.textContent??''));
  assert.match(f.root.textContent??'',/Recovery/);
- assert.match(f.root.textContent??'',/Reconnect blocked \(TAB_BUSY\)/);
+ assert.match(f.root.textContent??'',/Connection held \(TAB_BUSY\)/);
 });
 
 test('Recovery acknowledges one local journal and never clears peers',async()=>{
@@ -352,4 +361,70 @@ test('Recovery acknowledges one local journal and never clears peers',async()=>{
  click(f.root,'I checked these files — continue');
  await until(()=>acknowledgments.length===1);
  assert.deepEqual(acknowledgments,['journal-a']);
+});
+
+test('paused editor with exact native binding has one primary Connect action, no diagnostics wizard',async()=>{
+ const identity={generatorId:'generator-1',slug:'synthetic',draftId:'',browserInstallationId:'installation-1'};
+ const w={id:'workspace-1',label:'Current generator',revision:3,bindingRevision:2,
+   binding:identity,permissions:['READ_SOURCE'],paused:false};
+ const attached:unknown[]=[];
+ const f=fixture({
+  probe:async()=>({ready:true,identity}),
+  attach:async target=>{attached.push(target);f.handle.setStatus({connection:'connected',workspace:'workspace-1'});},
+ });
+ const old=f.client.request;
+ f.client.request=async(method,path,body)=>{
+  if(path.endsWith('/workspaces'))return {items:[w],revision:3};
+  if(path.endsWith('/workspaces/workspace-1'))return w;
+  return old(method,path,body);
+ };
+ f.handle.setStatus({connection:'paused'});
+ await f.handle.open('Workspaces');
+ assert.match(f.root.textContent??'',/Connect the current editor/);
+ assert.ok([...f.root.querySelectorAll('button')].some(b=>b.textContent==='Connect this editor'));
+ click(f.root,'Connect this editor');
+ await until(()=>attached.length===1);
+ await until(()=>/Editor connected/.test(f.root.textContent??''));
+ assert.equal((attached[0] as {id:string}).id,'workspace-1');
+ assert.doesNotMatch(f.root.innerHTML,/Inspection evidence \(required\)/);
+});
+
+test('Connect explicitly resumes a paused Workspace and does not replay a lost PATCH acknowledgement',async()=>{
+ const identity={generatorId:'generator-1',slug:'synthetic',draftId:'',browserInstallationId:'installation-1'};
+ let paused=true,patchCount=0,attached=0;
+ const w={id:'workspace-1',label:'Paused generator',revision:3,bindingRevision:2,
+   binding:identity,permissions:['READ_SOURCE']};
+ const f=fixture({probe:async()=>({ready:true,identity}),attach:async()=>{attached++;}});
+ const old=f.client.request;
+ f.client.request=async(method,path,body)=>{
+  if(path.endsWith('/workspaces'))return {items:[{...w,paused}],revision:3};
+  if(path.endsWith('/workspaces/workspace-1')&&method==='GET')return {...w,paused,revision:paused?3:4};
+  if(path.endsWith('/workspaces/workspace-1')&&method==='PATCH'){
+   patchCount++;assert.deepEqual(body,{expectedRevision:3,paused:false});
+   paused=false;throw new Error('Lost response after committed pause change');
+  }
+  return old(method,path,body);
+ };
+ await f.handle.open('Workspaces');
+ click(f.root,'Resume Workspace and connect');
+ await until(()=>attached===1);
+ assert.equal(patchCount,1,'a lost acknowledgement must cause GET reconciliation, not a second write');
+ assert.equal(paused,false);
+});
+
+test('matching native Generator with changed installation ID offers explicit Rebind, not a bad lease claim',async()=>{
+ const identity={generatorId:'generator-1',slug:'synthetic',draftId:'',browserInstallationId:'old-browser'};
+ const w={id:'workspace-1',label:'Reinstalled browser',revision:7,bindingRevision:4,
+   binding:identity,permissions:['READ_SOURCE'],paused:false};
+ let attachCount=0;
+ const f=fixture({probe:async()=>({ready:true,identity}),attach:async()=>{attachCount++;}});
+ const old=f.client.request;
+ f.client.request=async(method,path,body)=>{
+  if(path.endsWith('/workspaces'))return {items:[w],revision:7};
+  return old(method,path,body);
+ };
+ await f.handle.open('Workspaces');
+ assert.match(f.root.textContent??'',/saved browser installation differs/);
+ assert.ok([...f.root.querySelectorAll('button')].some(b=>b.textContent==='Rebind this editor'));
+ assert.equal(attachCount,0);
 });

@@ -90,6 +90,10 @@ export class BrowserController {
   private lastFailureCode?: string;
   private currentStatus: ControllerStatus = { connection: "offline" };
   private stopped = true;
+  /** Monotonic attachment generation. A late claim must never undo Pause. */
+  private connectionGeneration = 0;
+  private lastAttachStage: string | null = null;
+  private lastAttachCode: string | null = null;
   private executing = false;
   /** Browser-local iframe geometry uncertainty; never confused with provider effects. */
   private viewportUncertain = false;
@@ -120,86 +124,118 @@ export class BrowserController {
       leasePresent: !!this.lease,
       leaseRemainingMs: this.lease ? Math.max(0, this.lease.expiresAt - Date.now()) : 0,
       stopped: this.stopped,
+      failureStage: this.lastAttachStage,
+      attachFailureCode: this.lastAttachCode,
+      statusReason: this.currentStatus.reason ?? null,
     };
   }
   async attach(workspace: Record<string, unknown>): Promise<void> {
+    const workspaceId = typeof workspace.id === "string" ? workspace.id : "";
     if (this.executing)
-      throw Object.assign(
-        new Error(
-          "An operation is still executing. Pause and reconcile before switching Workspaces.",
-        ),
-        { code: "TAB_BUSY" },
-      );
-    await this.pause();
-    if (typeof workspace.id !== "string") throw new Error("Invalid Workspace.");
-    const probe = await this.adapter.probe();
-    if (!probe.ready || !probe.identity)
-      throw new Error(
-        "Native editor is not ready; inspect the read-only probe.",
-      );
-    const identity = probe.identity;
-    const candidateVfs = new VirtualFileSystem(
-      this.adapter,
-      this.store,
-      String(workspace.id),
-    );
-    await this.syncResolvedLocal(candidateVfs, String(workspace.id));
-    const binding = {
-      ...identity,
-      browserInstallationId: await this.transport.installationId(),
-    };
-    // Bind is an explicit manager action. Claim does not create or change authorization.
-    const claim = (await this.transport.tab("/api/v1/tab/claim", {
-      workspaceId: workspace.id,
-      binding,
-      tabInstanceId: this.tabInstanceId,
-      adapterVersion: "1",
-    })) as Lease;
-    if (
-      !claim ||
-      claim.workspaceId !== workspace.id ||
-      claim.tabInstanceId !== this.tabInstanceId ||
-      !Number.isInteger(claim.epoch) ||
-      claim.epoch < 1 ||
-      !claim.leaseCredential ||
-      !Array.isArray(claim.permissions)
-    )
-      throw new Error("Gateway returned an invalid lease.");
-    this.adapter.bind(identity);
-    this.identity = identity;
-    this.lease = claim;
-    this.vfs = candidateVfs;
-    this.source = new SourceTools(this.vfs, this.adapter);
-    this.viewportUncertain = false; // New document/lease: old CSS is not canonical provider state.
-    this.stopped = false;
-    this.lastFailureCode = undefined;
-    this.consecutivePollFailures = 0;
-    this.pollAbort = new AbortController();
-    this.heartbeat = setInterval(() => {
-      void this.renew(claim);
-    }, 60000);
-    (this.heartbeat as unknown as { unref?: () => void }).unref?.();
-    this.updateStatus({
-      connection: "connected",
-      workspace: String(workspace.id),
-      dirty: probe.dirty,
-    });
-    this.running = this.poll().catch((error: unknown) => {
-      if (this.lease !== claim || this.stopped) return;
-      this.stopped = true;
-      this.pollAbort?.abort();
-      if (this.heartbeat) clearInterval(this.heartbeat);
-      this.heartbeat = undefined;
-      this.lastFailureCode = error instanceof TransportError
-        ? error.code : "POLL_FAILED";
-      this.updateStatus({
-        connection: "offline",
-        workspace: String(workspace.id),
-        reason: `Poll stopped (${this.lastFailureCode}). Inspect diagnostics and reconcile uncertain operations before reconnecting.`,
+      throw Object.assign(new Error("Finish the active operation before changing the editor connection."), {code: "TAB_BUSY"});
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId))
+      throw Object.assign(new Error("Choose a valid Workspace."), {code: "INVALID_INPUT"});
+    const previousStatus = this.currentStatus;
+    const generation = ++this.connectionGeneration;
+    let stage = "NATIVE_EDITOR";
+    this.lastAttachCode = null;
+    this.lastAttachStage = stage;
+    this.updateStatus({connection: "connecting", workspace: workspaceId,
+      reason: "Checking current native editor before acquiring its lease."});
+    try {
+      // Read-only preflight BEFORE releasing any existing lease: a missing
+      // native editor must not silently replace the UI with `paused`.
+      const probe = await this.adapter.probe();
+      if (!probe.ready || !probe.identity)
+        throw Object.assign(new Error("This page is not a ready Perchance editor. Open your generator's Edit view and reconnect."),
+          {code:"NATIVE_EDITOR_NOT_READY"});
+      const identity = probe.identity;
+      const binding = workspace.binding;
+      if (!binding || typeof binding !== "object" || Array.isArray(binding) ||
+          !equalIdentity(binding as NativeIdentity, identity))
+        throw Object.assign(new Error("This Workspace targets a different generator or draft. Use its explicit Bind action; connection cannot replace it."),
+          {code:"BINDING_MISMATCH"});
+      const installationId = await this.transport.installationId();
+      if ((binding as {browserInstallationId?:unknown}).browserInstallationId !== installationId)
+        throw Object.assign(new Error("This Workspace belongs to another browser installation. Rebind explicitly to revoke old Grants."),
+          {code:"BINDING_MISMATCH"});
+      const candidateVfs = new VirtualFileSystem(this.adapter, this.store, workspaceId);
+      stage = "LOCAL_JOURNAL";
+      this.lastAttachStage = stage;
+      await this.syncResolvedLocal(candidateVfs, workspaceId);
+      if (generation !== this.connectionGeneration) return;
+      // Pause is only reached after a complete native and local preflight.
+      // Its intermediate status must not be mistaken for a requested Stop.
+      await this.pause();
+      const claimGeneration = this.connectionGeneration;
+      if (claimGeneration !== generation + 1) return;
+      this.updateStatus({connection:"connecting",workspace:workspaceId,
+        reason:"Requesting the verified editor lease."});
+      const claimBinding = {...identity,browserInstallationId:installationId};
+      stage = "GATEWAY_CLAIM";
+      this.lastAttachStage = stage;
+      const claim = (await this.transport.tab("/api/v1/tab/claim", {
+        workspaceId, binding: claimBinding, tabInstanceId: this.tabInstanceId,
+        adapterVersion: "1",
+      })) as Lease;
+      if (!claim || claim.workspaceId !== workspaceId ||
+          claim.tabInstanceId !== this.tabInstanceId ||
+          !Number.isInteger(claim.epoch) || claim.epoch < 1 ||
+          !claim.leaseCredential || !Array.isArray(claim.permissions))
+        throw Object.assign(new Error("Gateway lease response is invalid."),{code:"INVALID_RESPONSE"});
+      // Pause/Stop may race a slow claim reply. Never revive the old tab;
+      // attempt a best-effort release using only the returned lease secret.
+      if (claimGeneration !== this.connectionGeneration) {
+        try { await this.transport.tab("/api/v1/tab/release",{
+          workspaceId:claim.workspaceId,epoch:claim.epoch,
+          tabInstanceId:claim.tabInstanceId,
+        },claim.leaseCredential); } catch { /* Expiration remains authoritative. */ }
+        return;
+      }
+      this.adapter.bind(identity);
+      this.identity = identity;
+      this.lease = claim;
+      this.vfs = candidateVfs;
+      this.source = new SourceTools(this.vfs, this.adapter);
+      this.viewportUncertain = false;
+      this.stopped = false;
+      this.lastFailureCode = undefined;
+      this.lastAttachCode = null;
+      this.lastAttachStage = null;
+      this.consecutivePollFailures = 0;
+      this.pollAbort = new AbortController();
+      this.heartbeat = setInterval(() => {void this.renew(claim);}, 60000);
+      (this.heartbeat as unknown as {unref?:()=>void}).unref?.();
+      this.updateStatus({connection:"connected",workspace:workspaceId,dirty:probe.dirty});
+      this.running = this.poll().catch((error:unknown) => {
+        if (this.lease !== claim || this.stopped) return;
+        this.stopped = true;
+        this.pollAbort?.abort();
+        if (this.heartbeat) clearInterval(this.heartbeat);
+        this.heartbeat = undefined;
+        this.lastFailureCode = error instanceof TransportError ? error.code : "POLL_FAILED";
+        this.updateStatus({connection:"offline",workspace:workspaceId,
+          reason:`Poll stopped (${this.lastFailureCode}). Read-only reconnect will check the lease and any pending effects.`});
       });
-    });
+    } catch (error) {
+      if (generation !== this.connectionGeneration &&
+          // The internal pause increments the generation exactly once.
+          generation + 1 !== this.connectionGeneration) throw error;
+      const code=error && typeof error==="object" && "code" in error &&
+        typeof error.code==="string" ? error.code : "CONNECTION_FAILED";
+      this.lastFailureCode = code;
+      this.lastAttachCode = code;
+      this.lastAttachStage = stage;
+      const blocked=["BINDING_MISMATCH","EFFECT_UNKNOWN","TAB_BUSY","PAUSED","SCOPE_DENIED"].includes(code);
+      const reason=`Connection failed at ${stage} (${code}). ${error instanceof Error ? error.message : "Inspect the editor and Workspace before retrying."}`;
+      // A failed preflight never evicts an unrelated healthy lease.
+      this.updateStatus(this.lease ? {...previousStatus,reason} :
+        {connection:blocked?"blocked":"offline",workspace:workspaceId,reason});
+      throw error;
+    }
   }
   async pause(): Promise<void> {
+    const generation = ++this.connectionGeneration;
     this.stopped = true;
     this.pollAbort?.abort();
     this.pollAbort = undefined;
@@ -220,6 +256,7 @@ export class BrowserController {
         /* authoritative gateway expires lease conservatively */
       }
     }
+    if (generation !== this.connectionGeneration) return;
     this.tools?.dispose?.();
     this.updateStatus({
       connection: this.transport.configuration().paired ? "paused" : "unpaired",

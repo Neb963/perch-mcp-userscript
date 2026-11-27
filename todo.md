@@ -226,3 +226,15 @@ Evidence: docs/verification/epoch10-recovery-v0112.md. Gateway v0.1.7 must be de
 Evidence: live `perch-mcp-diagnostics9.json` (0.1.12/0.1.7): successful long-lived lease/polls with recent preview `UNSUPPORTED_INTERFACE` after `STALE_EPOCH`, plus independent native byte-wrapper unsupported error and a later `TAB_OFFLINE` on live read-only status. No provider mutation attempted. Visual audit: synthetic Chromium 1366×768 and 390×844 ShadowRoot manager screenshots before/after UI improvements.
 
 Changes: frame-specific 15-second native preview attestation cache invalidated on reload, read-only status preflight; guarded byte structured-clone crossing Firefox page realm; 45-second idle viewport CSS restoration and immediate failed-resize cleanup; bounded transient poll retries through authoritative lease expiration, single-flight read-only autoreconnect on network/visibility with 1–60s backoff and strict pause/unknown-effect fences; Recovery one-action UX, compact Workspace surface and stacked narrow-screen data tables. Unimplemented provider tools remain unsupported; gateway 0.1.7 unchanged. Type, test, release and dry-run verification are required before merge. Full native Firefox live re-test remains open; see docs/verification/epoch11-hardening-v0113.md.
+
+### Epoch 12 / v0.1.14 — address paused-without-Workspace dead end
+
+- [x] Reinspect 0.1.13 diagnostics13: paired healthy gateway, stopped browser, manager paused without Workspace, no tab claim. Avoid inventing a held Gateway operation.
+- [x] Reorder controller attachment: validate native ID, binding and local journal before pause/claim; report exact failure stage and preserve established connections.
+- [x] Fence Stop against late claim replies and queued connection attempts; release stale lease best effort without reconnecting.
+- [x] Add guided one-click Connect/Resume, explicit rebind/Link paths, and strict multi-Workspace selection.
+- [x] Preserve bootstrap and connect error provenance in redacted diagnostics; retry native initialization read-only.
+- [ ] CI strict typecheck/tests, release hashes, Worker dry-run, tested TXT and merge evidence.
+- [ ] Live Firefox disposable-Generator acceptance after operator install; no production mutation during development.
+
+See `docs/verification/epoch12-connection-repair-v0114.md`.
