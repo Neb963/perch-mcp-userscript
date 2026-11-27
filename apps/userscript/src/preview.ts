@@ -215,8 +215,9 @@ export class PreviewAdapter {
     this.appliedRevision = undefined;
     this.generation = undefined;
     const receipt = checkedReceipt(await deadline(this.options.bridge.refresh(preambleJs), 30_000));
+    const receiptEpoch = this.currentEpoch();
     if (receipt.appliedRevision !== expected || await this.options.revision() !== expected ||
-        (this.options.requireDocumentProof && !receipt.previewGeneration)) throw new ExecutionError('NATIVE_CONFLICT', 'Source changed during refresh or the native frame did not attest the intended source revision. Refresh again after inspecting manual edits.', 'PARTIAL');
+        (this.options.requireDocumentProof && (!receipt.previewGeneration || receiptEpoch !== this.currentEpoch()))) throw new ExecutionError('NATIVE_CONFLICT', 'Source changed during refresh or the native frame did not attest the intended source revision. Refresh again after inspecting manual edits.', 'PARTIAL');
     this.syncAttestationFrame();
     this.appliedRevision = expected; this.generation = receipt.previewGeneration;
     this.attested.add('refresh');

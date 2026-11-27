@@ -138,6 +138,7 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 - Qualify the clean remote PR-head tree with locked install, strict typecheck, full offline tests, clean artifact build, exact digest verification and local Wrangler dry-run only.
 - Package matching userscript TXT/JS, Worker, source, candidate, agent knowledge, release metadata and checksums. Preserve historical v0.2 evidence and release gates.
 - Publish the unmerged development PR with exact head and acceptance matrix. Distinguish owner-only gates and remaining offline evidence gaps. No production, preview, deployment or merge.
+- First exact-head suite found a v1 cancellation regression while dispatch authorization awaited. Preserve the v1 cancellation during ADMITTED state and the v2 cooperative signal semantics. Rerun the full exact-head suite and reissue artifacts after the fix.
 
 ## Historical v0.1–v0.2.0 implementation ledger
 

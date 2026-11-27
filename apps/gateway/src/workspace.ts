@@ -452,6 +452,7 @@ export class Workspace {
     };
     op.terminalAt = Date.now();
     delete op.args;
+    delete op.dispatchAttempt;
     this.operations.put('operation/' + op.operationId, op);
   }
   private async authorizeScopedResult(op: Operation, b: Record<string, unknown>): Promise<void> {
@@ -837,7 +838,7 @@ export class Workspace {
       if (this.db.transaction(() => this.expireOperation(authorizedOperation, Date.now())))
         throw new ApiError("NOT_FOUND", "Operation retention expired.", 404);
       if (path === "/internal/cancel") {
-        if (op.phase === "ADMITTED" && !op.dispatchAttempt) {
+        if (op.phase === "ADMITTED" && (!scoped || !op.dispatchAttempt)) {
           this.db.transaction(() => this.cancelUndispatched(authorizedOperation, 'Queued operation cancelled before dispatch.'));
         } else if (!op.terminalAt && scoped) {
           op.cancelRequested = true;
