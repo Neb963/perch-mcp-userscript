@@ -1,4 +1,6 @@
 import { SqlRecords } from "./sql.js";
+import { ApiError } from "./common.js";
+import { CanonicalActivity, type ActivityStorageMode, type ActivityMigrationStatus, type ActivityPage } from "./activity-storage.js";
 type Event = Record<string,unknown>;
 type Key = { key: string };
 type Kind = "approval"|"grant"|"permit"|"terminal-notice"|"idempotency"|"workspace"|"agent"|"library";
@@ -11,8 +13,15 @@ function keyOf(e:Event):string { return String(e.workspaceId)+"/"+String(e.opera
 function eventsByKey(events:Event[]):Map<string,Event> { return new Map(events.map(e=>[keyOf(e),e])); }
 /** Derived metadata only; the existing chunked records remain canonical. */
 export class RegistryIndex {
-  constructor(private db:SqlRecords) {
-    if (db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='registry_index_version_v1'").length) return;
+  private readonly canonicalActivity?: CanonicalActivity;
+  private readonly activityMode: ActivityStorageMode;
+  constructor(private db:SqlRecords, options: {activityStorageMode?: string} = {}) {
+    const mode = options.activityStorageMode ?? "legacy";
+    if (!["legacy", "prepare", "native"].includes(mode)) throw new ApiError("INCOMPATIBLE_VERSION", "Unrecognized canonical storage mode.", 409);
+    this.activityMode = mode as ActivityStorageMode;
+    const tables = db.query<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('registry_index_version_v1','canonical_activity_meta_v2')");
+    if (mode !== "legacy" || tables.some(row => row.name === "canonical_activity_meta_v2")) this.canonicalActivity = new CanonicalActivity(db);
+    if (tables.some(row => row.name === "registry_index_version_v1")) return;
     db.transaction(()=>{
       db.query("CREATE TABLE registry_entity_v1 (key TEXT PRIMARY KEY, kind TEXT NOT NULL, due INTEGER, expires INTEGER, workspace TEXT NOT NULL, state TEXT NOT NULL, hold INTEGER NOT NULL, revision INTEGER, endpoint TEXT) WITHOUT ROWID");
       db.query("CREATE INDEX registry_kind_v1 ON registry_entity_v1(kind,key)");
@@ -38,6 +47,10 @@ export class RegistryIndex {
     });
   }
   private setActivity(key:string, side:"base"|"notice", value:Event|null):void {
+    if (this.canonicalActivity?.isNative()) {
+      if (side === "notice") this.canonicalActivity.setNotice(key,value);
+      return;
+    }
     const old = this.db.query<{base:string|null;notice:string|null}>("SELECT base,notice FROM registry_activity_v1 WHERE key=?",key)[0];
     const encoded=value?JSON.stringify(value):null;
     if((old?.[side]??null)===encoded)return;
@@ -53,10 +66,14 @@ export class RegistryIndex {
     for(const {key} of this.db.query<Key>("SELECT key FROM registry_activity_v1 WHERE base IS NOT NULL"))if(!events.has(key))this.setActivity(key,"base",null);
     for(const [key,event] of events)this.setActivity(key,"base",event);
   }
-  private sync():void {
+  private sync(includeActivity=false):void {
     this.db.transaction(()=>{
-      for(const {key} of this.db.query<Key>("SELECT key FROM registry_dirty_v1 ORDER BY key")){
-        if(key==="activity") this.rebuildActivity();
+      // Activity rebuilds are needed only for legacy list/write paths. An alarm,
+      // grant check, or migration step must not materialize a dirty 10k array.
+      for(const {key} of this.db.query<Key>("SELECT key FROM registry_dirty_v1"+(includeActivity?"":" WHERE key<>'activity'")+" ORDER BY key")){
+        if(key==="activity") {
+          if (!this.canonicalActivity?.isNative()) this.rebuildActivity();
+        }
         else {
           const v=this.db.get<Event>(key);
           const kind=(key==="library"?"library":key.split("/")[0]) as Kind;
@@ -88,14 +105,66 @@ export class RegistryIndex {
   }
   /** Current binary writes known Activity changes atomically; only legacy writes rebuild. */
   putActivity(previous:Event[],next:Event[]):void {
+    if (this.canonicalActivity?.isNative()) throw new ApiError("CONFLICT", "Native Activity requires individual canonical writes.",409);
     this.db.transaction(()=>{
-      this.sync();
+      this.sync(true);
       const old=eventsByKey(previous), upcoming=eventsByKey(next);
       for(const key of old.keys())if(!upcoming.has(key))this.setActivity(key,"base",null);
       for(const [key,event] of upcoming)if(old.get(key)!==event)this.setActivity(key,"base",event);
       this.db.put("activity",next);
       this.db.query("DELETE FROM registry_dirty_v1 WHERE key='activity'");
     });
+  }
+  appendActivity(event:Event):void {
+    this.db.transaction(()=>{
+      if (this.canonicalActivity?.isNative()) {
+        this.sync();
+        this.canonicalActivity.append(event);
+      } else {
+        const previous=this.db.get<Event[]>("activity",[]);
+        this.putActivity(previous,[...previous,event].slice(-1000));
+      }
+    });
+  }
+  resolveActivity(workspaceId:string,operationId:string,resolution:unknown):void {
+    this.db.transaction(()=>{
+      if (this.canonicalActivity?.isNative()) {
+        this.sync();
+        this.canonicalActivity.resolve(workspaceId,operationId,resolution);
+      } else {
+        const previous=this.db.get<Event[]>("activity",[]);
+        this.putActivity(previous,previous.map(event=>event.workspaceId===workspaceId&&event.operationId===operationId?{...event,resolution}:event));
+      }
+    });
+  }
+  activityPage(raw:string|null,status:string|null,workspace:string|null,revision:number):ActivityPage {
+    if (this.canonicalActivity?.isNative()) {
+      this.sync();
+      return this.canonicalActivity.page(raw,status,workspace,revision);
+    }
+    const parts=raw?.split(":"),offset=parts?Number(parts[1]):0;
+    if ((parts&&(parts.length!==2||Number(parts[0])!==revision))||!Number.isSafeInteger(offset)||offset<0)
+      throw new ApiError("STALE_REVISION","Activity changed; restart the list.",409);
+    const all=this.activity(offset,status,workspace),end=offset+Math.min(100,all.length);
+    return {items:all.slice(0,100),revision,cursor:all.length>100?revision+":"+end:null};
+  }
+  activityMigrationStatus():ActivityMigrationStatus {
+    return this.canonicalActivity?.status() ?? {version:2,stage:"LEGACY",authority:"legacy",sequence:0,revision:0,rollback:"legacy-compatible"};
+  }
+  advanceActivityMigration(limit=32):ActivityMigrationStatus {
+    const before=this.canonicalActivity?.status().stage;
+    const status=this.canonicalActivity?.advance(this.activityMode,limit) ?? this.activityMigrationStatus();
+    if(status.stage==="NATIVE"&&before!=="NATIVE")this.db.query("DELETE FROM registry_dirty_v1 WHERE key='activity'");
+    return status;
+  }
+  restartActivityMigration():ActivityMigrationStatus {
+    if (!this.canonicalActivity || this.activityMode==="legacy") throw new ApiError("CONFLICT","Enable prepare mode before starting Activity migration.",409);
+    return this.canonicalActivity.restart();
+  }
+  activityMigrationPending():boolean {
+    if (!this.canonicalActivity || this.activityMode==="legacy") return false;
+    const stage=this.canonicalActivity.status().stage;
+    return stage!=="NATIVE"&&stage!=="BLOCKED"&&(stage!=="VERIFIED"||this.activityMode==="native");
   }
   due(kind:Kind,now:number):string[]{this.sync();return this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind=? AND due IS NOT NULL AND due<? ORDER BY due LIMIT 128",kind,now).map(r=>r.key);}
   nextDue():number|undefined {this.sync();const times=(["approval","grant","permit","terminal-notice","idempotency"] as const).map(kind=>this.db.query<{due:number}>("SELECT due FROM registry_entity_v1 WHERE kind=? AND due IS NOT NULL ORDER BY due LIMIT 1",kind)[0]?.due).filter((n):n is number=>n!==undefined);return times.length?Math.min(...times):undefined;}
@@ -106,7 +175,8 @@ export class RegistryIndex {
   bindingBlocked(workspace:string):boolean {this.sync();return !!(this.db.query("SELECT key FROM registry_entity_v1 WHERE kind='permit' AND workspace=? AND state='consumed' LIMIT 1",workspace).length||this.db.query("SELECT key FROM registry_entity_v1 WHERE kind='terminal-notice' AND workspace=? AND hold=1 LIMIT 1",workspace).length);}
   libraryRevision():number {this.sync();return this.db.query<{revision:number|null}>("SELECT revision FROM registry_entity_v1 WHERE key='library'")[0]?.revision??0;}
   activity(offset:number,status:string|null,workspace:string|null):Event[] {
-    this.sync();
+    if(this.canonicalActivity?.isNative())throw new ApiError("STALE_REVISION","Native Activity requires a keyset cursor; restart the list.",409);
+    this.sync(true);
     const where:string[]=[], args:(string|number)[]=[];
     if(workspace){where.push("workspace=?");args.push(workspace);}
     if(status){where.push("phase=?");args.push(status);}

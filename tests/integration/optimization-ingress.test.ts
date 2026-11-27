@@ -18,3 +18,17 @@ test('hermetic real OAuth/MCP ingress exposes separate SQL, DO, Worker, KV and a
     assert.equal(measured.workspace!.sqlFailures,0);
   } finally {await h.close();}
 });
+test('terminal receipt arriving before delayed dispatch cannot later consume a permit',{timeout:30000},async()=>{
+  const h=await createCapacityHarness(1);
+  try {
+    const f=h.fixtures[0]!,admitted=await h.admit(f),operationId=String(admitted.operationId);
+    const cancelled=await h.internal(h.wns.get(h.wns.idFromName(f.workspaceId)),'/internal/cancel',{
+      workspaceId:f.workspaceId,operationId});
+    assert.equal(cancelled.status,'CANCELLED');
+    await assert.rejects(()=>h.internal(h.registry,'/internal/dispatch',{
+      props:f.props,agentId:f.agentId,permissions:['READ_SOURCE'],mutating:false,tool:'read',
+      bindingRevision:f.lease.bindingRevision,epoch:f.lease.epoch,operationId}),
+      (error:unknown)=>(error as {status:number}).status===409);
+    assert.equal((await h.status(f,operationId)).status,'CANCELLED');
+  } finally {await h.close();}
+});

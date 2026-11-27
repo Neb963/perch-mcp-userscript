@@ -112,6 +112,7 @@ test("Worker liveness is a separate route from Registry readiness", async () => 
 test("bootstrap, admin authentication, idempotency, native binding and Agent isolation", async () => {
   const health = await data("/health", undefined, "");
   assert.equal(health.paired, false);
+  assert.equal(health.ok, true, "readiness success must satisfy its declared response contract");
   assert.equal(
     (await request("/api/v1/admin/state", undefined, "")).status,
     401,

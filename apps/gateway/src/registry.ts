@@ -1,4 +1,5 @@
 import { withSqlUsage } from "./sql-meter.js";
+import { resourceStorageMaintenance, resourceStorageNeedsMaintenance, resourceStorageStatus, resourceLibraryIsNative, resourceLibraryRevision } from "./resource-storage.js";
 import { ResourceError } from "../../../packages/resource-library/src/index.js";
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import {
@@ -90,7 +91,7 @@ interface Approval {
   };
 }
 interface Core {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   revision: number;
   policyRevision: number;
   paused: boolean;
@@ -111,9 +112,10 @@ export interface AuthProps {
 export class Registry {
   private records?: SqlRecords;
   private derived?: RegistryIndex;
+  private storageWakeScheduled = false;
   private get catalog():RegistryIndex {
     if(this.derived)return this.derived;
-    const index=new RegistryIndex(this.db);
+    const index=new RegistryIndex(this.db,{activityStorageMode:this.env.CANONICAL_STORAGE_MODE});
     // An enclosing transaction may roll back DDL. Cache only committed initialization.
     if(!this.db.inTransaction)this.derived=index;
     return index;
@@ -140,7 +142,7 @@ export class Registry {
       credentialEpoch: 1,
     } : stored;
     if (!c || typeof c !== "object") throw new Error("SQLITE_RECORD_CORRUPT");
-    if (c.schemaVersion !== 1)
+    if (c.schemaVersion !== 1 && c.schemaVersion !== 2)
       throw new ApiError(
         "INCOMPATIBLE_VERSION",
         "Registry schema is newer than this Worker; restore a compatible version.",
@@ -208,14 +210,27 @@ export class Registry {
   async alarm():Promise<void> {
     return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","registry","alarm",async()=>{
       this.db.transaction(()=>this.cleanup());
+      this.advanceStorage();
       await this.scheduleCleanup();
     });
   }
   private async scheduleCleanup():Promise<void> {
-    const due=this.catalog.nextDue(), existing=await this.state.storage.getAlarm();
-    if(due===undefined){if(existing!==null)await this.state.storage.deleteAlarm();return;}
+    const due=Math.min(this.catalog.nextDue()??Infinity,this.storagePending()?Date.now()+1000:Infinity), existing=await this.state.storage.getAlarm();
+    if(!Number.isFinite(due)){if(existing!==null)await this.state.storage.deleteAlarm();return;}
     const next=Math.max(Date.now()+1000,due+1);
     if(existing===null||existing<=Date.now()||next<existing)await this.state.storage.setAlarm(next);
+  }
+  private storagePending(): boolean {
+    const mode=this.env.CANONICAL_STORAGE_MODE??"legacy";
+    return this.catalog.activityMigrationPending()||resourceStorageNeedsMaintenance(this.db,mode);
+  }
+  private advanceStorage(): unknown {
+    const mode=this.env.CANONICAL_STORAGE_MODE??"legacy";
+    if(!["legacy","prepare","native"].includes(mode))
+      throw new ApiError("INCOMPATIBLE_VERSION","Unrecognized canonical storage mode.",409);
+    const activity=this.catalog.advanceActivityMigration(32);
+    const resources=resourceStorageMaintenance(this.db,mode,4);
+    return {activity,resources};
   }
   private bump(c: Core): void {
     c.revision++;
@@ -265,9 +280,11 @@ export class Registry {
       const response = await this.route(request);
       const path = new URL(request.url).pathname;
       if(response.ok && ((path.startsWith("/api/v1/admin/")&&request.method!=="GET") ||
-         ["/internal/oauth/pending","/internal/oauth/consume","/internal/oauth/redirect-commit","/internal/oauth/abort-completion","/internal/terminal"].includes(path))) {
+         ["/internal/oauth/pending","/internal/oauth/consume","/internal/oauth/redirect-commit","/internal/oauth/abort-completion","/internal/terminal"].includes(path) ||
+         (this.env.CANONICAL_STORAGE_MODE!==undefined&&this.env.CANONICAL_STORAGE_MODE!=="legacy"&&
+           (!this.storageWakeScheduled||path.startsWith("/api/v1/admin/resources"))))) {
         // A committed request must not be reported failed merely because scheduling failed.
-        try {await this.scheduleCleanup();} catch { /* Next authenticated mutation retries scheduling. */ }
+        try {await this.scheduleCleanup();this.storageWakeScheduled=true;} catch { /* Next authenticated mutation retries scheduling. */ }
       }
       return response;
     } catch (error) {
@@ -373,6 +390,7 @@ export class Registry {
     if (path === "/internal/health") {
       const c = this.core();
       return json({
+        ok: true,
         version: VERSION,
         schemaVersion: 1,
         paired: c.paired,
@@ -801,6 +819,10 @@ export class Registry {
           if (b.epoch !== w.epoch)
             throw new ApiError("STALE_EPOCH", "Workspace epoch changed.", 409);
           const operationId = id(b.operationId);
+          // Cancellation/expiry may publish before a delayed dispatch RPC.
+          // A receipt is terminal authority even without a consumed permit.
+          if(this.db.get("terminal-notice/"+w.id+"/"+operationId)!==undefined)
+            throw new ApiError("CONFLICT","Operation already has a terminal receipt.",409);
           const prior = this.db.get<{
             workspaceId: string;
             epoch: number;
@@ -935,8 +957,7 @@ export class Registry {
           event,
           expires: Date.now() + 7 * 86400000,
         });
-        const events = this.db.get<Record<string,unknown>[]>("activity", []);
-        this.catalog.putActivity(events,[...events,event].slice(-1000));
+        this.catalog.appendActivity(event);
         this.bump(this.core());
       });
       return json({ ok: true });
@@ -983,6 +1004,9 @@ export class Registry {
           429,
         );
       const result = this.writeAdmin(path, b, c);
+      // Migration may atomically fence old binaries. Preserve its newer
+      // persisted schema marker when bumping the management revision.
+      if(path==="/api/v1/admin/storage/step")c.schemaVersion=this.core().schemaVersion;
       this.db.put("idempotency/" + key, {
         hash: requestHash,
         result,
@@ -1066,6 +1090,9 @@ export class Registry {
     // Resource endpoints initialize/validate their library independently.
     const c = this.core(),
       prefix = "/api/v1/admin/";
+    if(path===prefix+"storage")return json({mode:this.env.CANONICAL_STORAGE_MODE??"legacy",
+      revision:c.revision,activity:this.catalog.activityMigrationStatus(),resources:resourceStorageStatus(this.db),
+      rollback:"After any native cutover use this compatible candidate; old binaries cannot read new authority."});
     if (path === prefix + "diagnostics")
       return json({
         schemaVersion: 1,
@@ -1097,7 +1124,7 @@ export class Registry {
           inlineMcpBytes: 262144,
           workspaceTransientBytes: 8 * 1024 * 1024,
         },
-        libraryRevision: this.catalog.libraryRevision(),
+        libraryRevision: resourceLibraryIsNative(this.db)?resourceLibraryRevision(this.db):this.catalog.libraryRevision(),
         workspaces: this.catalog.count("workspace"),
         agents: this.catalog.count("agent"),
       });
@@ -1133,28 +1160,8 @@ export class Registry {
       });
     }
     if (path === prefix + "activity") {
-      const current = this.core(),
-        raw = url.searchParams.get("cursor"),
-        parts = raw?.split(":"),
-        offset = parts ? Number(parts[1]) : 0;
-      if (
-        (parts &&
-          (parts.length !== 2 || Number(parts[0]) !== current.revision)) ||
-        !Number.isSafeInteger(offset) ||
-        offset < 0
-      )
-        throw new ApiError(
-          "STALE_REVISION",
-          "Activity changed; restart the list.",
-          409,
-        );
-      const all = this.catalog.activity(offset,url.searchParams.get("status"),url.searchParams.get("workspaceId"));
-      const end = offset+Math.min(100,all.length);
-      return json({
-        items: all.slice(0,100),
-        revision: current.revision,
-        cursor: all.length > 100 ? current.revision + ":" + end : null,
-      });
+      return json(this.catalog.activityPage(url.searchParams.get("cursor"),
+        url.searchParams.get("status"),url.searchParams.get("workspaceId"),c.revision));
     }
     throw new ApiError("NOT_FOUND", "Route not found.", 404);
   }
@@ -1164,6 +1171,10 @@ export class Registry {
     c: Core,
   ): unknown {
     const prefix = "/api/v1/admin/";
+    if(path===prefix+"storage/step") {
+      fields(b,["expectedRevision"]);revision(b.expectedRevision,c.revision);
+      return this.advanceStorage();
+    }
     if (path === prefix + "workspaces") {
       fields(b, ["label", "permissions"]);
       if (
@@ -1284,8 +1295,7 @@ export class Registry {
         if (reserved?.operationId === operationId) this.db.delete(key);
       }
       this.db.put("resolution/" + w.id + "/" + operationId, resolution);
-      const activity = this.db.get<Record<string, unknown>[]>("activity", []);
-      this.catalog.putActivity(activity,activity.map(event=>event.workspaceId===w.id&&event.operationId===operationId?{...event,resolution}:event));
+      this.catalog.resolveActivity(w.id,operationId,resolution);
       const noticeKey = "terminal-notice/" + w.id + "/" + operationId,
         notice = this.db.get<{
           phase: string;

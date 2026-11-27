@@ -75,7 +75,7 @@ test("newer Registry/Workspace schemas reject downgrade without rewriting data",
   const f = fixture();
   try {
     const records = new SqlRecords(f.storage);
-    records.put("core", { schemaVersion: 2, revision: 1 });
+    records.put("core", { schemaVersion: 3, revision: 1 });
     const registry = new Registry(f.state, {} as Env);
     const response = await registry.fetch(
       new Request("https://internal/internal/health"),
@@ -83,7 +83,7 @@ test("newer Registry/Workspace schemas reject downgrade without rewriting data",
     assert.equal(response.status, 409);
     assert.equal(
       (records.get("core") as { schemaVersion: number }).schemaVersion,
-      2,
+      3,
     );
     records.put("schema", 2);
     assert.throws(() => new Workspace(f.state, {} as Env), /schema is newer/);

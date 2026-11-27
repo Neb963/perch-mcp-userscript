@@ -50,5 +50,9 @@ export async function fixtureSnapshot(h:Harness,f:CapacityFixture) {
   return {worker:await worker.json(),registry:await registry.json(),workspace:await workspace.json()} as Record<string,Record<string,number>>;
 }
 export function metricDelta(before:Record<string,Record<string,number>>,after:Record<string,Record<string,number>>) {
-  return Object.fromEntries(Object.keys(after).map(area=>[area,Object.fromEntries(Object.entries(after[area]!).map(([key,value])=>[key,value-(before[area]?.[key]??0)]))]));
+  return Object.fromEntries(Object.keys(after).map(area=>[area,Object.fromEntries(Object.entries(after[area]!).map(([key,value])=>{
+    const delta=value-(before[area]?.[key]??0);
+    assert.ok(delta>=0, 'Fixture counters reset/evicted during sample: '+area+'/'+key);
+    return [key,delta];
+  }))]));
 }
