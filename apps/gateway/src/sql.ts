@@ -13,7 +13,13 @@ export class SqlRecords {
       }>("SELECT value FROM records WHERE key=? ORDER BY part", key)
       .toArray();
     if (!rows.length) return fallback as T;
-    return JSON.parse(rows.map((r) => r.value).join("")) as T;
+    try {
+      return JSON.parse(rows.map((r) => r.value).join("")) as T;
+    } catch {
+      // Never silently default corrupted identity, Grant, or operation state.
+      // The gateway incident log records the classification; no record data escapes.
+      throw new Error('SQLITE_RECORD_CORRUPT');
+    }
   }
   put(key: string, value: unknown): void {
     const s = JSON.stringify(value);
@@ -34,6 +40,7 @@ export class SqlRecords {
       offset = end;
     }
   }
+
   delete(key: string): void {
     this.storage.sql.exec("DELETE FROM records WHERE key=?", key);
   }

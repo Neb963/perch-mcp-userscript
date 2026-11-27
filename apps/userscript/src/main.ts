@@ -3,6 +3,7 @@ import { NativeAdapter } from "./adapter.js";
 import { LiveLifecycleReadback, NativeLifecycle } from "./lifecycle.js";
 import { resolveNativePageRealm } from "./page-context.js";
 import { reconnectCandidate } from "./autoconnect.js";
+import { isRetryableGatewayFailure } from "./connection-failures.js";
 import { GMStore } from "./storage.js";
 import { GatewayTransport, gatewayOrigin } from "./transport.js";
 import { BrowserController } from "./controller.js";
@@ -76,13 +77,16 @@ async function start(): Promise<void> {
   let bootstrapWorkspace: string | null = null;
   let bootstrapTimer: ReturnType<typeof setTimeout> | undefined;
   let bootstrapRunning = false;
+  let bootstrapRetryAttempt = 0;
   function retryNativeBootstrap():void{
     if(closing || bootstrapTimer || !transport.configuration().paired)return;
+    const base=Math.min(60000,2000*2**Math.min(bootstrapRetryAttempt++,5));
+    const delay=base+Math.floor(Math.random()*Math.min(1000,base/4));
     bootstrapTimer=setTimeout(()=>{
       bootstrapTimer=undefined;
       if(controller.diagnostics().leasePresent)return;
       void resumeBoundEditor();
-    },30000);
+    },delay);
     (bootstrapTimer as unknown as {unref?:()=>void}).unref?.();
   }
   const clearReconnect = () => {
@@ -100,9 +104,10 @@ async function start(): Promise<void> {
     (status) => {
       manager?.setStatus(status);
       if(status.connection==='connected'){
+        bootstrapRetryAttempt=0;
         clearReconnect();reconnectAttempt=0;reconnectWorkspace=undefined;
       }else if(status.connection==='offline' &&
-        ['GATEWAY_TIMEOUT','GATEWAY_UNAVAILABLE'].includes(controller.diagnostics().reasonCode??'') &&
+        isRetryableGatewayFailure(controller.diagnostics().reasonCode??'') &&
         status.workspace && !closing){
         reconnectWorkspace=status.workspace;
         scheduleReconnect();
@@ -197,9 +202,12 @@ async function start(): Promise<void> {
   }
   window.addEventListener('online',()=>{
     if(reconnectWorkspace){clearReconnect();scheduleReconnect(true);}
+    else if(bootstrapTimer){clearTimeout(bootstrapTimer);bootstrapTimer=undefined;void resumeBoundEditor();}
   });
   window.addEventListener('visibilitychange',()=>{
-    if(!document.hidden && reconnectWorkspace){clearReconnect();scheduleReconnect(true);}
+    if(document.hidden)return;
+    if(reconnectWorkspace){clearReconnect();scheduleReconnect(true);}
+    else if(bootstrapTimer){clearTimeout(bootstrapTimer);bootstrapTimer=undefined;void resumeBoundEditor();}
   });
   const client: ManagerClient = {
     request: (method, path, body) => transport.request(method, path, body),
@@ -242,12 +250,22 @@ async function start(): Promise<void> {
       await connect(workspace, false, manualConnectionEpoch);
       if(controller.diagnostics().connection!=='connected')
         throw new Error('The editor did not receive a verified lease. Check the connection status.');
-      if (typeof workspace.id === "string")
+      if (typeof workspace.id === "string") {
         await store.delete("perch:autoconnect-stop:" + workspace.id);
+        try {
+          const identity=await adapter.identity();
+          void store.set('perch:last-connected-workspace',{
+            generatorId:identity.generatorId,draftId:identity.draftId,workspaceId:workspace.id,
+          }).catch(()=>undefined);
+        } catch { /* Attached lease remains canonical; cache is optional. */ }
+      }
     },
     pauseLocal: async () => {
       // Stop fences queued health checks and late native claim responses.
       manualConnectionEpoch++;
+      if(bootstrapTimer)clearTimeout(bootstrapTimer);
+      bootstrapTimer=undefined;
+      bootstrapRetryAttempt=0;
       const id = controller.diagnostics().workspaceId;
       // Pause synchronously aborts the local controller before the first
       // asynchronous store write or gateway lease release can stall.
@@ -361,6 +379,13 @@ async function start(): Promise<void> {
         return;
       }
       bootstrapPhase='WORKSPACE_LOOKUP';
+      // Offline display hint only. Never claim a lease from cached identity.
+      try {
+        const previous=await store.get<{generatorId:string;draftId:string;workspaceId:string}>('perch:last-connected-workspace');
+        if(previous?.generatorId===identity.generatorId && previous.draftId===identity.draftId &&
+           typeof previous.workspaceId==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(previous.workspaceId))
+          bootstrapWorkspace=previous.workspaceId;
+      } catch { /* No cached identity is required for remote verification. */ }
       const remote = await transport.request("GET", "/api/v1/admin/workspaces") as {
         items?: unknown[]; cursor?: string | null;
       };
@@ -387,18 +412,24 @@ async function start(): Promise<void> {
       }
       bootstrapPhase='GATEWAY_CLAIM';
       await connect(candidate, true, epoch);
-      bootstrapPhase='CONNECTED';bootstrapCode=null;
+      bootstrapPhase='CONNECTED';bootstrapCode=null;bootstrapRetryAttempt=0;
+      if(matchedWorkspaceId)void store.set('perch:last-connected-workspace',{
+        generatorId:identity.generatorId,draftId:identity.draftId,workspaceId:matchedWorkspaceId,
+      }).catch(()=>undefined);
     } catch (error) {
       if (closing || manualConnectionEpoch !== epoch) return;
       const code = error && typeof error === "object" && "code" in error &&
         typeof error.code === "string" ? error.code : "RECONNECT_FAILED";
       bootstrapCode=code;
-      bootstrapWorkspace=matchedWorkspaceId??null;
-      if(['RECONNECT_FAILED','GATEWAY_TIMEOUT','GATEWAY_UNAVAILABLE'].includes(code))retryNativeBootstrap();
+      bootstrapWorkspace=matchedWorkspaceId??bootstrapWorkspace;
+      transport.recordBootstrapFailure(bootstrapPhase,code);
+      const temporary=isRetryableGatewayFailure(code);
+      if(temporary)retryNativeBootstrap();
       manager?.setStatus({
         connection: ["EFFECT_UNKNOWN","TAB_BUSY"].includes(code) ? "blocked" : "offline",
-        workspace: matchedWorkspaceId,
-        reason: code === "EFFECT_UNKNOWN"
+        workspace: bootstrapWorkspace??undefined,
+        reason: temporary ? `Gateway unavailable (${code}). Connection will retry automatically; no source or provider operation will be repeated.`
+          : code === "EFFECT_UNKNOWN"
           ? "An unresolved Gateway effect prevents a new lease. Open Recovery for the exact held operation. Never repeat the unknown effect or re-pair to clear it."
           : code === "TAB_BUSY"
             ? "A lease or claim is still active. Open Recovery to inspect its expiry and owner-safe next action; do not force takeover."

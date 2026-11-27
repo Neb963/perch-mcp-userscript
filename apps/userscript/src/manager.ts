@@ -360,7 +360,22 @@ export async function buildDiagnosticReport(
       manualCallbackRecoveryOffered: fallbackOffered,
       evidenceLimit: "Server events do not identify the client or confirm navigation. Absence of a token exchange is not proof of a blocked client.",
     },
-    transport: { events: localEvents },
+    transport: {
+      events: localEvents,
+      preservedFailures: Array.isArray(local.preservedFailures)
+        ? local.preservedFailures.slice(-256).filter(isRecord).map(event => ({
+            at: num(event.at),
+            method: ['GET','POST','PUT','PATCH','DELETE','STATE'].includes(str(event.method)) ? event.method : 'other',
+            route: /^\/(?:api\/v1\/(?:admin|tab)\/|health|local\/)/.test(str(event.route))
+              ? str(event.route).slice(0,120)
+                  .replace(/\/(workspaces|agents|approvals|grants|resources)\/[^/]+/g, '/$1/:id')
+                  .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ':id') : 'redacted',
+            code: /^[A-Z0-9_:]{1,100}$/.test(str(event.code)) ? event.code : 'UNKNOWN',
+            status: num(event.status),
+            elapsedMs: num(event.elapsedMs),
+            traceId: /^[0-9a-f-]{36}$/.test(str(event.traceId)) ? event.traceId : undefined,
+          })) : [],
+    },
     preview: {
       events: (() => {
         const events = record(local.preview).previewEvents;

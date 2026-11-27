@@ -60,12 +60,32 @@ export function gatewayOrigin(value: string): string {
 /** Isolated-context fetch; redirect:error prevents credential forwarding BEFORE any redirect. */
 export class GatewayTransport {
   private readonly recent: TransportDiagnostic[] = [];
-  diagnostics(): { schemaVersion: 1; events: TransportDiagnostic[] } {
-    return { schemaVersion: 1, events: this.recent.map((e) => ({ ...e })) };
+  private readonly preservedFailures: TransportDiagnostic[] = [];
+  private persistence: Promise<void> = Promise.resolve();
+  private readonly failureKey = 'perch:transport-failures-v1';
+  diagnostics(): { schemaVersion: 1; events: TransportDiagnostic[]; preservedFailures: TransportDiagnostic[] } {
+    return { schemaVersion: 1, events: this.recent.map((e) => ({ ...e })),
+      preservedFailures: this.preservedFailures.map((e) => ({ ...e })) };
   }
+  /** Log only bounded, non-sensitive metadata. Failed operations persist across tab reloads. */
   private recordDiagnostic(event: TransportDiagnostic): void {
     this.recent.push(event);
     if (this.recent.length > 100) this.recent.splice(0, this.recent.length - 100);
+    if (event.code === 'OK') return;
+    this.preservedFailures.push(event);
+    const cutoff = Date.now() - 7 * 86400000;
+    const valid = this.preservedFailures.filter(e => e.at >= cutoff).slice(-256);
+    this.preservedFailures.splice(0, this.preservedFailures.length, ...valid);
+    const snapshot = valid.map(e => ({ ...e }));
+    this.persistence = this.persistence.catch(() => undefined)
+      .then(() => this.store.set(this.failureKey, snapshot))
+      .catch(() => undefined);
+  }
+  recordBootstrapFailure(stage: string, code: string): void {
+    if (!/^[A-Z][A-Z0-9_]{1,47}$/.test(stage) ||
+        !/^[A-Z][A-Z0-9_]{1,47}$/.test(code)) return;
+    this.recordDiagnostic({ at: Date.now(), route: '/local/bootstrap', method: 'STATE',
+      elapsedMs: 0, status: 0, code: stage + ':' + code });
   }
   private pairing?: Pairing;
   private suggestedOrigin = "";
@@ -83,6 +103,25 @@ export class GatewayTransport {
   async initialize(): Promise<void> {
     const suggestion = await this.store.get<string>("perch:suggested-origin");
     if (suggestion) this.suggestedOrigin = gatewayOrigin(suggestion);
+    // Never allow corrupt diagnostics to prevent pairing or connection.
+    try {
+      const history = await this.store.get<unknown>(this.failureKey);
+      if (Array.isArray(history)) for (const candidate of history.slice(-256)) {
+        if (!candidate || typeof candidate !== 'object') continue;
+        const row = candidate as Record<string, unknown>;
+        if (typeof row.at !== 'number' || !Number.isSafeInteger(row.at) ||
+            row.at < Date.now() - 7 * 86400000 || row.at > Date.now() + 60_000 ||
+            typeof row.code !== 'string' || !/^[A-Z0-9_:]{1,100}$/.test(row.code) ||
+            typeof row.route !== 'string' || !/^\/(?:api\/v1\/(?:admin|tab)\/|health|local\/)[a-zA-Z0-9_/:.-]{0,110}$/.test(row.route) ||
+            typeof row.method !== 'string' || !/^(?:GET|POST|PUT|PATCH|DELETE|STATE)$/.test(row.method) ||
+            typeof row.status !== 'number' || row.status < 0 || row.status > 599 ||
+            typeof row.elapsedMs !== 'number' || row.elapsedMs < 0) continue;
+        this.preservedFailures.push({ at: row.at, method: row.method, route: row.route,
+          code: row.code, status: row.status, elapsedMs: row.elapsedMs,
+          ...(typeof row.traceId === 'string' && /^[0-9a-f-]{36}$/.test(row.traceId)
+            ? { traceId: row.traceId } : {}) });
+      }
+    } catch { /* Diagnostic history is auxiliary and must not block connection. */ }
     const stored = await this.store.get<Pairing>("perch:pairing");
     if (stored) {
       if (

@@ -267,3 +267,17 @@ Authoritative live inputs: SynthPin revision 33 saved/clean, native snapshot ver
 - [ ] Merge only after verified CI; retain real Firefox/live SynthPin mutation as a separately documented acceptance boundary.
 
 Report: `docs/verification/epoch14-continuous-source-development-v0116.md`.
+
+## Epoch 15 — Gateway incident containment and resumable editor connection (2026-11-27)
+
+- [x] Inspect operator diagnostics16: global 500 including /health and diagnostics; browser bootstrap failed before Workspace lookup; do not claim runtime cause without Cloudflare logs
+- [x] Separate Worker /live from Registry /health; degrade readiness as HTTP 503 with trace
+- [x] Persist redacted structured Worker/Registry incidents in Cloudflare Workers Logs and independent OAUTH_KV; add read-only scheduled probe
+- [x] Add automatic bounded retry on HTTP 500/503 for bootstrap/poll/heartbeat without replaying operations; retain last verified Workspace hint
+- [x] Preserve 7-day failed-request and bootstrap-stage diagnostics across userscript reloads
+- [x] Add fault-injection tests for offline Registry, liveness, monitoring, log privacy/retention and 500 recovery
+- [ ] CI full typecheck + unit/integration + artifact hashes + Worker dry-run
+- [ ] Merge after green CI and publish exact tested userscript/Worker artifact
+- [ ] **Deferred operator acceptance:** deploy Worker v0.1.8 in original Cloudflare account, then verify real `/health`, Cloudflare logs, actual Firefox automatic reconnect; cannot claim from CI
+
+See `docs/verification/epoch15-gateway-incident-v0117.md`.
