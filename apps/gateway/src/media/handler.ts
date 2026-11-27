@@ -56,11 +56,12 @@ export class MusicHandler {
       this.db.put('operation/' + operation.operationId, operation);
     }
   }
-  private prune(): void {
+  private prune(keys?:string[]): void {
     this.db.transaction(() => {
       const now = Date.now();
-      for (const key of this.db.keys('music/journal/')) {
+      for (const key of keys??this.db.keys('music/journal/')) {
         const journal = this.db.get<Journal>(key);
+        if(!journal)continue;
         if (journal.expiresAt && journal.expiresAt <= now && journal.bytes) {
           for (const chunk of this.db.keys('music/chunk/' + journal.operationId + '/')) this.db.delete(chunk);
           journal.bytes = 0; if (journal.phase === 'READY') journal.phase = 'EXPIRED'; this.db.put(key, journal);
@@ -69,7 +70,7 @@ export class MusicHandler {
       }
     });
   }
-  expire(): void { this.prune() }
+  expire(keys?:string[]): void { this.prune(keys) }
   nextExpiry(): number | undefined {
     const expiries = this.db.keys('music/journal/').map(key => this.db.get<Journal>(key))
       .filter(row => row.bytes > 0 && row.expiresAt !== undefined).map(row => row.expiresAt!);

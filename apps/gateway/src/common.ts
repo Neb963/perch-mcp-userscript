@@ -4,7 +4,7 @@ import type {
   DurableObjectStub,
   KVNamespace,
 } from "@cloudflare/workers-types";
-export const VERSION = "0.1.11";
+export const VERSION = "0.1.12";
 export const HAR_NATIVE_ACTIONS: Readonly<Record<string,string>> = Object.freeze({
   save_generator:"SAVE",rename_generator:"RENAME",set_listing:"LISTING",
 });
@@ -51,6 +51,7 @@ export class ApiError extends Error {
     message: string,
     public status = 400,
     public recovery = "Review the request and retry only after correcting it.",
+    public connectivityRetryAfterSeconds?: number,
   ) {
     super(message);
   }
@@ -64,13 +65,23 @@ export function json(value: unknown, status = 200): Response {
     },
   });
 }
+/** Only the observed provider quota signature may slow connectivity retries.
+ * This is not permission to retry an operation or an uncertain mutation. */
+export function dailySqlQuotaRetry(error: unknown): number | undefined {
+  return error instanceof Error &&
+    /exceeded allowed rows (?:read|written) in durable objects free tier/i.test(error.message)
+    ? 300 : undefined;
+}
 export function errorResponse(error: unknown, traceId = crypto.randomUUID()): Response {
   const e =
     error instanceof ApiError
       ? error
       : error instanceof ToolError
         ? new ApiError(error.code, error.message, 400, error.recovery)
-        : new ApiError(
+        : dailySqlQuotaRetry(error) !== undefined
+          ? new ApiError("GATEWAY_DEGRADED","Daily Durable Object SQL allowance exhausted.",503,
+              "Wait for quota recovery; reconcile uncertain effects before any new operation.",300)
+          : new ApiError(
             "INTERNAL_ERROR",
             "Internal operation failed; no secret details are returned.",
             500,
@@ -82,6 +93,8 @@ export function errorResponse(error: unknown, traceId = crypto.randomUUID()): Re
       message: e.message,
       retryable: false,
       recovery: e.recovery,
+      ...(e.code==="GATEWAY_DEGRADED" && e.connectivityRetryAfterSeconds===300
+        ? {connectivityRetryAfterSeconds:300} : {}),
       traceId,
     },
     e.status,
@@ -263,6 +276,7 @@ export function binding(value: unknown): Binding {
   };
 }
 export interface Env {
+  SQL_TELEMETRY_ENABLED?: string;
   REGISTRY: DurableObjectNamespace;
   WORKSPACES: DurableObjectNamespace;
   OAUTH_KV: KVNamespace;
@@ -301,6 +315,8 @@ export async function rpc<T = Record<string, unknown>>(
       String(data.code ?? "INTERNAL_ERROR"),
       String(data.message ?? "Internal request failed."),
       r.status,
+      "Review the request and retry only after correcting it.",
+      data.code==="GATEWAY_DEGRADED" && data.connectivityRetryAfterSeconds===300 ? 300 : undefined,
     );
   return data as T;
 }

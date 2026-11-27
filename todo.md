@@ -296,3 +296,22 @@ See `docs/verification/epoch15-gateway-incident-v0117.md`.
 - Operator confirms available account quota; deployment log confirms version upload and bindings. Previous REGISTRY_QUOTA classification was overly broad, not proof of exhausted account quota.
 - Discriminate runtime limits, generic limits, overload and explicit account quota; expose only fixed vocabulary and stage for read-only health failures. Preserve canonical state and fail closed.
 - Extend independent production deployment check to accommodate slower Cloudflare builds. Root cause and end-to-end recovery pending production evidence.
+
+## Epoch 18 — durable indexed Workspace lifecycle and SQL budgets
+
+Incident confirmed by Cloudflare dashboard (5.93M rows read) and sanitized runtime exception. Preserve canonical records, identity, bindings and OAuth; no destructive schema migration. Add rebuildable lifecycle index, legacy-write dirty triggers, indexed expiry/outbox/queue/holds and transactional counters; bound maintenance batches; instrument cursor rows. Verify cold restart, rollback writes, non-idle history independence, exact effect fences and production readiness. Registry indexing and transport optimization follow independently. T4 remains blocked by exhausted daily quota until actual recovery.
+
+### Epoch 18 — Registry indexing and observability
+- Derived Registry catalog indexes expiration, entity paging, workspace-scoped grants/holds and Activity ordering/filtering; current Activity appends update the exact changed entries, while rollback writes trigger reconstruction. Canonical history and unresolved notices remain intact. Scheduled bounded cleanup; no new binding. SQL telemetry is per-invocation via AsyncLocalStorage, fixed route/query categories, no source, credentials, or durable metric writes.
+
+- Active expiration has a separate selection path so historical backlog cannot hide expired execution. Chunk updates now use conditional UPSERT and delete only obsolete parts; rollback readers retain the same canonical record format.
+
+- Added indexed media/retired-lease deadlines and bounded cleanup, preserving indefinite uncertain paid media intents. Ordinary polls no longer enumerate media history.
+
+- Authenticate claims before local maintenance and guard writes; fence expired/superseded claim completions. Failed auxiliary outbox maintenance does not rewrite a committed operation response. New derived tables use compact WITHOUT ROWID layout; canonical tables unchanged.
+
+- Epoch 18: scoped internal configuration to the requested Agent on MCP routes; empty approval refresh 15s, pending 4s, failures back off to 60s. Userscript 0.1.18 / Worker 0.1.12 candidate. Test harness now disposes partially initialized Miniflare instances and CI has an explicit test-step deadline.
+
+- Miniflare CI run 46002237270: 374/375 passed; all SQL tests pass (24 reads/0 writes per idle poll both empty and after 150 operations; lifecycle 190–194 reads and 70–75 writes total, Activity 108 reads/0 writes per 100 entries). Preserve responsive approvals during first 30s of Agents view. Add read-only indexed idle fast path with explicit dirty/active/outbox/expiry/retention/alarm checks; tighten idle budget to 10 reads. No production deployment until full green CI.
+
+- CI 46002621140: functional tests including OAuth approval discovery passed; idle shortcut measured 12 reads, 0 writes, still above strict 10-read target. Remove redundant lease lookup by hashing before synchronous validation and renewal. Add explicit provider SQL quota connectivity-only retry hint (300s, no operation replay), bounded automatic browser retry delays and targeted tests.

@@ -42,6 +42,7 @@ export async function createCapacityHarness(
       ...budgetOverrides,
     },
   });
+  try {
   await mf.ready;
   let admin = "",
     execution = "";
@@ -274,4 +275,8 @@ export async function createCapacityHarness(
     wns,
     close: () => mf.dispose(),
   };
+  } catch (error) {
+    await mf.dispose();
+    throw error;
+  }
 }

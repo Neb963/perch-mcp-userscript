@@ -1,3 +1,4 @@
+import { withSqlUsage } from "./sql-meter.js";
 import { ImageTransferHandler } from "./image-transfer.js";
 import { MusicHandler } from "./media/handler.js";
 import type { DurableObjectState } from "@cloudflare/workers-types";
@@ -17,7 +18,9 @@ import {
   str,
   type Env,
 } from "./common.js";
-import { SqlRecords, WORKSPACE_JOURNAL_IDLE_KEY } from "./sql.js";
+import { SqlRecords } from "./sql.js";
+import { OperationIndex } from "./operation-index.js";
+import { MaintenanceIndex } from "./maintenance-index.js";
 import {
   toolDefinitions,
   validateToolCall,
@@ -25,7 +28,7 @@ import {
   permissionsForTool,
 } from "../../../packages/contracts/src/index.js";
 import type { AuthProps, WorkspaceRecord } from "./registry.js";
-import { blocksNewLease, blocksNewMutation, isTerminalViewportEffect } from "../../../packages/contracts/src/effect-policy.js";
+import { isTerminalViewportEffect } from "../../../packages/contracts/src/effect-policy.js";
 interface Lease {
   workspaceId: string;
   epoch: number;
@@ -65,6 +68,8 @@ interface Operation {
 }
 export class Workspace {
   private db: SqlRecords;
+  private journal: OperationIndex<Operation>;
+  private maintenance: MaintenanceIndex;
   private music: MusicHandler;
   private images: ImageTransferHandler<Operation>;
   constructor(
@@ -72,7 +77,6 @@ export class Workspace {
     private env: Env,
   ) {
     this.db = new SqlRecords(state.storage);
-    this.db.enableJournalIdleInvalidation();
     const schema = this.db.get<number>("schema");
     if (schema !== undefined && schema !== 1)
       throw new ApiError(
@@ -81,6 +85,8 @@ export class Workspace {
         409,
       );
     if (schema === undefined) this.db.put("schema", 1);
+    this.journal = new OperationIndex<Operation>(this.db);
+    this.maintenance = new MaintenanceIndex(this.db);
     this.images = new ImageTransferHandler(this.db, {
       getLease: () => this.db.get<Lease>("lease"),
       getOperation: (operationId) =>
@@ -137,70 +143,59 @@ export class Workspace {
     });
   }
   async fetch(request: Request): Promise<Response> {
+    return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","workspace",new URL(request.url).pathname,()=>this.fetchMetered(request));
+  }
+  private async fetchMetered(request: Request): Promise<Response> {
     let response: Response;
+    const maintenance = { settled: false };
     try {
-      response = await this.route(request);
+      response = await this.route(request, maintenance);
     } catch (error) {
       response = errorResponse(error);
     }
-    await this.drainTerminalOutbox();
+    // Invalid public requests must not amplify maintenance work. An alarm or
+    // next authorized request drains any pending canonical terminal state.
+    const path = new URL(request.url).pathname;
+    if (!maintenance.settled && path !== "/internal/sql-usage" && (response.ok || path.startsWith("/internal/"))) {
+      try {await this.drainTerminalOutbox();}
+      catch {console.error(JSON.stringify({kind:"workspace-maintenance-deferred"}));}
+    }
     return response;
   }
   async alarm(): Promise<void> {
-    this.expire();
-    await this.drainTerminalOutbox();
+    return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","workspace","alarm",async()=>{
+      this.expire();
+      await this.drainTerminalOutbox();
+    });
   }
   private async scheduleAlarm(retryAt?: number): Promise<void> {
-    const idle = this.journalIdle();
-    const rows = idle ? [] : this.operations();
-    const deadlines: number[] = idle?.nextAt == null ? [] : [idle.nextAt];
-    if (!idle) {
-      const now = Date.now();
-      let eligible = 0;
-      for (const row of rows) {
-        if (!row.terminalAt) deadlines.push(row.deadlineMs);
-        else {
-          if (row.result !== undefined) deadlines.push(row.terminalAt + 600000);
-          const code = (row.result as { error?: { code?: unknown } } | undefined)?.error?.code;
-          if (!row.terminalErrorCode && typeof code === "string" &&
-              /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) deadlines.push(now);
-          if (!row.terminalNotified) deadlines.push(retryAt ?? now + 1000);
-          else if (this.retentionEligible(row)) {
-            eligible++;
-            deadlines.push(row.createdAt + 7 * 86400000);
-          }
-        }
-      }
-      if (eligible > 1000) deadlines.push(now);
-      const nextAt = deadlines.length ? Math.min(...deadlines) : null;
-      // Derived hint, not authority: every operation mutation invalidates it synchronously.
-      if (rows.every(o => o.terminalAt && o.terminalNotified) &&
-          (nextAt === null || nextAt > now))
-        this.db.put(WORKSPACE_JOURNAL_IDLE_KEY, { nextAt, lastActivityAt: rows.reduce((latest, row) => Math.max(latest, row.terminalAt ?? row.createdAt), 0) });
-    }
-    for (const expiry of [this.images.nextExpiry(), this.music.nextExpiry()])
-      if (expiry !== undefined) deadlines.push(expiry);
+    const deadlines: number[] = [];
+    const due = this.journal.nextDue();
+    if (due !== undefined) deadlines.push(due);
+    if (this.journal.pendingExists()) deadlines.push(retryAt ?? Date.now() + 1000);
+    if (this.journal.stats().eligible > 1000) deadlines.push(Date.now());
+    const maintenanceDue=this.maintenance.nextDue();
+    if(maintenanceDue!==undefined)deadlines.push(maintenanceDue);
     const existing = await this.state.storage.getAlarm();
     if (!deadlines.length) {
       if (existing !== null) await this.state.storage.deleteAlarm();
       return;
     }
-    const next = Math.max(Date.now() + 10, Math.min(...deadlines));
+    const next = Math.max(Date.now() + 1000, Math.min(...deadlines));
     if (existing === null || existing <= Date.now() || next < existing)
       await this.state.storage.setAlarm(next);
   }
   private async drainTerminalOutbox(): Promise<void> {
     let failed = false;
-    const pending = this.journalIdle() ? [] : this.operations().filter(
-      (row) => row.terminalAt && !row.terminalNotified,
-    );
-    const retryAt = pending.length ? this.db.get<number>("outbox-retry-at", 0) : 0;
+    const retryAt = this.journal.pendingExists() ? this.db.get<number>("outbox-retry-at", 0) : 0;
     if (retryAt > Date.now()) {
       // Ordinary traffic must not bypass a durable outage backoff.
       try { await this.scheduleAlarm(retryAt); } catch { /* Retain durable outbox. */ }
       return;
     }
-    for (const op of pending) {
+    for (const {key} of this.journal.pendingKeys()) {
+      const op=this.db.get<Operation>(key);
+      if(!op?.terminalAt||op.terminalNotified)continue;
       const error = (op.result as { error?: { code?: unknown } } | undefined)
         ?.error;
       const errorCode =
@@ -231,7 +226,7 @@ export class Workspace {
         });
         this.db.transaction(() => {
           const current = this.db.get<Operation>("operation/" + op.operationId);
-          if (current && current.phase === op.phase) {
+          if (current && current.phase === op.phase && !current.terminalNotified) {
             current.terminalNotified = true;
             this.db.put("operation/" + current.operationId, current);
           }
@@ -263,35 +258,19 @@ export class Workspace {
       /* Persistent terminal rows remain the outbox for the next request/alarm. */
     }
   }
-  private journalIdle(): { nextAt: number | null; lastActivityAt: number } | undefined {
-    let hint: { nextAt: number | null; lastActivityAt: number } | undefined;
-    try { hint = this.db.get<{ nextAt: number | null; lastActivityAt: number }>(WORKSPACE_JOURNAL_IDLE_KEY); }
-    catch (error) {
-      if (!(error instanceof Error) || error.message !== "SQLITE_RECORD_CORRUPT") throw error;
-      return undefined; // A corrupt derived hint is never trusted.
-    }
-    if (hint && Number.isSafeInteger(hint.lastActivityAt) && (hint.nextAt === null ||
-        (Number.isSafeInteger(hint.nextAt) && hint.nextAt > Date.now()))) return hint;
-    return undefined;
-  }
-  private retentionEligible(o: Operation): boolean {
-    return !!o.terminalAt && !!o.terminalNotified &&
-      ((o.phase !== "UNKNOWN" && o.phase !== "PARTIAL") ||
-        !!o.resolution || isTerminalViewportEffect(o));
-  }
-  private operations(): Operation[] {
-    return this.db.keys("operation/").map((k) => this.db.get<Operation>(k));
-  }
   private expire(): void {
-    this.images.expire();
-    this.music.expire();
     this.db.transaction(() => {
       const now = Date.now();
-      for (const key of this.db.keys("retired/"))
-        if (this.db.get<Lease>(key).expiresAt + 86400000 < now)
-          this.db.delete(key);
-      if (this.journalIdle()) return;
-      for (const op of this.operations()) {
+      const maintenance=this.maintenance.due(now);
+      for(const {key,kind} of maintenance)if(kind==="retired"){
+        const lease=this.db.get<Lease>(key);
+        if(lease&&lease.expiresAt+86400000<now)this.db.delete(key);
+      }
+      const imageKeys=maintenance.filter(row=>row.kind==="image").map(row=>row.key);
+      const musicKeys=maintenance.filter(row=>row.kind==="music").map(row=>row.key);
+      if(imageKeys.length)this.images.expire(imageKeys);
+      if(musicKeys.length)this.music.expire(musicKeys);
+      for (const op of this.journal.due(now)) {
         const terminalCode = (
           op.result as { error?: { code?: unknown } } | undefined
         )?.error?.code;
@@ -343,22 +322,19 @@ export class Workspace {
           delete op.result;
           this.db.put("operation/" + op.operationId, op);
         }
-      }
-      const terminal = this.operations()
-        .filter(o => this.retentionEligible(o))
-        .sort((a, b) => a.createdAt - b.createdAt);
-      const excess = Math.max(0, terminal.length - 1000);
-      for (const [index, op] of terminal.entries())
-        if (index < excess || op.createdAt + 7 * 86400000 <= now)
+        if (op.terminalAt && op.terminalNotified &&
+            (!["UNKNOWN","PARTIAL"].includes(op.phase) || op.resolution || isTerminalViewportEffect(op)) &&
+            op.createdAt + 7 * 86400000 <= now)
           this.db.delete("operation/" + op.operationId);
+      }
+      for (const {key} of this.journal.excessRetention()) this.db.delete(key);
     });
   }
-  private async lease(
-    request: Request,
+  private lease(
+    hash: string,
     b: Record<string, unknown>,
     terminalOnly = false,
-  ): Promise<Lease> {
-    const hash = await digest(bearer(request));
+  ): Lease {
     let l = this.db.get<Lease>("lease");
     if (
       terminalOnly &&
@@ -394,7 +370,7 @@ export class Workspace {
       bindingRevision: op.bindingRevision,
       ...(op.resolution ? { resolution: op.resolution } : {}),
       ...(op.lateObservation ? { lateObservation: op.lateObservation } : {}),
-      ...(op.result === undefined
+      ...(op.result === undefined || (op.terminalAt!==undefined&&op.terminalAt+600000<=Date.now())
         ? op.terminalAt
           ? {
               error: {
@@ -407,10 +383,37 @@ export class Workspace {
         : { data: op.result }),
     };
   }
-  private async route(request: Request): Promise<Response> {
+  /** Read-only shortcut; never reconcile, authorize or dispatch from a derived snapshot.
+   * Dirty records, active work, outbox, expired deadlines, missing alarm or
+   * retention backlog fall through to the normal bounded maintenance path. */
+  private async idlePollState(): Promise<{ lastActivityAt: number } | undefined> {
+    const row = this.db.query<{ operationDue: number | null; maintenanceDue: number | null; lastActivity: number | null }>(
+      `SELECT (SELECT due FROM operation_index_v1 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS operationDue,
+        (SELECT due FROM workspace_maintenance_v1 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS maintenanceDue,
+        (SELECT terminal FROM operation_index_v1 ORDER BY terminal DESC LIMIT 1) AS lastActivity
+       FROM operation_index_state_v1 WHERE id=1 AND eligible<=1000
+        AND NOT EXISTS(SELECT 1 FROM operation_dirty_v1 LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_dirty_v1 LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM operation_index_v1 WHERE active=1 LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM operation_index_v1 WHERE pending=1 LIMIT 1)
+        AND NOT EXISTS(SELECT 1 FROM records WHERE key IN ('outbox-backoff','outbox-retry-at') LIMIT 1)`
+    )[0];
+    if(!row)return undefined;
+    const due=Math.min(row.operationDue??Infinity,row.maintenanceDue??Infinity);
+    if(due<=Date.now())return undefined;
+    if(Number.isFinite(due)){
+      const alarm=await this.state.storage.getAlarm();
+      // Never replace an alarm using a potentially stale snapshot after await.
+      // A missing/late alarm is repaired by ordinary maintenance instead.
+      if(alarm===null||alarm<=Date.now()||alarm>due+1000||due<=Date.now())return undefined;
+    }
+    return {lastActivityAt:row.lastActivity??0};
+  }
+  private async route(request: Request, maintenance: {settled:boolean}): Promise<Response> {
     const path = new URL(request.url).pathname,
       b = await parseBody(request);
-    if (path !== "/api/v1/tab/poll") this.expire();
+    if (path === "/internal/sql-usage") return json(this.db.snapshotUsage());
+    if (path.startsWith("/internal/")) this.expire();
     if (path === "/internal/admit") {
       const w = b.workspace as WorkspaceRecord,
         l = this.db.get<Lease>("lease");
@@ -441,39 +444,35 @@ export class Workspace {
         createdAt: Date.now(),
       };
       this.db.transaction(() => {
-        const all = this.operations();
-        if (
-          all.filter((o) => o.terminalAt && !o.terminalNotified).length >= 128
-        )
+        const all = this.journal.activeStats();
+        if (this.journal.pendingFull())
           throw new ApiError(
             "QUOTA_EXCEEDED",
             "Terminal notice outbox is full; restore Registry communication before new work.",
             429,
           );
         if (
-          all.filter(blocksNewMutation).length >= 128
+          this.journal.holdsFull()
         )
           throw new ApiError(
             "QUOTA_EXCEEDED",
             "Unresolved-operation metadata budget reached; reconcile held operations.",
             429,
           );
-        if (all.some(blocksNewMutation) && op.mutating)
+        if (op.mutating && this.journal.holds())
           throw new ApiError(
             "EFFECT_UNKNOWN",
             "Workspace holds an unresolved effect.",
             409,
           );
-        if (all.filter((o) => !o.terminalAt).length >= 8)
+        if (all.length >= 8)
           throw new ApiError(
             "QUEUE_FULL",
             "Workspace queue has eight operations.",
             429,
           );
         if (
-          all
-            .filter((o) => !o.terminalAt)
-            .reduce((n, o) => n + JSON.stringify(o.args ?? {}).length, 0) +
+          all.reduce((n,o)=>n+o.argSize,0) +
             JSON.stringify(args).length >
           2 * 1024 * 1024
         )
@@ -553,8 +552,8 @@ export class Workspace {
         : null;
       const claiming = this.db.get<{expiresAt:number}>("claiming");
       const pendingClaimUntil = claiming && claiming.expiresAt > now ? claiming.expiresAt : null;
-      const operations = this.operations()
-        .filter(op=>op.workspaceId === workspaceId && blocksNewLease(op))
+      const operations = this.journal.leaseBlockers()
+        .filter(op=>op.workspaceId === workspaceId)
         .sort((a,z)=>a.createdAt-z.createdAt)
         .slice(0,128)
         .map(op=>({
@@ -582,41 +581,30 @@ export class Workspace {
           "Adapter protocol version 1 required.",
           409,
         );
-      const current = this.db.get<Lease>("lease");
-      if (current && current.expiresAt > Date.now())
-        throw new ApiError(
-          "TAB_BUSY",
-          "Another document has an active lease. Release it or wait for expiry.",
-          409,
-        );
-      if (
-        this.operations().some(blocksNewLease)
-      )
-        throw new ApiError(
-          "EFFECT_UNKNOWN",
-          "Previous document has an unresolved operation. Reconciliation required before reconnect.",
-          409,
-        );
+      // Authenticate installation and binding before writing a claim guard or
+      // running expiry. Recheck local ownership after the asynchronous RPC.
+      const approved = await rpc<{
+        workspace: WorkspaceRecord;
+        credentialEpoch: number;
+      }>(registry(this.env), "/internal/claim", {
+        workspaceId,
+        binding: b.binding,
+        credential,
+      });
       const guard = crypto.randomUUID();
       this.db.transaction(() => {
+        this.expire();
+        const current = this.db.get<Lease>("lease");
+        if(current&&current.expiresAt>Date.now())
+          throw new ApiError("TAB_BUSY","Another document has an active lease.",409);
+        if(this.journal.leaseBlocked())
+          throw new ApiError("EFFECT_UNKNOWN","Previous document has an unresolved operation. Reconciliation required before reconnect.",409);
         const claiming = this.db.get<{ expiresAt: number }>("claiming");
-        if (claiming && claiming.expiresAt > Date.now())
-          throw new ApiError(
-            "TAB_BUSY",
-            "Lease claim already in progress.",
-            409,
-          );
-        this.db.put("claiming", { guard, expiresAt: Date.now() + 30000 });
+        if(claiming&&claiming.expiresAt>Date.now())
+          throw new ApiError("TAB_BUSY","Lease claim already in progress.",409);
+        this.db.put("claiming",{guard,expiresAt:Date.now()+30000});
       });
       try {
-        const approved = await rpc<{
-          workspace: WorkspaceRecord;
-          credentialEpoch: number;
-        }>(registry(this.env), "/internal/claim", {
-          workspaceId,
-          binding: b.binding,
-          credential,
-        });
         const fresh = await rpc<{ epoch: number }>(
           registry(this.env),
           "/internal/epoch",
@@ -636,6 +624,9 @@ export class Workspace {
           permissions: approved.workspace.permissions,
         };
         this.db.transaction(() => {
+          const claim=this.db.get<{guard:string;expiresAt:number}>("claiming");
+          if(claim?.guard!==guard||claim.expiresAt<=Date.now())
+            throw new ApiError("STALE_EPOCH","Claim was superseded or expired.",409);
           this.db.put("lease", l);
           this.db.delete("claiming");
         });
@@ -649,7 +640,9 @@ export class Workspace {
           permissions: l.permissions,
         });
       } catch (error) {
-        this.db.delete("claiming");
+        this.db.transaction(()=>{
+          if(this.db.get<{guard:string}>("claiming")?.guard===guard)this.db.delete("claiming");
+        });
         throw error;
       }
     }
@@ -681,11 +674,14 @@ export class Workspace {
       }
       return json(this.summary(op));
     }
-    const l = await this.lease(
-      request,
+    // Hash asynchronously before reading and validating the current lease.
+    // There is no asynchronous gap between the validated read and poll renewal.
+    const l = this.lease(
+      await digest(bearer(request)),
       b,
       path === "/api/v1/tab/reply" && b.phase !== "RUNNING",
     );
+    if (path !== "/api/v1/tab/poll") this.expire();
     if (path === "/api/v1/tab/image")
       return json(await this.images.handle(b, l));
     if (path === "/api/v1/tab/music" || path === "/api/v1/tab/music-result")
@@ -724,27 +720,27 @@ export class Workspace {
     if (path === "/api/v1/tab/poll") {
       // Recheck registry policy through an execution credential-independent lease revision probe at dispatch.
       // Never sleep inside a Durable Object. The outer Worker paces empty responses.
-      const refreshed = this.db.get<Lease>("lease");
-      if (!refreshed || refreshed.epoch !== l.epoch ||
-          refreshed.tabInstanceId !== l.tabInstanceId || refreshed.expiresAt <= Date.now())
-        throw new ApiError("STALE_EPOCH", "Lease changed during polling.", 409);
-      l.expiresAt = refreshed.expiresAt;
+      const refreshed = l;
       if (l.expiresAt - Date.now() <= 120000 || !refreshed.claimedAt) {
         refreshed.claimedAt ??= Date.now();
         refreshed.expiresAt = l.expiresAt = Date.now() + 180000;
         this.db.put("lease", refreshed);
       }
+      const idle=await this.idlePollState();
+      if(idle){
+        // No work was eligible at the snapshot. A concurrent admission is
+        // independently persisted and observed by the next ordinary poll.
+        maintenance.settled=true;
+        const idleFor=Date.now()-Math.max(refreshed.claimedAt??Date.now(),idle.lastActivityAt);
+        return json({operations:[],expiresAt:l.expiresAt,idleWaitMs:idleFor>=120000?15000:5000});
+      }
       this.expire();
-      const idle = this.journalIdle();
-      const operations = idle ? [] : this.operations();
-      const idleFor = Date.now() - Math.max(refreshed.claimedAt ?? Date.now(), idle?.lastActivityAt ?? Date.now());
-      const idleWaitMs = idle && idleFor >= 120000 ? 15000 : 5000;
-      if (operations.some(o => ["DISPATCHED", "RUNNING"].includes(o.phase)))
-        return json({ operations: [], expiresAt: l.expiresAt, idleWaitMs });
-      const op = operations
-        .filter((o) => o.phase === "ADMITTED")
-        .sort((a, b) => a.sequence - b.sequence)[0];
-      if (!op) return json({ operations: [], expiresAt: l.expiresAt, idleWaitMs });
+      if(this.journal.running())return json({operations:[],expiresAt:l.expiresAt,idleWaitMs:5000});
+      const op=this.journal.nextAdmitted();
+      if(!op){
+        const idleFor=Date.now()-Math.max(refreshed.claimedAt??Date.now(),this.journal.lastActivityAt());
+        return json({operations:[],expiresAt:l.expiresAt,idleWaitMs:idleFor>=120000?15000:5000});
+      }
       try {
         await rpc(registry(this.env), "/internal/dispatch", {
           props: op.props,
@@ -946,10 +942,7 @@ export class Workspace {
           );
         op.phase = phase;
         if (phase !== "RUNNING") {
-          const retained = this.operations().reduce(
-            (n, row) => n + JSON.stringify(row.result ?? null).length,
-            0,
-          );
+          const retained = this.journal.stats().resultSize;
           op.result =
             retained + JSON.stringify(b.result).length <= 8 * 1024 * 1024
               ? b.result

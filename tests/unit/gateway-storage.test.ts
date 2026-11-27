@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { SqlRecords, WORKSPACE_JOURNAL_IDLE_KEY } from "../../apps/gateway/src/sql.js";
+import { SqlRecords } from "../../apps/gateway/src/sql.js";
 import { Registry } from "../../apps/gateway/src/registry.js";
 import { Workspace } from "../../apps/gateway/src/workspace.js";
 import type {
@@ -30,7 +30,7 @@ function fixture() {
         const rows = sql.trim().startsWith("SELECT")
           ? statement.all(...args)
           : (statement.run(...args), []);
-        return { toArray: () => rows };
+        return { toArray: () => rows, rowsRead: rows.length, rowsWritten: 0 };
       },
     },
     transactionSync<T>(fn: () => T) {
@@ -500,7 +500,7 @@ test("idle Workspace maintenance neither recreates backoff nor rewrites schema",
   } finally { f.db.close(); }
 });
 
-test("idle journal survives cold starts and invalidates on every operation mutation", async () => {
+test("indexed journal survives cold starts and reconciles legacy writes without history scans", async () => {
   const local = fixture();
   try {
     const records = new SqlRecords(local.storage);
@@ -511,7 +511,7 @@ test("idle journal survives cold starts and invalidates on every operation mutat
       fetch: async () => Response.json({ ok: true }),
     }) } } as unknown as Env;
     await new Workspace(local.state, env).alarm();
-    assert.ok(records.get(WORKSPACE_JOURNAL_IDLE_KEY));
+    assert.equal(local.storage.sql.exec("SELECT key FROM operation_dirty_v1").toArray().length, 0);
     const baseline = local.counts.operationScans;
     for (let i = 0; i < 10; i++) await new Workspace(local.state, env).alarm();
     assert.equal(local.counts.operationScans, baseline);
@@ -519,12 +519,37 @@ test("idle journal survives cold starts and invalidates on every operation mutat
       records.put("operation/rollback", opFixture());
       throw new Error("rollback");
     }));
-    assert.ok(records.get(WORKSPACE_JOURNAL_IDLE_KEY));
-    // An older binary issuing raw SQL also invalidates the persisted hint.
+    assert.equal(local.storage.sql.exec("SELECT key FROM operation_dirty_v1").toArray().length, 0);
+    // An older binary issuing raw SQL marks exactly the changed key dirty.
     local.storage.sql.exec("INSERT INTO records (key, part, value) VALUES (?, ?, ?)", "operation/fixture-operation", 0, JSON.stringify(opFixture()));
-    assert.equal(records.get(WORKSPACE_JOURNAL_IDLE_KEY), undefined);
+    assert.equal(local.storage.sql.exec("SELECT key FROM operation_dirty_v1").toArray().length, 1);
     await new Workspace(local.state, env).alarm();
     assert.equal(records.get<{phase:string}>("operation/fixture-operation")?.phase, "UNKNOWN");
-    assert.ok(local.counts.operationScans > baseline);
+    assert.equal(local.counts.operationScans, baseline);
   } finally { local.db.close(); }
+});
+
+test("Registry index recreates safely after rollback of first indexed mutation", async()=>{
+ const f=fixture();
+ try {
+   const rows=new SqlRecords(f.storage);
+   const {RegistryIndex}=await import("../../apps/gateway/src/registry-index.js");
+   rows.put("grant/old",{workspaceId:"w",state:"active",expiresAt:Date.now()+10000});
+   assert.throws(()=>rows.transaction(()=>{const index=new RegistryIndex(rows);assert.equal(index.count("grant"),1);throw new Error("abort");}));
+   const index=new RegistryIndex(rows);assert.equal(index.count("grant"),1);
+   rows.put("grant/new",{workspaceId:"w",state:"active",expiresAt:Date.now()+10000});
+   assert.deepEqual(index.grants("w").sort(),["grant/new","grant/old"]);
+   rows.delete("grant/old");assert.equal(index.count("grant"),1);
+ }finally{f.db.close();}
+});
+test("indexed historical cleanup cannot hide an expired active operation",async()=>{
+ const f=fixture();
+ try{
+   const db=new SqlRecords(f.storage);
+   const {OperationIndex}=await import("../../apps/gateway/src/operation-index.js");
+   const index=new OperationIndex<ReturnType<typeof opFixture>>(db);
+   for(let n=0;n<150;n++)db.put("operation/history-"+n,{...opFixture("SUCCEEDED"),operationId:"history-"+n,createdAt:Date.now()-8*86400000,terminalAt:Date.now()-7*86400000,terminalNotified:true});
+   db.put("operation/fixture-operation",opFixture());
+   assert.ok(index.due(Date.now()).some(o=>o.operationId==="fixture-operation"));
+ }finally{f.db.close();}
 });

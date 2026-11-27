@@ -599,7 +599,8 @@ export class BrowserController {
         // A short-lived VPN switch, throttled background tab or Cloudflare
         // timeout must not strand the agent after a fixed three-strike count.
         // Retry *only the read-only poll* and never re-ACK/replay an effect.
-        const backoff=Math.min(10000,250*2**Math.min(this.consecutivePollFailures-1,6));
+        const quotaDelay=error instanceof TransportError && error.connectivityRetryAfterSeconds===300 ? 300000 : 0;
+        const backoff=Math.max(quotaDelay,Math.min(10000,250*2**Math.min(this.consecutivePollFailures-1,6)));
         await new Promise((resolve) => setTimeout(resolve,Math.min(backoff,
           Math.max(0,lease.expiresAt-Date.now()-1000))));
         continue;

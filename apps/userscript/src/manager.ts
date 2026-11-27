@@ -456,9 +456,9 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     },
     tab: Tab = client.configuration().paired ? "Workspaces" : "Settings";
   let resourceLoad = 0;
-  let approvalRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  let approvalRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   function stopApprovalRefresh() {
-    if (approvalRefreshTimer !== undefined) clearInterval(approvalRefreshTimer);
+    if (approvalRefreshTimer !== undefined) clearTimeout(approvalRefreshTimer);
     approvalRefreshTimer = undefined;
   }
   let generation = 0,
@@ -1251,6 +1251,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     const grantsPanel = el("section");
     body.append(approvalPanel, grantsPanel);
     let lastApprovalState = "";
+    let pendingApprovalCount = 0;
     const loadApprovals = async () => {
       const approvals = await loadList(`${ADMIN}/approvals`);
       if (own !== generation || destroyed || !opened || tab !== "Agents")
@@ -1258,6 +1259,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       const pending = approvals.items.filter(
         (item) => item.state === "pending" && num(item.expiresAt) > Date.now(),
       );
+      pendingApprovalCount = pending.length;
       const fingerprint = JSON.stringify(pending);
       if (fingerprint === lastApprovalState) return; // Preserve focus while polling.
       lastApprovalState = fingerprint;
@@ -1351,25 +1353,32 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     };
     // Never overlap requests: a stalled gateway must not pile up polling
     // calls, reorder snapshots or amplify its own outage.
-    let approvalInFlight = false;
+    let approvalFailures = 0;
+    let quotaDelay=0;
+    const approvalWatchStarted = Date.now();
     const pollApprovals = async () => {
-      if (approvalInFlight) return;
-      approvalInFlight = true;
+      if (own !== generation || destroyed || !opened || tab !== "Agents") return;
+      approvalRefreshTimer = undefined;
       try {
         await loadApprovals();
+        approvalFailures = 0;
+        quotaDelay=0;
       } catch (error) {
+        approvalFailures++;
+        quotaDelay=typeof error==="object"&&error!==null&&"connectivityRetryAfterSeconds" in error&&error.connectivityRetryAfterSeconds===300 ? 300000 : 0;
         showApprovalsFailure(error);
-      } finally {
-        approvalInFlight = false;
       }
+      // Check generation after the await: a closed or superseded manager must
+      // never restart the timer. Only one automatic request is in flight.
+      if (own !== generation || destroyed || !opened || tab !== "Agents") return;
+      const delay = Math.max(quotaDelay,approvalFailures
+        ? Math.min(60000,4000*2**Math.min(approvalFailures,4))
+        : pendingApprovalCount || Date.now()-approvalWatchStarted < 30000 ? 4000 : 15000);
+      approvalRefreshTimer = setTimeout(() => void pollApprovals(), delay);
+      (approvalRefreshTimer as unknown as { unref?: () => void }).unref?.();
     };
     await pollApprovals();
     if (own !== generation || destroyed || !opened || tab !== "Agents") return;
-    approvalRefreshTimer = setInterval(() => {
-      void pollApprovals();
-    }, 4000);
-    // Never make synthetic Node test runners wait on the UI's polling timer.
-    (approvalRefreshTimer as unknown as { unref?: () => void }).unref?.();
     void (async () => {
       try {
         const grants = await loadList(`${ADMIN}/grants`);

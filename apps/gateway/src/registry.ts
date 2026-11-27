@@ -1,3 +1,4 @@
+import { withSqlUsage } from "./sql-meter.js";
 import { ResourceError } from "../../../packages/resource-library/src/index.js";
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import {
@@ -24,6 +25,7 @@ import {
   type Env,
 } from "./common.js";
 import { SqlRecords } from "./sql.js";
+import { RegistryIndex } from "./registry-index.js";
 import { incident, persistIncident, registryFailureReason, registryQuotaDimension, registryFailureSignal } from "./incident.js";
 import { requiresGeneratorReservation } from "../../../packages/contracts/src/effect-policy.js";
 import { resourceAdmin, resourceTool } from "./resources.js";
@@ -108,6 +110,14 @@ export interface AuthProps {
 }
 export class Registry {
   private records?: SqlRecords;
+  private derived?: RegistryIndex;
+  private get catalog():RegistryIndex {
+    if(this.derived)return this.derived;
+    const index=new RegistryIndex(this.db);
+    // An enclosing transaction may roll back DDL. Cache only committed initialization.
+    if(!this.db.inTransaction)this.derived=index;
+    return index;
+  }
   constructor(
     private state: DurableObjectState,
     private env: Env,
@@ -140,13 +150,13 @@ export class Registry {
   }
   private cleanup(): void {
     const now = Date.now();
-    for (const key of this.db.keys("approval/"))
+    for (const key of this.catalog.due("approval",now))
       if (this.db.get<{ expiresAt: number }>(key).expiresAt < now)
         this.db.delete(key);
-    for (const key of this.db.keys("grant/"))
+    for (const key of this.catalog.due("grant",now))
       if (this.db.get<{ expiresAt: number }>(key).expiresAt < now)
         this.db.delete(key);
-    for (const key of this.db.keys("permit/")) {
+    for (const key of this.catalog.due("permit",now)) {
       const row = this.db.get<{ state: string; createdAt?: number }>(key);
       if (
         row.state === "terminal" &&
@@ -155,7 +165,7 @@ export class Registry {
       )
         this.db.delete(key);
     }
-    for (const key of this.db.keys("terminal-notice/")) {
+    for (const key of this.catalog.due("terminal-notice",now)) {
       const notice = this.db.get<{
         expires: number;
         phase: string;
@@ -191,9 +201,21 @@ export class Registry {
           this.db.delete(key.replace("terminal-notice/", "resolution/"));
       }
     }
-    for (const key of this.db.keys("idempotency/"))
+    for (const key of this.catalog.due("idempotency",now))
       if (this.db.get<{ expires: number }>(key).expires < now)
         this.db.delete(key);
+  }
+  async alarm():Promise<void> {
+    return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","registry","alarm",async()=>{
+      this.db.transaction(()=>this.cleanup());
+      await this.scheduleCleanup();
+    });
+  }
+  private async scheduleCleanup():Promise<void> {
+    const due=this.catalog.nextDue(), existing=await this.state.storage.getAlarm();
+    if(due===undefined){if(existing!==null)await this.state.storage.deleteAlarm();return;}
+    const next=Math.max(Date.now()+1000,due+1);
+    if(existing===null||existing<=Date.now()||next<existing)await this.state.storage.setAlarm(next);
   }
   private bump(c: Core): void {
     c.revision++;
@@ -210,7 +232,7 @@ export class Registry {
     return a;
   }
   private revokeWorkspace(workspaceId: string): void {
-    for (const key of this.db.keys("grant/")) {
+    for (const key of this.catalog.grants(workspaceId)) {
       const g = this.db.get<GrantRecord>(key);
       if (g.workspaceId === workspaceId && g.state === "active") {
         g.state = "revoked";
@@ -230,6 +252,9 @@ export class Registry {
     return c;
   }
   async fetch(request: Request): Promise<Response> {
+    return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","registry",new URL(request.url).pathname,()=>this.fetchMetered(request));
+  }
+  private async fetchMetered(request: Request): Promise<Response> {
     let healthStage = "SQL_INIT";
     try {
       if (new URL(request.url).pathname === "/internal/health") {
@@ -237,7 +262,14 @@ export class Registry {
         void this.db;
         healthStage = "CORE_READ";
       }
-      return await this.route(request);
+      const response = await this.route(request);
+      const path = new URL(request.url).pathname;
+      if(response.ok && ((path.startsWith("/api/v1/admin/")&&request.method!=="GET") ||
+         ["/internal/oauth/pending","/internal/oauth/consume","/internal/oauth/redirect-commit","/internal/oauth/abort-completion","/internal/terminal"].includes(path))) {
+        // A committed request must not be reported failed merely because scheduling failed.
+        try {await this.scheduleCleanup();} catch { /* Next authenticated mutation retries scheduling. */ }
+      }
+      return response;
     } catch (error) {
       const traceId = crypto.randomUUID();
       const response = errorResponse(
@@ -267,6 +299,7 @@ export class Registry {
   private async route(request: Request): Promise<Response> {
     const url = new URL(request.url),
       path = url.pathname;
+    if(path==="/internal/sql-usage")return json(this.db.snapshotUsage());
     if (path === "/internal/diagnostic-event") {
       // Called only through the private Durable Object binding by the Worker.
       // No URLs, HTTP headers, OAuth tokens, form fields or source are stored.
@@ -323,13 +356,16 @@ export class Registry {
     }
     if (path === "/internal/config") {
       const c = this.core();
+      const scope = request.method === "POST" ? await request.json() as {agentId?:unknown} : undefined;
+      if (scope && (typeof scope.agentId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(scope.agentId)))
+        throw new ApiError("INVALID_INPUT","Invalid internal configuration scope.",400);
+      const keys = scope ? ["agent/"+scope.agentId] : this.db.keys("agent/");
       return json({
         issuer: c.issuer,
         paired: c.paired,
-        resources: this.db
-          .keys("agent/")
-          .map((k) => this.db.get<AgentRecord>(k))
-          .filter((a) => !a.suspended)
+        resources: keys
+          .map((k) => this.db.get<AgentRecord|undefined>(k))
+          .filter((a):a is AgentRecord => !!a && !a.suspended)
           .map((a) => a.endpoint),
         version: VERSION,
         schemaVersion: 1,
@@ -499,10 +535,7 @@ export class Registry {
         const c = this.core();
         this.cleanup();
         if (
-          this.db
-            .keys("approval/")
-            .filter((k) => this.db.get<Approval>(k).expiresAt > Date.now())
-            .length >= 100
+          this.catalog.approvalFull(Date.now())
         )
           throw new ApiError(
             "QUEUE_FULL",
@@ -574,7 +607,7 @@ export class Registry {
             );
           this.cleanup();
           if (
-            this.db.keys("grant/").length >=
+            this.catalog.count("grant") >=
             configuredBudget(this.env.REGISTRY_GRANT_BUDGET, 1000)
           )
             throw new ApiError(
@@ -903,9 +936,8 @@ export class Registry {
           event,
           expires: Date.now() + 7 * 86400000,
         });
-        const events = this.db.get<unknown[]>("activity", []);
-        events.push(event);
-        this.db.put("activity", events.slice(-1000));
+        const events = this.db.get<Record<string,unknown>[]>("activity", []);
+        this.catalog.putActivity(events,[...events,event].slice(-1000));
         this.bump(this.core());
       });
       return json({ ok: true });
@@ -945,7 +977,7 @@ export class Registry {
         return json(idem.result);
       }
       this.cleanup();
-      if (this.db.keys("idempotency/").length >= 1024)
+      if (this.catalog.count("idempotency") >= 1024)
         throw new ApiError(
           "QUOTA_EXCEEDED",
           "Management idempotency budget reached; wait for expiration.",
@@ -958,9 +990,6 @@ export class Registry {
         expires: Date.now() + 86400000,
       });
       this.bump(c);
-      for (const k of this.db.keys("idempotency/"))
-        if (this.db.get<{ expires: number }>(k).expires < Date.now())
-          this.db.delete(k);
       return json(result);
     });
   }
@@ -1069,11 +1098,9 @@ export class Registry {
           inlineMcpBytes: 262144,
           workspaceTransientBytes: 8 * 1024 * 1024,
         },
-        libraryRevision: this.db.get<{ revision: number }>("library", {
-          revision: 0,
-        }).revision,
-        workspaces: this.db.keys("workspace/").length,
-        agents: this.db.keys("agent/").length,
+        libraryRevision: this.catalog.libraryRevision(),
+        workspaces: this.catalog.count("workspace"),
+        agents: this.catalog.count("agent"),
       });
     const entity =
       /^\/api\/v1\/admin\/(workspaces|agents)\/([a-zA-Z0-9_-]+)$/.exec(path);
@@ -1094,11 +1121,8 @@ export class Registry {
       const offset = Number(url.searchParams.get("cursor") ?? 0);
       if (!Number.isSafeInteger(offset) || offset < 0)
         throw new ApiError("INVALID_INPUT", "Invalid cursor.");
-      const items = this.db
-        .keys(list)
+      const items = this.catalog.page(list.slice(0,-1) as "workspace"|"agent"|"grant"|"approval",offset,Date.now())
         .map((k) => this.db.get<Record<string, unknown>>(k))
-        .filter((v) => list !== "approval/" || Number(v.expiresAt) > Date.now())
-        .slice(offset, offset + 100)
         .map((v) => {
           const { handleHash: _, request: __, ...safe } = v;
           return safe;
@@ -1125,63 +1149,12 @@ export class Registry {
           "Activity changed; restart the list.",
           409,
         );
-      const events = new Map<string, Record<string, unknown>>();
-      for (const event of this.db.get<Record<string, unknown>[]>(
-        "activity",
-        [],
-      ))
-        events.set(
-          String(event.workspaceId) + "/" + String(event.operationId),
-          event,
-        );
-      for (const key of this.db.keys("terminal-notice/")) {
-        const row = this.db.get<{
-          phase: string;
-          event?: Record<string, unknown>;
-        }>(key);
-        if (["UNKNOWN", "PARTIAL"].includes(row.phase) && row.event)
-          events.set(
-            String(row.event.workspaceId) + "/" + String(row.event.operationId),
-            row.event,
-          );
-      }
-      const status = url.searchParams.get("status"),
-        workspaceId = url.searchParams.get("workspaceId");
-      const all = [...events.values()]
-        .filter(
-          (e) =>
-            (!status || e.phase === status) &&
-            (!workspaceId || e.workspaceId === workspaceId),
-        )
-        .sort(
-          (a, b) =>
-            Number(
-              ["UNKNOWN", "PARTIAL"].includes(String(b.phase)) && !b.resolution,
-            ) -
-              Number(
-                ["UNKNOWN", "PARTIAL"].includes(String(a.phase)) &&
-                  !a.resolution,
-              ) ||
-            Math.max(
-              Number(b.timestamp),
-              Number(
-                (b.resolution as { timestamp?: number } | undefined)
-                  ?.timestamp ?? 0,
-              ),
-            ) -
-              Math.max(
-                Number(a.timestamp),
-                Number(
-                  (a.resolution as { timestamp?: number } | undefined)
-                    ?.timestamp ?? 0,
-                ),
-              ),
-        );
-      const end = Math.min(all.length, offset + 100);
+      const all = this.catalog.activity(offset,url.searchParams.get("status"),url.searchParams.get("workspaceId"));
+      const end = offset+Math.min(100,all.length);
       return json({
-        items: all.slice(offset, end),
+        items: all.slice(0,100),
         revision: current.revision,
-        cursor: end < all.length ? current.revision + ":" + end : null,
+        cursor: all.length > 100 ? current.revision + ":" + end : null,
       });
     }
     throw new ApiError("NOT_FOUND", "Route not found.", 404);
@@ -1195,7 +1168,7 @@ export class Registry {
     if (path === prefix + "workspaces") {
       fields(b, ["label", "permissions"]);
       if (
-        this.db.keys("workspace/").length >=
+        this.catalog.count("workspace") >=
         configuredBudget(this.env.REGISTRY_WORKSPACE_BUDGET, 1000)
       )
         throw new ApiError(
@@ -1313,10 +1286,7 @@ export class Registry {
       }
       this.db.put("resolution/" + w.id + "/" + operationId, resolution);
       const activity = this.db.get<Record<string, unknown>[]>("activity", []);
-      for (const event of activity)
-        if (event.workspaceId === w.id && event.operationId === operationId)
-          event.resolution = resolution;
-      this.db.put("activity", activity);
+      this.catalog.putActivity(activity,activity.map(event=>event.workspaceId===w.id&&event.operationId===operationId?{...event,resolution}:event));
       const noticeKey = "terminal-notice/" + w.id + "/" + operationId,
         notice = this.db.get<{
           phase: string;
@@ -1365,20 +1335,7 @@ export class Registry {
         );
       if (
         m[2] &&
-        (this.db.keys("permit/").some((key) => {
-          const p = this.db.get<{ workspaceId: string; state: string }>(key);
-          return p.workspaceId === w.id && p.state === "consumed";
-        }) ||
-          this.db.keys("terminal-notice/" + w.id + "/").some((key) => {
-            const n = this.db.get<{
-              phase: string;
-              event?: { resolution?: unknown; tool?: string };
-            }>(key);
-            return (
-              ["UNKNOWN", "PARTIAL"].includes(n.phase) &&
-              !n.event?.resolution && n.event?.tool !== "set_viewport_size"
-            );
-          }))
+        this.catalog.bindingBlocked(w.id)
       )
         throw new ApiError(
           "EFFECT_UNKNOWN",

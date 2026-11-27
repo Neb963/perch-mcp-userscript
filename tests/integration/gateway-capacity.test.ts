@@ -453,3 +453,84 @@ test("credential recovery retains inert identity evidence so an older held write
     await h.close();
   }
 });
+
+test("SQL cursor budgets do not scale with terminal history while idle or active", async () => {
+  const h = await createCapacityHarness(1);
+  try {
+    const f = h.fixtures[0]!;
+    const stub = h.wns.get(h.wns.idFromName(f.workspaceId));
+    const usage = async () => await h.internal(stub,"/internal/sql-usage",{}) as unknown as {reads:number;writes:number;unmetered:number;statements:number};
+    const registryUsage=async()=>await h.internal(h.registry,"/internal/sql-usage",{}) as unknown as {reads:number;writes:number;unmetered:number;statements:number};
+    const measure = async (fn:()=>Promise<unknown>) => {
+      const before=await usage(); await fn(); const after=await usage();
+      assert.equal(after.unmetered,0,"real SQL cursors must be metered");
+      // The same instance must serve both samples; do not mistake an eviction for a reduction.
+      assert.ok(after.statements>=before.statements);
+      return {reads:after.reads-before.reads,writes:after.writes-before.writes};
+    };
+    const idle=()=>h.browser(f,"poll",{waitMs:0});
+    const idleBefore=await measure(idle);
+    const registryBefore=await registryUsage();
+    const firstCycle = await measure(()=>h.cycle(f));
+    const registryAfter=await registryUsage();
+    const registryFirst={reads:registryAfter.reads-registryBefore.reads,writes:registryAfter.writes-registryBefore.writes};
+    for(let n=1;n<150;n++)await h.cycle(f);
+    const registryLastBefore=await registryUsage();
+    const lastCycle = await measure(()=>h.cycle(f));
+    const registryLastAfter=await registryUsage();
+    const registryLast={reads:registryLastAfter.reads-registryLastBefore.reads,writes:registryLastAfter.writes-registryLastBefore.writes};
+    const idleAfter=await measure(idle);
+    const admitted=await h.admit(f);
+    await h.browser(f,"poll",{waitMs:0});
+    await h.browser(f,"reply",{operationId:admitted.operationId,phase:"RUNNING"});
+    const active=await measure(idle);
+    const status=await measure(()=>h.status(f,String(admitted.operationId)));
+    const invalid=await measure(async()=> {
+      const r=await stub.fetch("https://internal/api/v1/tab/poll",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+"x".repeat(64)},body:JSON.stringify({workspaceId:f.workspaceId,epoch:f.lease.epoch,tabInstanceId:f.lease.tabInstanceId,waitMs:0})});
+      assert.equal(r.status,409);
+    });
+    console.log(JSON.stringify({kind:"sql-budget",idleBefore,idleAfter,active,status,invalid,firstCycle,lastCycle,registryFirst,registryLast}));
+    assert.ok(registryLast.reads<=registryFirst.reads+20,"Registry ordinary operation cost must not scale with history");
+    assert.ok(lastCycle.reads<=firstCycle.reads+20, "ordinary cycle history must not amplify reads");
+    assert.ok(idleAfter.reads<=idleBefore.reads+10, "idle history must not amplify reads");
+    assert.ok(idleAfter.reads<=10 && active.reads<=40 && status.reads<=35);
+    assert.ok(idleAfter.writes<=2 && active.writes<=2 && invalid.writes===0);
+    assert.ok(invalid.reads<=5);
+  } finally {await h.close();}
+});
+
+test("Registry Activity reads only one page and preserves unresolved overlay",async()=>{
+  const h=await createCapacityHarness(1);
+  try{
+    const f=h.fixtures[0]!;
+    for(let n=0;n<150;n++)await h.cycle(f);
+    const usage=async()=>await h.internal(h.registry,"/internal/sql-usage",{}) as unknown as {reads:number;writes:number;unmetered:number};
+    const before=await usage();
+    const page=await h.get("/api/v1/admin/activity");
+    const after=await usage();
+    assert.equal((page.items as unknown[]).length,100);
+    assert.ok(page.cursor);
+    assert.equal(after.unmetered,0);
+    console.log(JSON.stringify({kind:"registry-activity-budget",reads:after.reads-before.reads,writes:after.writes-before.writes}));
+    assert.ok(after.reads-before.reads<=130);
+    assert.equal(after.writes-before.writes,0);
+    const next=await h.get("/api/v1/admin/activity?cursor="+encodeURIComponent(String(page.cursor)));
+    assert.equal((next.items as unknown[]).length,50);
+  }finally{await h.close();}
+});
+
+test("MCP configuration is scoped to exactly one Agent without scanning others", async()=>{
+  const h=await createCapacityHarness(20);
+  try {
+    const f=h.fixtures[0]!;
+    const usage=async()=>await h.internal(h.registry,"/internal/sql-usage",{}) as unknown as {reads:number;writes:number};
+    const before=await usage();
+    const scoped=await h.internal(h.registry,"/internal/config",{agentId:f.agentId});
+    const after=await usage();
+    assert.deepEqual(scoped.resources,["https://capacity.test/mcp/"+f.agentId]);
+    assert.ok(after.reads-before.reads<=8);
+    assert.equal(after.writes-before.writes,0);
+    const unknown=await h.internal(h.registry,"/internal/config",{agentId:"nonexistent"});
+    assert.deepEqual(unknown.resources,[]);
+  } finally {await h.close();}
+});
