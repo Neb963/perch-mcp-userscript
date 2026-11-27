@@ -79,3 +79,27 @@ export function reportIncident(env: Env, ctx: ExecutionContext, value: Incident)
   console.error(JSON.stringify({ kind: 'perch-mcp-incident', ...value }));
   ctx.waitUntil(persistIncident(env, value));
 }
+
+/** Registry-independent readiness computation used by both HTTP and scheduled checks. */
+export async function probeRegistryHealth(read: () => Promise<Response>): Promise<{
+  response: Response; failure?: { traceId: string; error?: unknown };
+}> {
+  try {
+    const upstream = await read();
+    if (upstream.status < 500) return { response: upstream };
+    const record = await upstream.clone().json().catch(() => null) as
+      { traceId?: unknown } | null;
+    const traceId = typeof record?.traceId === 'string' && TRACE.test(record.traceId)
+      ? record.traceId : crypto.randomUUID();
+    return { response: Response.json({ ok: false, code: 'GATEWAY_DEGRADED',
+      dependency: 'registry', retryable: true, traceId },
+      {status: 503, headers: {'Cache-Control':'no-store'}}),
+      failure: { traceId } };
+  } catch (error) {
+    const traceId = crypto.randomUUID();
+    return { response: Response.json({ ok: false, code: 'GATEWAY_DEGRADED',
+      dependency: 'registry', retryable: true, traceId },
+      {status: 503, headers: {'Cache-Control':'no-store'}}),
+      failure: { traceId, error } };
+  }
+}
