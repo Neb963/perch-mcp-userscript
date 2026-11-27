@@ -469,7 +469,9 @@ test("SQL cursor budgets do not scale with terminal history while idle or active
     };
     const idle=()=>h.browser(f,"poll",{waitMs:0});
     const idleBefore=await measure(idle);
-    for(let n=0;n<150;n++)await h.cycle(f);
+    const firstCycle = await measure(()=>h.cycle(f));
+    for(let n=1;n<150;n++)await h.cycle(f);
+    const lastCycle = await measure(()=>h.cycle(f));
     const idleAfter=await measure(idle);
     const admitted=await h.admit(f);
     await h.browser(f,"poll",{waitMs:0});
@@ -480,7 +482,8 @@ test("SQL cursor budgets do not scale with terminal history while idle or active
       const r=await stub.fetch("https://internal/api/v1/tab/poll",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer invalid"},body:JSON.stringify({workspaceId:f.workspaceId,epoch:f.lease.epoch,tabInstanceId:f.lease.tabInstanceId,waitMs:0})});
       assert.equal(r.status,409);
     });
-    console.log(JSON.stringify({kind:"sql-budget",idleBefore,idleAfter,active,status,invalid}));
+    console.log(JSON.stringify({kind:"sql-budget",idleBefore,idleAfter,active,status,invalid,firstCycle,lastCycle}));
+    assert.ok(lastCycle.reads<=firstCycle.reads+20, "ordinary cycle history must not amplify reads");
     assert.ok(idleAfter.reads<=idleBefore.reads+10, "idle history must not amplify reads");
     assert.ok(idleAfter.reads<=30 && active.reads<=40 && status.reads<=35);
     assert.ok(idleAfter.writes<=2 && active.writes<=2 && invalid.writes===0);
