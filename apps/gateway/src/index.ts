@@ -566,6 +566,8 @@ async function route(
     }
     return response;
   }
+  if (path === '/api/v1/tab/rebind-proof')
+    return await registry(env).fetch(request as never) as unknown as Response;
   if (path.startsWith("/api/v1/tab/")) {
     if(path==='/api/v1/tab/socket') {
       if(env.PUSH_NOTIFICATIONS_ENABLED!=='true')

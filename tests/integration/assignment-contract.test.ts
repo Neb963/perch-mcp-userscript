@@ -94,3 +94,94 @@ test('v2 Connector consent, legacy scope and indexed discovery in local workerd'
     await h.close();
   }
 });
+
+test('Binding transition holds dispatched effects, preserves original Grant access and publishes once', async () => {
+  const h = await createCapacityHarness(0, { DEVELOPMENT_CONTRACT_V2_ENABLED: 'true' });
+  try {
+    const state = await h.get(admin + '/state');
+    const a = await h.request(admin + '/connectors', { expectedRevision: state.revision, label: 'First Connector' });
+    const b = await h.request(admin + '/connectors', { expectedRevision: (await h.get(admin + '/state')).revision, label: 'Second Connector' });
+    const w = await h.request(admin + '/workspaces', { label: 'Workspace', contractVersion: 2,
+      connectorId: a.id, expectedConnectorRevision: a.revision });
+    const workspaceId = String(w.id);
+    const wPath = admin + '/workspaces/' + workspaceId;
+    const stub = h.wns.get(h.wns.idFromName(workspaceId));
+    const internals = (path: string, body: Record<string, unknown>) => h.internal(stub, '/internal/' + path, body);
+    const registry = (path: string, body: Record<string, unknown>) => h.internal(h.registry, '/internal/' + path, body);
+    const binding = (generatorId: string) => ({ generatorId, slug: generatorId, draftId: '', browserInstallationId: 'capacity-browser' });
+    const proof = async (current: Record<string, unknown>, target: Record<string, unknown>) =>
+      h.executionRequest('/api/v1/tab/rebind-proof', {workspaceId, expectedRevision: current.revision,
+        binding: target, tabInstanceId: 'approved-document', adapterVersion: '2'});
+    const claim = (target: Record<string, unknown>, version: string, tabInstanceId: string) =>
+      h.executionRequest('/api/v1/tab/claim', {workspaceId, binding: target, tabInstanceId, adapterVersion: version});
+    const original = binding('original');
+    const originalProof = await proof(w, original);
+    const bound = await h.request(wPath + '/rebind', { expectedRevision: w.revision,
+      expectedConnectorRevision: a.revision, binding: original, bindingProof: originalProof.proof });
+    await assert.rejects(claim(original, '1', 'old-build'), /UPGRADE_REQUIRED/);
+    const lease = await claim(original, '2', 'first-document');
+    assert.equal(lease.contractVersion, 2);
+    await assert.rejects(claim(original, '2', 'duplicate-document'), /TAB_BUSY/);
+    const browser = (path: string, args: Record<string, unknown>) =>
+      h.request('/api/v1/tab/' + path, {workspaceId, epoch: lease.epoch, tabInstanceId: lease.tabInstanceId, ...args}, String(lease.leaseCredential));
+    const issue = async () => {
+      const authorization = await registry('oauth/pending', {request: {
+        resource: a.endpoint, clientId: 'shared-client', redirectUri: 'https://client.test/callback', scope: ['mcp'],
+      }});
+      const approvals = await h.get(admin + '/approvals');
+      const pending = (approvals.items as Record<string, unknown>[]).find((row) => row.id === authorization.id)!;
+      await h.request(admin + '/approvals/' + authorization.id + '/decision', {
+        expectedRevision: pending.revision, digest: pending.digest, decision: 'approve',
+      });
+      return (await registry('oauth/consume', { id: authorization.id, handle: authorization.handle })).props as Record<string, unknown>;
+    };
+    const props = await issue();
+    const replacementGrant = await issue();
+    const target = encodeTarget({workspaceId, assignmentGeneration: Number(bound.assignmentGeneration),
+      bindingGeneration: Number(bound.bindingGeneration)});
+    await browser('heartbeat', {dirty: true});
+    const destination = binding('replacement');
+    const destinationProof = await proof(bound, destination);
+    const args = { expectedRevision: bound.revision, expectedConnectorRevision: a.revision,
+      binding: destination, bindingProof: destinationProof.proof };
+    await assert.rejects(h.request(wPath + '/rebind', args), /APPROVAL_REQUIRED/);
+    const auth = await registry('authorize', { props, agentId: a.id, target, permissions: ['READ_SOURCE'] });
+    const operation = await internals('admit', { workspace: auth.workspace, props, agentId: a.id,
+      target, tool: 'read', args: { path: 'main.pjs' }, permissions: ['READ_SOURCE'],
+      requiredPermissions: ['READ_SOURCE'], mutating: false });
+    const polled = await browser('poll', {});
+    assert.equal((polled.operations as Record<string, unknown>[])[0]!.operationId, operation.operationId);
+    await browser('reply', { operationId: operation.operationId, phase: 'RUNNING' });
+    const key = crypto.randomUUID();
+    const transition = { ...args, acknowledgeDirty: true };
+    await assert.rejects(h.request(wPath + '/rebind', transition, undefined, 'POST', key), /TRANSITION_BLOCKED/);
+    await assert.rejects(registry('authorize', { props, agentId: a.id, target }), /TRANSITION_BLOCKED/);
+    await assert.rejects(internals('admit', { workspace: auth.workspace, props, agentId: a.id,
+      target, tool: 'read', args: { path: 'main.pjs' }, permissions: ['READ_SOURCE'],
+      requiredPermissions: ['READ_SOURCE'], mutating: false }), /TRANSITION_BLOCKED/);
+    await browser('reply', { operationId: operation.operationId, phase: 'SUCCEEDED',
+      result: { operationId: operation.operationId, status: 'SUCCEEDED', effectState: 'VERIFIED', data: { ok: true } } });
+    const resultScope = { props, agentId: a.id, target, workspaceId, operationId: operation.operationId, bindingRevision: bound.bindingRevision };
+    assert.equal((await internals('status', resultScope)).status, 'SUCCEEDED');
+    await assert.rejects(internals('status', { ...resultScope, props: replacementGrant }), /NOT_FOUND/);
+    const changed = await h.request(wPath + '/rebind', transition, undefined, 'POST', key);
+    assert.deepEqual(await h.request(wPath + '/rebind', transition, undefined, 'POST', key), changed);
+    assert.deepEqual((await h.get(admin + '/receipts/' + key)).result, changed);
+    await assert.rejects(h.request(wPath + '/rebind', { ...transition, acknowledgeDirty: false }, undefined, 'POST', key), /IDEMPOTENCY_CONFLICT/);
+    assert.equal(changed.assignmentGeneration, bound.assignmentGeneration);
+    assert.equal(changed.bindingGeneration, Number(bound.bindingGeneration) + 1);
+    await assert.rejects(internals('status', resultScope), /STALE_TARGET/);
+    const next = await claim(destination, '2', 'replacement-document');
+    assert.ok(Number(next.epoch) > Number(lease.epoch));
+    await assert.rejects(browser('heartbeat', { dirty: false }), /STALE_EPOCH/);
+    const transfer = await h.request(wPath + '/transfer', {expectedRevision: changed.revision,
+      expectedConnectorRevision: a.revision, expectedDestinationConnectorRevision: b.revision,
+      connectorId: b.id, acknowledgeDirty: true});
+    assert.equal(transfer.connectorId, b.id);
+    assert.equal(transfer.binding, null);
+    const discovery = await registry('v2/discover', {props, agentId: a.id, args: {}});
+    assert.deepEqual(discovery.workspaces, []);
+  } finally {
+    await h.close();
+  }
+});

@@ -1,5 +1,5 @@
 import {ApiError,bearer,MAX_BODY,type Env} from './common.js';
-const TAB=new Set(['claim','poll','heartbeat','reply','release','permit','image','music','music-result','ticket','socket']);
+const TAB=new Set(['claim','rebind-proof','poll','heartbeat','reply','release','permit','image','music','music-result','ticket','socket']);
 const OAUTH=new Set(['/authorize','/authorize/complete','/token','/register','/revoke']);
 /** Shape checks only. Authoritative credentials, grants and leases stay in their existing boundaries. */
 export function validateIngress(request:Request,env:Pick<Env,'PUSH_NOTIFICATIONS_ENABLED'>):void {
@@ -41,7 +41,7 @@ export class IngressAdmission {
     const path=new URL(request.url).pathname;
     const category=path==='/api/v1/tab/socket'?'socket':
       path==='/register'&&request.method==='POST'?'registration':
-      ['/api/v1/tab/claim','/api/v1/admin/pair'].includes(path)&&request.method==='POST'?'bootstrap':undefined;
+      ['/api/v1/tab/claim','/api/v1/tab/rebind-proof','/api/v1/admin/pair'].includes(path)&&request.method==='POST'?'bootstrap':undefined;
     if(!category)return;
     this.lastNow=Math.max(this.lastNow,now);
     const minute=Math.floor(this.lastNow/60000);

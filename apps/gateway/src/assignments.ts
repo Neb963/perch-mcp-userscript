@@ -83,6 +83,8 @@ export function projectAssignment(workspace: AssignedWorkspace, ceiling: readonl
   const effective = ceiling.filter((permission) => workspace.permissions.includes(permission));
   const readable = effective.includes('READ_SOURCE');
   const binding = workspace.binding;
+  const observation = workspace.observation?.epoch === workspace.epoch ? workspace.observation : undefined;
+  const fresh = observation !== undefined && observation.observedAt + 60_000 > Date.now();
   return {
     label: workspace.label,
     target: binding ? encodeTarget({
@@ -92,11 +94,11 @@ export function projectAssignment(workspace: AssignedWorkspace, ceiling: readonl
     }) : null,
     slug: readable ? binding?.slug ?? null : null,
     identity: readable && binding ? { generatorId: binding.generatorId, draftId: binding.draftId } : null,
-    connection: binding ? 'UNKNOWN' : 'UNBOUND',
+    connection: !binding ? 'UNBOUND' : fresh ? 'CONNECTED' : observation ? 'STALE' : 'UNKNOWN',
     paused: workspace.paused,
-    dirty: null,
-    observedAt: null,
-    freshness: 'UNKNOWN',
+    dirty: fresh ? observation.dirty : null,
+    observedAt: observation?.observedAt ?? null,
+    freshness: fresh ? 'VERIFIED' : observation ? 'STALE' : 'UNKNOWN',
     permissions: effective,
   };
 }

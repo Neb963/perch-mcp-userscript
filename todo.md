@@ -15,8 +15,8 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 |---|---|---|---|
 | V00 | v0.2.0 | Baseline, authority amendment, full disposition, offline reproduction or explicit gap | Verified locally |
 | V01 | V00 | Connector-level Grant, strict version coexistence, indexed discovery and explicit Target | Foundation verified; catalog gated |
-| V02 | V01 | Durable fenced transition, exact management receipts and original-scope result ACL | In progress |
-| V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | Pending |
+| V02 | V01 | Durable fenced transition, exact management receipts and original-scope result ACL | Gateway verified; manager integration pending |
+| V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | In progress |
 | V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | Pending |
 | V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Pending |
 | V06 | V05 | Preview freshness, diagnostics, viewport, actual-pixel feasibility and verified Save | Pending |
@@ -47,6 +47,18 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 - Use persisted Registry transition intent and exact management receipt. Check operator CAS, canonical native identity, installation proof and old draft acknowledgement. Change Binding/Assignment generations and indexed ownership in one transaction only after Workspace settlement.
 - Freeze old admissions/dispatch at Registry and persist a Workspace admission fence. Queue cancellation must prove no dispatch. Active effect, unresolved notice or pending receipt holds the transition. Renew/reply and claim must not transfer an old lease.
 - Authorize v2 result and cancel by exact initiating Grant and Target with current tool permissions, independent of browser lease. Test replay, stale revisions, stale scopes, cross-Connector denial, and delayed dispatch in local workerd. Keep catalog disabled.
+
+### V02 evidence
+
+- The Registry persists the transition before checking the Workspace journal. The Workspace fences admissions/dispatched work, cancels proven undispatched queue entries and drains terminal receipts. The Registry rechecks authority and publishes the new generations, owner index and exact receipt together.
+- Focused typecheck and 14 offline tests passed, including local workerd coverage for dirty acknowledgement, duplicate claims, old adapter rejection, a transition blocked by dispatched work, exact Grant result access, stale Target/lease rejection, replay and transfer.
+- The gateway issues a short-lived installation-authenticated destination proof. Userscript manager integration, in-flight UI and full version-skew acceptance remain V08 work. V2 MCP ingress stays gated.
+
+### V03 plan
+
+- Derive a private namespace from installation, Workspace, assignment, Binding and exact native identity. Use separate epoch writers and retain legacy Workspace-only records for operator quarantine.
+- Store checkpoint and local file bytes as verified content-addressed chunks. Persist staged roots before the pointer, verify readback, protect active/held roots and enforce physical capacity. Test exact binary bytes, deduplication, partial persistence, stale epoch and bounded cleanup.
+- Integrate lease-based opening, scope operation receipts, and preserve exact offline recovery paths. Do not admit a v2 operation through a legacy local namespace.
 
 ## Historical v0.1–v0.2.0 implementation ledger
 
