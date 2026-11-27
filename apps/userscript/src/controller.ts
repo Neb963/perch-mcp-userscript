@@ -15,6 +15,7 @@ import { NativeLifecycle, SavedSourceReader, lifecycleApprovalDigest, type Lifec
 import { GatewayTransport, TransportError } from "./transport.js";
 import { ArtifactStore } from "./artifacts.js";
 import {
+  BrowserError,
   base64ToBytes,
   canonicalPath,
   digest,
@@ -97,6 +98,9 @@ export class BrowserController {
   private executing = false;
   /** Browser-local iframe geometry uncertainty; never confused with provider effects. */
   private viewportUncertain = false;
+  private localRecoveryWarning: string | null = null;
+  private localPendingHolds: number | null = null;
+  private sourceReadback: {state: 'not-checked'|'checking'|'verified'|'unavailable';code?:string} = {state:'not-checked'};
   private running?: Promise<void>;
   private abort?: AbortController;
   constructor(
@@ -127,6 +131,9 @@ export class BrowserController {
       failureStage: this.lastAttachStage,
       attachFailureCode: this.lastAttachCode,
       statusReason: this.currentStatus.reason ?? null,
+      localPendingHolds: this.localPendingHolds,
+      localRecoveryWarning: this.localRecoveryWarning,
+      sourceReadback: {...this.sourceReadback},
     };
   }
   async attach(workspace: Record<string, unknown>): Promise<void> {
@@ -162,7 +169,16 @@ export class BrowserController {
       const candidateVfs = new VirtualFileSystem(this.adapter, this.store, workspaceId);
       stage = "LOCAL_JOURNAL";
       this.lastAttachStage = stage;
-      await this.syncResolvedLocal(candidateVfs, workspaceId);
+      // Local intent concerns source writes only. Never fail the entire agent
+      // connection because one old journal requires native /src byte readback.
+      // The VFS and Save path independently fence any unresolved mutation.
+      this.localPendingHolds = null;
+      this.localRecoveryWarning = null;
+      this.sourceReadback = {state:'not-checked'};
+      try { this.localPendingHolds = (await candidateVfs.unresolved()).length; }
+      catch (error) {
+        this.localRecoveryWarning = error instanceof Error ? error.name : 'LOCAL_STORE_UNAVAILABLE';
+      }
       if (generation !== this.connectionGeneration) return;
       // Pause is only reached after a complete native and local preflight.
       // Its intermediate status must not be mistaken for a requested Stop.
@@ -206,7 +222,38 @@ export class BrowserController {
       this.pollAbort = new AbortController();
       this.heartbeat = setInterval(() => {void this.renew(claim);}, 60000);
       (this.heartbeat as unknown as {unref?:()=>void}).unref?.();
-      this.updateStatus({connection:"connected",workspace:workspaceId,dirty:probe.dirty});
+      this.updateStatus({connection:"connected",workspace:workspaceId,dirty:probe.dirty,
+        ...(this.localPendingHolds ? {reason:`${this.localPendingHolds} local source operation(s) need review. The agent connection stays online; source writes remain fenced.`} :
+          this.localRecoveryWarning ? {reason:'Local storage inspection unavailable. The agent connection stays online; writes remain fail-closed.'} : {})});
+      // Probe actual complete native bytes after obtaining the lease, without
+      // turning readback failure into a transport failure. Agent status must be
+      // truthful even when a platform-specific source bridge is unavailable.
+      this.sourceReadback = {state:'checking'};
+      void candidateVfs.snapshot().then(()=>{
+        if(this.lease!==claim || this.stopped)return;
+        this.sourceReadback = {state:'verified'};
+      }).catch(error=>{
+        if(this.lease!==claim || this.stopped)return;
+        const code=error && typeof error==='object' && 'code' in error
+          ? String((error as {code:unknown}).code) : 'SOURCE_READBACK_UNAVAILABLE';
+        this.sourceReadback = {state:'unavailable',code};
+        this.updateStatus({connection:'connected',workspace:workspaceId,dirty:probe.dirty,
+          reason:'Source readback is unavailable ('+code+'). The agent stays connected; source writes remain disabled.'});
+      });
+      // Reconcile exact already-acknowledged journals in the background. Native
+      // readback, Activity pagination and storage failures must never kill a
+      // valid lease or stop independent tools.
+      if (this.localPendingHolds) void this.syncResolvedLocal(candidateVfs,workspaceId)
+        .then(async()=>{
+          const remaining = (await candidateVfs.unresolved()).length;
+          if (this.lease !== claim || this.stopped) return;
+          this.localPendingHolds = remaining;
+          if (!remaining) this.updateStatus({connection:'connected',workspace:workspaceId,dirty:probe.dirty});
+        }).catch(error=>{
+          if (this.lease !== claim || this.stopped) return;
+          this.localRecoveryWarning = error && typeof error==='object' && 'code' in error
+            ? String((error as {code:unknown}).code) : 'LOCAL_READBACK_UNAVAILABLE';
+        });
       this.running = this.poll().catch((error:unknown) => {
         if (this.lease !== claim || this.stopped) return;
         this.stopped = true;
@@ -464,15 +511,22 @@ export class BrowserController {
     });
   }
   /** Read-only local journal status; does not require a live gateway lease. */
-  async localRecovery(workspaceId:string):Promise<{revision:string;holds:Array<{
+  async localRecovery(workspaceId:string):Promise<{revision:string;sourceError?:string;holds:Array<{
     id:string;kind:string;state:string;createdAt:number;paths:string[];baseRevision:string;
   }>}> {
     if(!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId))throw new Error('Invalid Workspace ID.');
     const w=await this.getRecoveryWorkspace(workspaceId);
     await this.assertRecoveryIdentity(w);
     const vfs=new VirtualFileSystem(this.adapter,this.store,workspaceId);
-    const snapshot=await vfs.snapshot();
-    return {revision:snapshot.revision,holds:(await vfs.unresolved()).map(j=>({
+    const holds = await vfs.unresolved();
+    // The exact pending records are inspectable even when a foreign page-realm
+    // /src buffer cannot be cloned. Resolution still requires full readback.
+    let revision = '';
+    let sourceError: string | undefined;
+    try { revision = (await vfs.snapshot()).revision; }
+    catch(error) { sourceError = error && typeof error==='object' && 'code' in error
+      ? String((error as {code:unknown}).code) : 'SOURCE_READBACK_UNAVAILABLE'; }
+    return {revision,sourceError,holds:holds.map(j=>({
       id:j.id,kind:j.kind??'SOURCE',state:j.state,createdAt:j.createdAt,
       paths:j.paths.slice(0,30),baseRevision:j.baseRevision,
     }))};
@@ -928,7 +982,7 @@ export class BrowserController {
   ): Promise<void> {
     const held = await vfs.unresolved();
     if (!held.length) return;
-    const snapshot = await vfs.snapshot();
+    const heldIds = new Set(held.map(j=>j.id));
     let cursor: string | undefined, revision: number | undefined;
     for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
       const page = (await this.transport.request(
@@ -947,15 +1001,15 @@ export class BrowserController {
       revision = page.revision;
       const resolved = page.items.find(
         (row) =>
-          row.workspaceId === workspaceId &&
+          row.workspaceId === workspaceId && heldIds.has(String(row.operationId)) &&
           row.resolution &&
           typeof row.resolution === "object" &&
-          (row.resolution as Record<string, unknown>).resolvedByOperator ===
-            true &&
-          (row.resolution as Record<string, unknown>).observedRevision ===
-            snapshot.revision,
+          (row.resolution as Record<string, unknown>).resolvedByOperator === true,
       );
       if (resolved) {
+        const snapshot = await vfs.snapshot();
+        if ((resolved.resolution as {observedRevision?:unknown}).observedRevision !== snapshot.revision)
+          throw new BrowserError('STALE_REVISION','The remote acknowledgement does not match the current native draft.');
         const decision = resolved.resolution as {
           timestamp?: number;
           observedDigest?: string;
@@ -1126,6 +1180,9 @@ export class BrowserController {
       try { await this.tools?.preflightPreview?.(context); }
       catch { /* An optional preview cannot prevent authoritative status. */ }
       const base = await this.source.call(name, args) as Record<string, unknown>;
+      const snapshotVerified = base.snapshotVerified === true;
+      const localJournalVerified = base.localJournalError === null;
+      const pendingLocal = Array.isArray(base.unresolved) ? base.unresolved.length : 0;
       const caps = base.capabilities as {
         nativeSave?:boolean;sourceRead?:boolean;sourceWrite?:boolean;
         sourceWriteBlocked?:string[];
@@ -1154,6 +1211,9 @@ export class BrowserController {
         ...(!hasSaveGrant ? ['SAVE_PERMISSION_NOT_GRANTED'] : []),
         ...(!leaseHeld ? ['WRITER_LEASE_NOT_HELD'] : []),
         ...((caps?.sourceWriteBlocked ?? []).length ? ['NATIVE_EDITOR_MUTATION_BLOCKED'] : []),
+        ...(!snapshotVerified ? ['SOURCE_READBACK_NOT_VERIFIED'] : []),
+        ...(!localJournalVerified ? ['LOCAL_JOURNAL_NOT_VERIFIED'] : []),
+        ...(pendingLocal ? ['UNRESOLVED_LOCAL_WRITES'] : []),
       ];
       return {
         ...base,
@@ -1166,11 +1226,12 @@ export class BrowserController {
         effectiveCapabilities: {
           sourceRead: { detected:caps?.sourceRead === true,
             authorized:authorized.includes('READ_SOURCE'),
-            available:leaseHeld && caps?.sourceRead === true && authorized.includes('READ_SOURCE') },
+            available:leaseHeld && snapshotVerified && caps?.sourceRead === true && authorized.includes('READ_SOURCE'),
+            ...(!snapshotVerified ? {reason:base.sourceReadbackError} : {}) },
           sourceWrite: { detected:caps?.sourceWrite === true,
             authorized:authorized.includes('WRITE_SOURCE'),
-            available:leaseHeld && caps?.sourceWrite === true && authorized.includes('WRITE_SOURCE'),
-            reasons:caps?.sourceWriteBlocked ?? [] },
+            available:leaseHeld && snapshotVerified && localJournalVerified && pendingLocal===0 && caps?.sourceWrite === true && authorized.includes('WRITE_SOURCE'),
+            reasons:[...(caps?.sourceWriteBlocked ?? []),...(!snapshotVerified ? ['SOURCE_READBACK_NOT_VERIFIED'] : []),...(!localJournalVerified ? ['LOCAL_JOURNAL_NOT_VERIFIED'] : []),...(pendingLocal ? ['UNRESOLVED_LOCAL_WRITES'] : [])] },
           saveGenerator: {
             detected:nativeDetected,adapterAccepted,gatewayPolicy,
             providerWritesEnabled,nativeActionsEnabled,
@@ -1202,7 +1263,7 @@ export class BrowserController {
     if (name === 'generator_info' && this.source) {
       const base = await this.source.call(name, args) as Record<string, unknown>;
       const identity = await this.adapter.assertIdentity();
-      const revision = (await context.vfs.snapshot()).revision;
+      const revision = typeof base.revision === 'string' ? base.revision : null;
       let savedBaseRevision: Record<string, unknown>;
       try {
         const saved = await new SavedSourceReader().read(identity.slug, identity);
@@ -1218,7 +1279,7 @@ export class BrowserController {
       }
       if (this.stopped || this.lease !== lease || Date.now() >= lease.expiresAt)
         throw Object.assign(new Error('Lease lost during metadata verification.'), {code:'TAB_OFFLINE'});
-      if (base.revision !== revision || (await context.vfs.snapshot()).revision !== revision)
+      if (revision !== null && (await context.vfs.snapshot()).revision !== revision)
         throw Object.assign(new Error('Source changed during metadata verification.'), {code:'STALE_REVISION'});
       return {...base,savedBaseRevision};
     }

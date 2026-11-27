@@ -218,7 +218,21 @@ export class VirtualFileSystem {
       }catch{journal.state='UNKNOWN';try{await this.store.set(journalKey,journal);}catch{/* The durable INTENT remains held. */}throw new BrowserError('EFFECT_UNKNOWN','Imported cache may be published; its complete readback or terminal record is unavailable.','Inspect the retained import intent and current cache; do not replay publication.');}
     });
   }
-  async unresolved(): Promise<Journal[]> { const result: Journal[] = []; for (const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:journal:`))) { const row = await this.store.get<Journal>(key); if (row && ['INTENT', 'DISPATCHED', 'PARTIAL', 'UNKNOWN'].includes(row.state) && row.resolvedByOperator !== true) result.push(row); } return result; }
+  async unresolved(): Promise<Journal[]> {
+    const result: Journal[] = [];
+    for (const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:journal:`))) {
+      const row = await this.store.get<Journal>(key);
+      if (!row || typeof row !== 'object' || Array.isArray(row) ||
+          typeof row.id !== 'string' || key !== `${this.prefix}:journal:${row.id}` ||
+          !['INTENT','DISPATCHED','PARTIAL','UNKNOWN','SUCCEEDED','REJECTED'].includes(row.state) ||
+          !Array.isArray(row.paths) || row.paths.some(path=>typeof path!=='string') ||
+          typeof row.baseRevision !== 'string')
+        throw new BrowserError('STORAGE_CORRUPT','A local operation journal is malformed. It has not been removed or acknowledged.');
+      if (['INTENT','DISPATCHED','PARTIAL','UNKNOWN'].includes(row.state) &&
+          row.resolvedByOperator !== true) result.push(row);
+    }
+    return result;
+  }
   /** Operator-only acknowledgement: never exposed as an agent tool or automatic retry. */
   async acknowledgeReconciliation(id: string, inspectedRevision: string, operatorEvidence?: string): Promise<void> { if ((await this.snapshot()).revision !== inspectedRevision) throw new BrowserError('STALE_REVISION', 'Source changed during reconciliation.'); const key = `${this.prefix}:journal:${id}`; const row = await this.store.get<Journal>(key); if (!row) throw new BrowserError('FILE_NOT_FOUND', 'Journal entry missing.'); if(operatorEvidence!==undefined){if(!operatorEvidence.trim()||operatorEvidence.length>512)throw new BrowserError('INVALID_INPUT','Bounded operator evidence is required.'); row.operatorEvidence=operatorEvidence.trim();} row.resolvedByOperator = true; row.inspectedRevision = inspectedRevision; row.resolvedAt = Date.now(); await this.store.set(key, row); }
   async exportBackup(): Promise<{ version: 1; identity: NativeIdentity; files: Record<string, string>; revision: string; sha256: string }> { const source = await this.snapshot(); const files = Object.fromEntries(Object.entries(source.files).map(([path, bytes]) => [path, bytesToBase64(bytes)])); return { version: 1, identity: source.identity, files, revision: source.revision, sha256: await digest(JSON.stringify(files)) }; }

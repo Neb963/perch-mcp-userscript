@@ -1,7 +1,7 @@
 import { BrowserError, canonicalPath, copyArrayBuffer, equalBytes, equalIdentity, snapshotRevision, utf8, type CapabilityReport, type FileWrite, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
 interface TextEditor { state?: {readOnly?:unknown}; getValue(): unknown; setValue(value: string): unknown; isClean?(): unknown }
 interface SrcState { ready(): unknown; idle?(): unknown; list(): unknown; readFile(path: string): unknown; writeFile(path: string, bytes: unknown): unknown; deleteFile(path: string): unknown; getDraftId(): unknown; isDirty?(): unknown; hasPending?(): unknown }
-interface NativePage { userOwnsThisGenerator?:unknown; userCanSaveThisGenerator?:unknown; generatorPublicId?:unknown; app?: { data?: { generator?: { id?: unknown; name?: unknown; publicId?: unknown } }; saveGenerator?: () => unknown; userOwnsThisGenerator?: unknown; userCanSaveThisGenerator?: unknown }; modelTextEditor?: TextEditor; outputTemplateEditor?: TextEditor; srcState?: SrcState; currentInterfaceMode?: unknown; __editorReady?: unknown; __draftChoiceSettled?: unknown; perchanceSaveState?: unknown; __generatorIdentityTransition?: unknown; __draftHandoffClosed?:unknown; editorCollabInitialSyncIsPending?:unknown; __collabRoomFailed?:unknown; yjsProvider?:unknown; aiAgentActivityState?:()=>unknown; __aiGeneratorGuard?:{blocked?:()=>unknown}; editor?: { handleReloadButtonClick?: () => unknown }; editorUndoManagers?: Record<string, { undo?: () => unknown; redo?: () => unknown }> }
+interface NativePage { Uint8Array?: Uint8ArrayConstructor; userOwnsThisGenerator?:unknown; userCanSaveThisGenerator?:unknown; generatorPublicId?:unknown; app?: { data?: { generator?: { id?: unknown; name?: unknown; publicId?: unknown } }; saveGenerator?: () => unknown; userOwnsThisGenerator?: unknown; userCanSaveThisGenerator?: unknown }; modelTextEditor?: TextEditor; outputTemplateEditor?: TextEditor; srcState?: SrcState; currentInterfaceMode?: unknown; __editorReady?: unknown; __draftChoiceSettled?: unknown; perchanceSaveState?: unknown; __generatorIdentityTransition?: unknown; __draftHandoffClosed?:unknown; editorCollabInitialSyncIsPending?:unknown; __collabRoomFailed?:unknown; yjsProvider?:unknown; aiAgentActivityState?:()=>unknown; __aiGeneratorGuard?:{blocked?:()=>unknown}; editor?: { handleReloadButtonClick?: () => unknown }; editorUndoManagers?: Record<string, { undo?: () => unknown; redo?: () => unknown }> }
 export interface AdapterOptions { cloneInto?: (value: unknown) => unknown; externalWritesVerified?: boolean; maxSnapshotBytes?: number }
 export interface SaveContext {
   operationId: string;
@@ -32,32 +32,70 @@ async function nativeBoolean(owner: object | undefined, key: string): Promise<bo
   } catch { return null; }
 }
 function boundedString(value: unknown): string { if (typeof value !== 'string' || value.length > 4 * 1024 * 1024) throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native editor returned invalid text.'); return value; }
-async function nativeBytes(value: unknown): Promise<Uint8Array> {
-  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+/**
+ * Read a native /src result without trusting a numeric array-like fallback.
+ * Firefox's wrappedJSObject can expose a page-realm ArrayBuffer to which the
+ * content realm's ArrayBuffer/typed-array intrinsics cannot be applied. The
+ * page's own Uint8Array constructor can build a view in the buffer's realm;
+ * copy each verified byte through the Xray boundary into a fresh local array.
+ * Never return an empty/truncated value just because the wrapper looked empty.
+ */
+export async function nativeBytes(
+  value: unknown,
+  pageUint8Array?: Uint8ArrayConstructor,
+  manifestLength?: number,
+  depth = 0,
+): Promise<Uint8Array> {
+  const verify = (bytes: Uint8Array): Uint8Array => {
+    if (manifestLength !== undefined && bytes.byteLength !== manifestLength)
+      throw new BrowserError('STALE_REVISION','Native /src size differs from the current manifest.');
+    return bytes;
+  };
+  if (ArrayBuffer.isView(value)) {
+    try { return verify(new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice()); }
+    catch(error) { if (error instanceof BrowserError && error.code === 'STALE_REVISION') throw error; }
+  }
   const exact = copyArrayBuffer(value);
-  if (exact !== null) return exact;
-  // Firefox/Violentmonkey wrappedJSObject may expose a foreign-realm
-  // ArrayBuffer whose intrinsic cannot be invoked from the isolated realm.
-  // Structured clone crosses that compartment without invoking an untrusted
-  // page conversion callback. Prove the cloned buffer's native brand/length.
+  if (exact !== null) return verify(exact);
   if (value && typeof value === 'object') {
     try {
       const cloned: unknown = structuredClone(value);
       if (ArrayBuffer.isView(cloned)) {
         const view = cloned as ArrayBufferView;
-        return new Uint8Array(view.buffer, view.byteOffset, view.byteLength).slice();
+        return verify(new Uint8Array(view.buffer, view.byteOffset, view.byteLength).slice());
       }
       const copied = copyArrayBuffer(cloned);
-      if (copied !== null) return copied;
-    } catch { /* Unsupported foreign wrapper: retain exact-byte fail closed. */ }
+      if (copied !== null) return verify(copied);
+    } catch { /* A cross-compartment wrapper can reject structured cloning. */ }
   }
-  if (typeof value === 'string') return utf8.encode(value);
+  // The source is a first-party native result, not a generator message. A
+  // normal page global constructor does not receive or capture GM credentials.
+  if (value && typeof value === 'object' && typeof pageUint8Array === 'function') {
+    try {
+      const pageView = Reflect.construct(pageUint8Array, [value]) as {byteLength: unknown; length: unknown; [index:number]:unknown};
+      const length = typeof pageView.byteLength === 'number' ? pageView.byteLength : pageView.length;
+      if (typeof length === 'number' && Number.isSafeInteger(length) && length >= 0 &&
+          length <= 64 * 1024 * 1024 &&
+          (pageView.length === undefined || pageView.length === length) &&
+          (length !== 0 || manifestLength === 0) &&
+          (manifestLength === undefined || manifestLength === length)) {
+        const copied = new Uint8Array(length);
+        for (let i = 0; i < length; i++) {
+          const byte: unknown = pageView[i];
+          if (!Number.isInteger(byte) || (byte as number) < 0 || (byte as number) > 255)
+            throw new BrowserError('UNSUPPORTED_INTERFACE','Page-realm byte view failed exact numeric readback.');
+          copied[i] = byte as number;
+        }
+        return verify(copied);
+      }
+    } catch { /* Keep the verified fail-closed result below. */ }
+  }
+  if (typeof value === 'string') return verify(utf8.encode(value));
   if (value && typeof value === 'object' && 'arrayBuffer' in value && typeof value.arrayBuffer === 'function') {
     const buffer: unknown = await value.arrayBuffer();
-    const copied = copyArrayBuffer(buffer);
-    if (copied !== null) return copied;
+    if (buffer !== value && depth === 0) return nativeBytes(buffer, pageUint8Array, manifestLength, depth + 1);
   }
-  throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native file result is not exact bytes.');
+  throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native /src bytes are inaccessible across the Firefox page boundary. Other tools can continue; source edits remain disabled until readback succeeds.');
 }
 /** Fixed native method adapter. It neither evaluates code nor exports callbacks to the page. */
 export class NativeAdapter {
@@ -172,10 +210,14 @@ export class NativeAdapter {
     else if (listing && typeof listing === 'object') paths = Object.keys(listing); else throw new BrowserError('UNSUPPORTED_INTERFACE', 'Unrecognized native src manifest.');
     if (paths.length > 1000) throw new BrowserError('LIMIT_EXCEEDED', 'Native source manifest exceeds 1000 files.'); let total = files['main.pjs'].length + files['index.html'].length;
     const seen = new Set<string>();
-    for (const relativePath of paths.sort()) { const path = canonicalPath(`src/${relativePath}`); if (seen.has(path.toLowerCase())) throw new BrowserError('PATH_DENIED', 'Native source paths collide by case.'); seen.add(path.toLowerCase()); const bytes = await nativeBytes(await src.readFile(relativePath)); total += bytes.length; if (total > (this.options.maxSnapshotBytes ?? 64 * 1024 * 1024)) throw new BrowserError('QUOTA_EXCEEDED', 'Native source exceeds configured local snapshot budget.'); files[path] = bytes; }
+    for (const relativePath of paths.sort()) { const path = canonicalPath(`src/${relativePath}`); if (seen.has(path.toLowerCase())) throw new BrowserError('PATH_DENIED', 'Native source paths collide by case.'); seen.add(path.toLowerCase()); const entry = listing && typeof listing === 'object' ? (listing as Record<string,unknown>)[relativePath] : undefined;
+      const declared = entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? (entry as {size?:unknown}).size : undefined;
+      const expectedLength = typeof declared === 'number' && Number.isSafeInteger(declared) && declared >= 0 ? declared : undefined;
+      const bytes = await nativeBytes(await src.readFile(relativePath), this.page.Uint8Array, expectedLength); total += bytes.length; if (total > (this.options.maxSnapshotBytes ?? 64 * 1024 * 1024)) throw new BrowserError('QUOTA_EXCEEDED', 'Native source exceeds configured local snapshot budget.'); files[path] = bytes; }
     const afterListing = await src.list();
     if (JSON.stringify(listing) !== JSON.stringify(afterListing)) throw new BrowserError('STALE_REVISION', 'Native src manifest changed during snapshot.');
-    for (const relativePath of paths) if (!equalBytes(files[`src/${relativePath}`]!, await nativeBytes(await src.readFile(relativePath)))) throw new BrowserError('STALE_REVISION', 'Native src bytes changed during snapshot.');
+    for (const relativePath of paths) if (!equalBytes(files[`src/${relativePath}`]!, await nativeBytes(await src.readFile(relativePath), this.page.Uint8Array, files[`src/${relativePath}`]!.length))) throw new BrowserError('STALE_REVISION', 'Native src bytes changed during snapshot.');
     const afterIdentity = await this.assertIdentity(); if (!equalIdentity(identity, afterIdentity)) throw new BrowserError('BINDING_MISMATCH', 'Identity changed while reading source.');
     // Re-read panels after asynchronous src reads; never return a knowingly mixed panel revision.
     if (!equalBytes(files['main.pjs'], utf8.encode(boundedString(this.page.modelTextEditor!.getValue()))) || !equalBytes(files['index.html'], utf8.encode(boundedString(this.page.outputTemplateEditor!.getValue())))) throw new BrowserError('STALE_REVISION', 'Editor changed during source snapshot.');

@@ -238,3 +238,15 @@ Changes: frame-specific 15-second native preview attestation cache invalidated o
 - [ ] Live Firefox disposable-Generator acceptance after operator install; no production mutation during development.
 
 See `docs/verification/epoch12-connection-repair-v0114.md`.
+
+## Epoch 13 — source readback must not prevent connection (v0.1.15)
+
+- [x] Diagnose live diagnostics14: `LOCAL_JOURNAL` / `UNSUPPORTED_INTERFACE` before tab claim, healthy Worker.
+- [x] Separate journal and source readback from transport lease, retaining all mutation fences.
+- [x] Add bounded page-realm byte extraction fallback with manifest-size and independent reread.
+- [x] Preserve honest degraded source capability reports and local journal review when readback fails.
+- [x] Add negative tests for opaque realm wrappers, phantom zero bytes, corrupted journal and failed native snapshot.
+- [ ] Verify complete CI (typecheck/unit/integration/build/artifact hashes/Worker dry-run), merge verified PR.
+- [ ] T3 real Firefox native source and T4 external agent continuity: not claimed until observed.
+
+See `docs/verification/epoch13-native-bridge-and-connection-v0115.md`.
