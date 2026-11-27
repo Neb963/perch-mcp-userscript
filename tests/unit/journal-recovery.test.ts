@@ -131,3 +131,15 @@ test('identity mismatch and unavailable readback never silently adopt an old int
   assert.equal((await f.vfs.reconcileRetained()).length,1,
     'a new canonical bound source is permitted to supersede old local metadata');
 });
+
+test('recent uncertain native Save does not block independent scratch operations',async()=>{
+  const f=fixture();
+  await hold(f,'save-in-flight',['main.pjs','index.html','src/synthpin.css'],{ageMs:0,kind:'SAVE'});
+  const baseline=await f.vfs.snapshot();
+  const independent=await f.vfs.writeBatch([{path:'scratch/plan.md',bytes:utf8.encode('continue planning')}],baseline.revision);
+  assert.equal(independent.status,'SUCCEEDED');
+  assert.equal((await f.vfs.unresolved()).length,1);
+  await assert.rejects(f.vfs.writeBatch([{path:'src/another.js',bytes:utf8.encode('pending save')}]),
+    (e:unknown)=>e instanceof BrowserError&&e.code==='NATIVE_CONFLICT');
+  assert.equal(f.countWrites(),0,'scratch operations do not invoke native source setters');
+});
