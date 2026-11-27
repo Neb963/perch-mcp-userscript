@@ -178,6 +178,9 @@ export class FilesystemV2 {
     return {files, namespaces: ['src', 'scratch', 'imports'], sourceRevision: {value: null, verified: false},
       localRevision: local.revision, nextCursor: selected.length > limit ? fingerprint + '|' + files.at(-1)!.path : null};
   }
+  async publishWrites(args: Parameters<FilesystemV2['mutate']>[1], scope: FilesystemCallScope) {
+    return this.mutate('write', args, scope);
+  }
   private async mutate(name: 'write' | 'delete' | 'rename',
     args: (Preconditions & {files: Array<FileCondition & {path: string; encoding: 'utf8' | 'base64'; content: string}>}) |
       FilesystemArgs<'delete'> | FilesystemArgs<'rename'>, scope: FilesystemCallScope) {

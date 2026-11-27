@@ -96,11 +96,19 @@ test('v2 Connector consent, legacy scope and indexed discovery in local workerd'
 });
 
 test('Binding transition holds dispatched effects, preserves original Grant access and publishes once', async () => {
-  const h = await createCapacityHarness(0, { DEVELOPMENT_CONTRACT_V2_ENABLED: 'true' });
+  const h = await createCapacityHarness(0, { DEVELOPMENT_CONTRACT_V2_ENABLED: 'true',
+    DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED: 'true' });
   try {
     const state = await h.get(admin + '/state');
     const a = await h.request(admin + '/connectors', { expectedRevision: state.revision, label: 'First Connector' });
     const b = await h.request(admin + '/connectors', { expectedRevision: (await h.get(admin + '/state')).revision, label: 'Second Connector' });
+    const token = await issueSyntheticToken(h, {workspaceId:'',agentId:String(b.id),binding:{},lease:{},props:{},permissions:[]});
+    const list = await h.mf.dispatchFetch(String(b.endpoint), {method:'POST',
+      headers:{Authorization:'Bearer ' + token,'Content-Type':'application/json',Accept:'application/json, text/event-stream',
+        'MCP-Protocol-Version':'2025-11-25'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'})});
+    assert.equal(list.status,200);
+    const catalog = await list.json() as {result?: {tools: unknown[]}};
+    assert.equal(catalog.result?.tools.length,19,JSON.stringify(catalog));
     const w = await h.request(admin + '/workspaces', { label: 'Workspace', contractVersion: 2,
       connectorId: a.id, expectedConnectorRevision: a.revision });
     const workspaceId = String(w.id);
@@ -146,23 +154,32 @@ test('Binding transition holds dispatched effects, preserves original Grant acce
       binding: destination, bindingProof: destinationProof.proof };
     await assert.rejects(h.request(wPath + '/rebind', args), /APPROVAL_REQUIRED/);
     const auth = await registry('authorize', { props, agentId: a.id, target, permissions: ['READ_SOURCE'] });
-    const operation = await internals('admit', { workspace: auth.workspace, props, agentId: a.id,
+    const operationKey = 'k2.' + Date.now() + '.' + crypto.randomUUID();
+    const admission = { workspace: auth.workspace, props, agentId: a.id,
       target, tool: 'read', args: { path: 'main.pjs' }, permissions: ['READ_SOURCE'],
-      requiredPermissions: ['READ_SOURCE'], mutating: false });
+      requiredPermissions: ['READ_SOURCE'], mutating: false, operationKey, policyRevision: auth.policyRevision };
+    const operation = await internals('admit', admission);
+    assert.equal((await internals('admit', admission)).operationId, operation.operationId);
+    await assert.rejects(internals('admit', {...admission, args: {path: 'index.html'}}), /IDEMPOTENCY_CONFLICT/);
+    await assert.rejects(internals('admit', {...admission,
+      operationKey: 'k2.' + (Date.now() - 901_000) + '.' + crypto.randomUUID()}), /OPERATION_KEY_EXPIRED/);
     const polled = await browser('poll', {});
     assert.equal((polled.operations as Record<string, unknown>[])[0]!.operationId, operation.operationId);
     await browser('reply', { operationId: operation.operationId, phase: 'RUNNING' });
+    const segment = {sequence: 0, kind: 'read-view', digest: 'a'.repeat(64)};
+    assert.equal((await browser('segment', {operationId: operation.operationId, segment})).digest, segment.digest);
+    await assert.rejects(browser('segment', {operationId: operation.operationId, segment}), /CONFLICT/);
     const key = crypto.randomUUID();
     const transition = { ...args, acknowledgeDirty: true };
     await assert.rejects(h.request(wPath + '/rebind', transition, undefined, 'POST', key), /TRANSITION_BLOCKED/);
     await assert.rejects(registry('authorize', { props, agentId: a.id, target }), /TRANSITION_BLOCKED/);
-    await assert.rejects(internals('admit', { workspace: auth.workspace, props, agentId: a.id,
-      target, tool: 'read', args: { path: 'main.pjs' }, permissions: ['READ_SOURCE'],
-      requiredPermissions: ['READ_SOURCE'], mutating: false }), /TRANSITION_BLOCKED/);
+    await assert.rejects(internals('admit', {...admission, operationKey: 'k2.' + Date.now() + '.' + crypto.randomUUID()}), /TRANSITION_BLOCKED/);
     await browser('reply', { operationId: operation.operationId, phase: 'SUCCEEDED',
       result: { operationId: operation.operationId, status: 'SUCCEEDED', effectState: 'VERIFIED', data: { ok: true } } });
     const resultScope = { props, agentId: a.id, target, workspaceId, operationId: operation.operationId, bindingRevision: bound.bindingRevision };
     assert.equal((await internals('status', resultScope)).status, 'SUCCEEDED');
+    assert.equal((await internals('status', {...resultScope, operationId: undefined, operationKey})).operationId,
+      operation.operationId);
     await assert.rejects(internals('status', { ...resultScope, props: replacementGrant }), /NOT_FOUND/);
     const changed = await h.request(wPath + '/rebind', transition, undefined, 'POST', key);
     assert.deepEqual(await h.request(wPath + '/rebind', transition, undefined, 'POST', key), changed);

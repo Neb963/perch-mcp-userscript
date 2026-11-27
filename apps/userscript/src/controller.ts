@@ -1,3 +1,6 @@
+import { browserEnvelopeV2, type SegmentRequest } from '../../../packages/contracts/src/operations-v2.js';
+import { parseTarget } from '../../../packages/contracts/src/target.js';
+import { executeDevelopment, type DevelopmentContext } from './development-v2.js';
 import type { NotificationChannel } from "./notifications.js";
 import { isRetryableGatewayFailure } from "./connection-failures.js";
 import { uploadImageResult } from "./image-transfer.js";
@@ -76,6 +79,7 @@ export interface RuntimeContext {
 }
 export interface AdditionalTools {
   dispose?(): void;
+  callDevelopment?(context: DevelopmentContext): Promise<unknown>;
   /** Read-only, no network or source effects; scoped to the bound Workspace. */
   capabilityReport?(context: RuntimeContext): Record<string, unknown>;
   preflightPreview?(context: RuntimeContext): Promise<void>;
@@ -747,9 +751,99 @@ export class BrowserController {
       this.executing = false;
     }
   }
+  private async executeScopedOperation(raw: unknown, lease: Lease): Promise<void> {
+    const parsed = browserEnvelopeV2.safeParse(raw);
+    if (!parsed.success) throw new BrowserError('INCOMPATIBLE_VERSION', 'A scoped v2 envelope is required.');
+    const envelope = parsed.data, target = parseTarget(envelope.target), vfs = this.vfs;
+    if (!vfs?.scope || envelope.workspaceId !== lease.workspaceId || target.workspaceId !== lease.workspaceId ||
+        envelope.tabInstanceId !== this.tabInstanceId || envelope.connectorId !== lease.connectorId || envelope.epoch !== lease.epoch ||
+        envelope.bindingRevision !== lease.bindingRevision || envelope.bindingGeneration !== lease.bindingGeneration ||
+        target.bindingGeneration !== lease.bindingGeneration || envelope.assignmentGeneration !== lease.assignmentGeneration ||
+        target.assignmentGeneration !== lease.assignmentGeneration || !envelope.permissions.every(p=>lease.permissions.includes(p)))
+      throw new BrowserError('STALE_EPOCH','Operation does not match this exact scoped lease.');
+    this.abort = new AbortController();
+    const signal = this.abort.signal;
+    const assertCurrent = async () => {
+      if (signal.aborted || this.stopped || this.lease !== lease)
+        throw new BrowserError('CANCELLED','Operation is cancelled or its lease is no longer active.');
+      const now = Date.now();
+      if (now >= lease.expiresAt || now >= envelope.deadlineMs || envelope.deadlineMs - now > 3_600_000)
+        throw new BrowserError('TIMEOUT','Exact scoped operation deadline expired.');
+      await vfs.scope!.assertCurrent();
+    };
+    await assertCurrent();
+    const operationId = envelope.operationId;
+    const key = this.operationPrefix(envelope.workspaceId) + operationId;
+    const seal = await digest(JSON.stringify(envelope));
+    const reply = (phase: string, result?: Record<string,unknown>) => this.transport.tab(
+      '/api/v1/tab/reply', {...this.ids(lease),operationId,phase,...(result ? {result} : {})},lease.leaseCredential);
+    const existing = await this.store.get<LocalOperation>(key);
+    if (existing) {
+      if (existing.digest !== seal) throw new BrowserError('NATIVE_CONFLICT','Operation envelope changed on replay.');
+      const retained = existing.result;
+      const result = retained && (existing.resultExpiresAt ?? 0) > Date.now() ? retained : {
+        operationId,status:'UNKNOWN',effectState:'POSSIBLE',
+        error:{code:'EFFECT_UNKNOWN',message:'Scoped operation has retained execution evidence.',
+          retryable:false,recovery:'Use the original operationKey to reconcile; no execution was repeated.'},
+      };
+      await reply(String(result.status),result);
+      return;
+    }
+    const intent: LocalOperation & {segments: SegmentRequest[]; steps: Record<string,unknown>[]} = {
+      operationId, digest:seal, epoch:envelope.epoch, tool:envelope.tool,status:'RUNNING',createdAt:Date.now(),segments:[],steps:[],
+    };
+    await this.store.set(key,intent);
+    await reply('RUNNING');
+    let result: Record<string,unknown>;
+    const context: DevelopmentContext = {
+      envelope,vfs,signal,assertCurrent,
+      permit: async (kind, inputDigest) => {
+        await assertCurrent();
+        const segment = {sequence:intent.segments.length,kind,digest:inputDigest};
+        intent.segments.push(segment);
+        await this.store.set(key,intent);
+        const permit = await this.transport.tab('/api/v1/tab/segment', {
+          ...this.ids(lease),operationId,segment,
+        },lease.leaseCredential,{signal}) as {operationId?:unknown;sequence?:unknown;digest?:unknown;expiresAt?:number};
+        if (permit.operationId!==operationId || permit.sequence!==segment.sequence ||
+            permit.digest!==inputDigest || !Number.isSafeInteger(permit.expiresAt) || permit.expiresAt!<=Date.now())
+          throw new BrowserError('REVOKED','Segment receipt is unavailable or stale.');
+        await assertCurrent();
+      },
+      recordStep: async step => {
+        intent.steps[step.index]=step;
+        await this.store.set(key,intent);
+      },
+      additional: async () => {
+        throw new BrowserError('UNSUPPORTED_INTERFACE','The required v2 preview or native interface is unavailable.');
+      },
+    };
+    try {
+      const data = await (this.tools?.callDevelopment ? this.tools.callDevelopment(context) : executeDevelopment(context));
+      const reported = data as {status?:string};
+      const status = reported?.status === 'PARTIAL' || reported?.status === 'UNKNOWN' || reported?.status==='REJECTED' ? reported.status : 'SUCCEEDED';
+      const effectState = status==='PARTIAL'?'PARTIAL':status==='UNKNOWN'?'POSSIBLE':status==='REJECTED'?'NONE':'VERIFIED';
+      result = {operationId,status,effectState,data:new TextEncoder().encode(JSON.stringify(data)).length <= 240_000 ?
+        data : {resultAvailability:'TOO_LARGE'}};
+      if (status!=='SUCCEEDED') result.error = {code:status==='PARTIAL'?'PARTIAL_EFFECT':status==='UNKNOWN'?'EFFECT_UNKNOWN':'PROVIDER_REJECTED',
+        message:'Inspect exact operation or step evidence.',retryable:false,recovery:'Reconcile recorded effects before another mutation.'};
+    } catch (error) {
+      const fault = error as {code?:string;effectState?:string};
+      const code = errorCodes.includes(fault.code as (typeof errorCodes)[number]) ? fault.code! : 'PROVIDER_REJECTED';
+      const unknown = fault.effectState==='UNKNOWN' || code==='EFFECT_UNKNOWN';
+      const status = fault.effectState==='PARTIAL'?'PARTIAL':unknown?'UNKNOWN':'REJECTED';
+      result = {operationId,status,effectState:status==='PARTIAL'?'PARTIAL':unknown?'POSSIBLE':'NONE',
+        error:{code,message:'Scoped operation stopped at '+code+'.',retryable:false,
+          recovery:'Inspect operation status and reconcile before retrying an effect.'}};
+    }
+    intent.status=String(result.status);
+    intent.result=result;
+    intent.resultExpiresAt=Date.now()+600_000;
+    await this.store.set(key,intent);
+    await reply(intent.status,result);
+  }
   private async executeOperation(raw: unknown, lease: Lease): Promise<void> {
-    if (lease.contractVersion === 2)
-      throw new BrowserError('INCOMPATIBLE_VERSION', 'V2 operations require a versioned scoped envelope.');
+    if (lease.contractVersion === 2) return this.executeScopedOperation(raw, lease);
     const envelope = validateEnvelope(raw);
     const vfs = this.vfs!;
     if (

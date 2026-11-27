@@ -1,3 +1,6 @@
+import { developmentToolDefinitions, hasEffectV2, parseDevelopmentCall, requiredPermissionsV2,
+  type developmentToolArgs } from '../../../packages/contracts/src/development-v2.js';
+import { parseTarget } from '../../../packages/contracts/src/target.js';
 import { pollWaitMs, paceIdlePoll } from "./poll-pacing.js";
 import { validatePushUpgrade } from './push-notifications.js';
 import {validateIngress,IngressAdmission,OAuthAuditAdmission} from './ingress.js';
@@ -270,7 +273,9 @@ async function mcp(
     await rpc(registry(env), '/internal/authorize', {
       props, agentId, resource: new URL('/mcp/' + agentId, request.url).href,
     });
-    throw new ApiError('UPGRADE_REQUIRED', 'The v2 tool catalog is still being prepared.', 409);
+    if (env.DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED !== 'true')
+      throw new ApiError('UPGRADE_REQUIRED', 'The v2 tool catalog is disabled during rollout.', 409);
+    return mcpDevelopment(request,env,props,agentId);
   }
   const authorized = await rpc<{
     workspace: WorkspaceRecord;
@@ -441,6 +446,9 @@ async function mcp(
     });
     return server;
   };
+  return transportMcp(request,factory);
+}
+async function transportMcp(request: Request, factory: () => Server): Promise<Response> {
   // The SDK's classifier owns malformed-modern behavior; never guess from one header.
   if (
     await isLegacyRequest(request, undefined, { maxRequestBodySize: MAX_BODY })
@@ -460,6 +468,68 @@ async function mcp(
     maxRequestBodySize: MAX_BODY,
   });
   return modern.fetch(request);
+}
+function mcpDevelopment(request: Request, env: Env, props: AuthProps, agentId: string): Promise<Response> {
+  const make = () => {
+    const server = new Server({name:'perch-mcp',version:VERSION},{
+      capabilities:{tools:{}}, supportedProtocolVersions:['2026-07-28','2025-11-25','2025-06-18'],
+      instructions:'Discover assigned Workspaces with workspace_status. Use the explicitly intended canonical Target. Retain operationKey across transport retry. Reconcile uncertain effects before requesting new work.',
+      jsonSchemaValidator:new CfWorkerJsonSchemaValidator(),
+    });
+    server.setRequestHandler('tools/list',()=>({tools:developmentToolDefinitions as unknown as Tool[]}));
+    server.setRequestHandler('tools/call',async (incoming)=>{
+      let data: Record<string,unknown>, images: McpImageBlock[] = [], isError = false;
+      let target: string | undefined;
+      try {
+        const call = parseDevelopmentCall(incoming.params.name,incoming.params.arguments ?? {});
+        target = call.delivery?.target ?? (typeof call.args.target === 'string' ? call.args.target : undefined);
+        const inputScope = {props,agentId,...(target ? {target} : {})};
+        if (call.name === 'workspace_status') {
+          data = await rpc(registry(env),'/internal/v2/discover',{...inputScope,args:call.args});
+        } else {
+          const requested = parseTarget(target);
+          const resultOp = call.name === 'operation_status' || call.name === 'cancel_operation';
+          const name = call.name as keyof typeof developmentToolArgs;
+          const needed = resultOp ? [] : requiredPermissionsV2(name,call.args);
+          const auth = await rpc<{ workspace: WorkspaceRecord; grant: {permissions:string[]}; policyRevision:number }>(
+            registry(env), '/internal/authorize', {...inputScope,permissions:needed,resultAccess:true});
+          const stub = workspace(env,requested.workspaceId);
+          if (resultOp) {
+            data = await rpc(stub, call.name === 'operation_status' ? '/internal/status' : '/internal/cancel', {
+              ...inputScope,workspaceId:requested.workspaceId,bindingRevision:auth.workspace.bindingRevision,
+              operationId:call.args.operationId,operationKey:call.args.operationKey,
+            });
+          } else {
+            const key = call.delivery?.operationKey ?? ('k2.'+Date.now()+'.'+crypto.randomUUID());
+            data = await rpc(stub,'/internal/admit',{
+              ...inputScope,workspace:auth.workspace,policyRevision:auth.policyRevision,
+              tool:call.name,args:call.args,operationKey:key,mutating:hasEffectV2(name,call.args),
+              requiredPermissions:needed,permissions:auth.grant.permissions.filter(permission=>auth.workspace.permissions.includes(permission)),
+            });
+          }
+          const projected = projectMcpImages(data);
+          data = projected.data as Record<string,unknown>;
+          images = projected.images;
+          if (new TextEncoder().encode(JSON.stringify(data)).length > 248_000) {
+            const {data: _, resolution: __, lateObservation: ___, ...metadata} = data;
+            data = {...metadata,resultAvailability:'TOO_LARGE'};
+            images=[];
+          }
+        }
+      } catch(error) {
+        isError = true;
+        data = {contractVersion:2,target:target ?? null,operationId:null,serverTimeMs:Date.now(),
+          phase:'REJECTED',effectState:'NONE',result:null,
+          error:{code:error instanceof ApiError || error instanceof ToolError ? error.code : 'INTERNAL_ERROR',
+            message:error instanceof ApiError || error instanceof ToolError ? error.message : 'Request failed before a receipt was available.',
+            retryable:false,
+            recovery:error instanceof ApiError || error instanceof ToolError ? error.recovery : 'Reconcile by operationKey before retrying an intent.'}};
+      }
+      return {content:[{type:'text' as const,text:JSON.stringify(data)},...images],structuredContent:data,isError};
+    });
+    return server;
+  };
+  return transportMcp(request,make);
 }
 async function route(
   request: Request,

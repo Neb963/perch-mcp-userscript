@@ -93,6 +93,27 @@ export class VirtualFileSystem {
   async list(path = ''): Promise<string[]> { if (path && !['src', 'scratch', 'imports'].includes(path)) canonicalPath(path); const files = Object.keys((await this.snapshot()).files).sort(); return path ? files.filter(name => name === path || name.startsWith(`${path.replace(/\/$/, '')}/`)) : files; }
   async read(path: string): Promise<Uint8Array> { canonicalPath(path); const bytes = (await this.snapshot()).files[path]; if (!bytes) throw new BrowserError('FILE_NOT_FOUND', 'File does not exist in assigned Workspace.'); return bytes.slice(); }
   async writeLocalBatch(writes: FileWrite[], expectedLocalRevision: string, gatewayOperationId?: string) {
+    return this.writePrivateFiles(writes, expectedLocalRevision, gatewayOperationId, 'SOURCE');
+  }
+  async publishImportedFiles(slugs: readonly string[], files: Record<string,Uint8Array>, expectedLocalRevision: string,
+      gatewayOperationId: string) {
+    const prefixes = slugs.map(slug => {
+      if (!/^[a-z0-9][a-z0-9-]{0,119}$/.test(slug)) throw new BrowserError('INVALID_INPUT', 'Invalid import Slug.');
+      return 'imports/' + slug + '/';
+    });
+    const old = await this.localView();
+    if (old.revision.value !== expectedLocalRevision)
+      throw new BrowserError('STALE_REVISION', 'Local import manifest changed before publication.');
+    const writes: FileWrite[] = old.files.filter(file => prefixes.some(prefix => file.path.startsWith(prefix)) &&
+      !Object.hasOwn(files,file.path)).map(file=>({path:file.path,bytes:null}));
+    for (const [path,bytes] of Object.entries(files)) {
+      if (!prefixes.some(prefix=>path.startsWith(prefix))) throw new BrowserError('PATH_DENIED', 'Import outside the requested public namespace.');
+      writes.push({path,bytes});
+    }
+    return this.writePrivateFiles(writes, expectedLocalRevision, gatewayOperationId, 'IMPORT');
+  }
+  private writePrivateFiles(writes: FileWrite[], expectedLocalRevision: string, gatewayOperationId: string | undefined,
+      kind: 'SOURCE' | 'IMPORT') {
     return this.serial(async () => {
       await this.assertPublication();
       const scope = this.scope;
@@ -104,14 +125,21 @@ export class VirtualFileSystem {
       if (pending.some(row => row.paths.some(path => writes.some(write => write.path === path))))
         throw new BrowserError('NATIVE_CONFLICT', 'An unresolved local publication overlaps these files.');
       const local = await this.local();
+      const prefix = kind === 'SOURCE' ? 'scratch/' : 'imports/';
       for (const write of writes) {
-        if (!canonicalPath(write.path).startsWith('scratch/'))
-          throw new BrowserError('PATH_DENIED', 'Binding-local write requires a scratch path.');
+        if (!canonicalPath(write.path).startsWith(prefix))
+          throw new BrowserError('PATH_DENIED', 'Private publication does not match its authorized namespace.');
         if (write.bytes === null) delete local.files[write.path];
         else local.files[write.path] = bytesToBase64(write.bytes);
       }
       local.generation = nextGeneration(local.generation);
-      const journal: Journal = {id: crypto.randomUUID(), kind: 'SOURCE', state: 'INTENT',
+      const paths = Object.keys(local.files).map(path=>path.toLowerCase());
+      const manifest = new Set(paths);
+      if (manifest.size !== paths.length || paths.some(path=>{
+        const parts = path.split('/');
+        return parts.some((_part,index)=>index >= 2 && manifest.has(parts.slice(0,index).join('/')));
+      })) throw new BrowserError('PATH_DENIED', 'Private publication had a case or file/directory collision.');
+      const journal: Journal = {id: crypto.randomUUID(), kind, state: 'INTENT',
         paths: writes.map(write => write.path), baseRevision: expectedLocalRevision, createdAt: Date.now(),
         gatewayOperationId};
       const key = scope.epochPrefix + ':journal:' + journal.id;

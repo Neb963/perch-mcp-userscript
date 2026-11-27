@@ -1,3 +1,4 @@
+import { executeDevelopment, type DevelopmentContext } from './development-v2.js';
 import { createComputeWorkerClient, ExecutionError } from "./compute.js";
 import { PreviewAdapter, createNativePreviewBridge } from "./preview.js";
 import { fetchPublic } from "./public-fetch.js";
@@ -34,6 +35,9 @@ export class RuntimeTools implements AdditionalTools {
     workerSource = __COMPUTE_WORKER_SOURCE__,
   ) {
     this.compute = createComputeWorkerClient(workerSource);
+  }
+  callDevelopment(context: DevelopmentContext): Promise<unknown> {
+    return executeDevelopment(context,this.compute);
   }
   capabilityReport(context: RuntimeContext): Record<string, unknown> {
     return this.preview(context).availability();

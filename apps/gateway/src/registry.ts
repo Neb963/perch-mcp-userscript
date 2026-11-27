@@ -38,6 +38,7 @@ import {
   assignmentCount, changeAssignmentIndex, discoverAssignments, initializeAssignments, permissionCeiling,
   projectAssignment, requireAssignment, resolveTarget,
 } from './assignments.js';
+import { segmentRequestSchema, type SegmentRequest } from '../../../packages/contracts/src/operations-v2.js';
 import { nextGeneration, v2DefaultPermissions, workspaceStatusV2Schema } from '../../../packages/contracts/src/target.js';
 
 import {
@@ -894,6 +895,29 @@ export class Registry {
         }),
       );
     }
+    if (path === '/internal/v2/segment') {
+      const b = await parseBody(request, 8192);
+      const parsed = segmentRequestSchema.safeParse(b.segment);
+      if (!parsed.success || (b.props as AuthProps | undefined)?.contractVersion !== 2)
+        throw new ApiError('INVALID_INPUT', 'Exact v2 segment required.');
+      const segment = parsed.data;
+      return json(this.db.transaction(() => {
+        const {workspace: w, grant} = this.authorize(b);
+        const operationId = id(b.operationId);
+        const key = 'permit/' + operationId;
+        const parent = this.db.get<{workspaceId: string; epoch: number; state: string; target?: string;
+          grantId?: string; segments?: SegmentRequest[]} | undefined>(key);
+        if (!parent || parent.state !== 'consumed' || parent.workspaceId !== w.id || parent.grantId !== grant.id ||
+            parent.target !== b.target || parent.epoch !== w.epoch || b.epoch !== w.epoch ||
+            b.bindingRevision !== w.bindingRevision)
+          throw new ApiError('STALE_EPOCH', 'Segment has no current consumed parent authority.', 409);
+        const previous = parent.segments ?? [];
+        if (segment.sequence !== previous.length || previous.length >= 128)
+          throw new ApiError('CONFLICT', 'Segment permit is already consumed or out of sequence.', 409);
+        this.db.put(key, {...parent, segments: [...previous, segment]});
+        return {operationId, sequence: segment.sequence, digest: segment.digest, expiresAt: Date.now() + 5000};
+      }));
+    }
     if (path === "/internal/dispatch") {
       const b = await parseBody(request);
       return json(
@@ -931,6 +955,7 @@ export class Registry {
             epoch: w.epoch,
             createdAt: Date.now(),
             state: "consumed",
+            ...(result.grant.contractVersion === 2 ? {target: b.target, grantId: result.grant.id} : {}),
           });
           if (requiresGeneratorReservation(String(b.tool ?? ''), b.mutating === true) && w.binding) {
             const key = "reservation/" + w.binding.generatorId,
@@ -1313,6 +1338,7 @@ export class Registry {
     workspace: WorkspaceRecord;
     grant: GrantRecord;
     agent: AgentRecord;
+    policyRevision?: number;
   } {
     const props = b.props as AuthProps;
     if (props?.contractVersion === 2) {
@@ -1323,7 +1349,7 @@ export class Registry {
       if ((core.paused || w.paused) && b.resultAccess !== true)
         throw new ApiError('PAUSED', 'Execution is paused.', 403);
       this.requireToolPermissions(b, w, grant);
-      return { workspace: w, grant, agent };
+      return { workspace: w, grant, agent, policyRevision: core.policyRevision };
     }
     if (!props || props.contractVersion !== undefined || b.target !== undefined)
       throw new ApiError("AUTH_REQUIRED", "Grant context required.", 401);

@@ -18,7 +18,7 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 | V02 | V01 | Durable fenced transition, exact management receipts and original-scope result ACL | Gateway verified; manager integration pending |
 | V03 | V02 | Binding-isolated store, epoch-safe recovery, verified checkpoints and bounded GC | Core and lease integration verified; operator archive UI pending |
 | V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | Primitives verified; wire integration pending |
-| V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | In progress |
+| V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Scoped execution verified; grouped publication and expanded integration pending |
 | V06 | V05 | Preview freshness, diagnostics, viewport, actual-pixel feasibility and verified Save | Pending |
 | V07 | V01–V06 | Exact v2 catalog, archive/export compatibility, retirement and agent knowledge | Pending |
 | V08 | V02–V07 | Manager, compatible migration/rollback and one-click rebind | Pending |
@@ -81,6 +81,17 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 - Add timestamp-bounded Operation keys with exact scope, digest and retained receipt. Persist them atomically with admission, check retained keys first, and require exact authorization at status/result delivery. Carry versioned tool envelopes and deny legacy child-tool calls for v2.
 - Define the closed batch union and preflight all nested inputs before execution. Preserve declared-action receipts and partial effects. Isolate QuickJS read views and staged publication, then integrate restricted GET/POST and verified public import snapshots.
 - Exercise lost-response replay, altered digest/Grant, expired key, cancellation, permissions and result projection with local workerd. Keep the gated rollout until all 19 tool definitions and compatibility tests are ready.
+
+### V05 evidence
+
+- Six focused tests and typecheck passed. Workerd validates one-use segments, exact Operation key replay/conflict, key expiry and status lookup, and the local OAuth/MCP v2 tool list of 19 names. QuickJS ran 100 reads with one read-view permit. A denied publication left scratch unchanged. The batch fixture validates the entire shape before effects and preserves completed steps after a later failure.
+- A separate execution flag keeps the public v2 catalog opt-in. The waitMs delivery option currently returns the durable handle without waiting. Adjacent general mutation coalescing, public retrieval fault coverage and more bundled browser integration remain open.
+
+### V06 plan
+
+- Use native source revision for preview and Save. Invalidate applied preview proof on iframe load/replacement or failed refresh. Verify preview epoch, requested freshness and actual viewport geometry, and bound diagnostic entries.
+- Review documented Violentmonkey and Firefox capture capabilities without opening a real browser session. Keep unavailable capture explicit if exact preview-surface proof cannot be established.
+- Require intended native revision, exact independent saved base, fresh authorized dispatch, durable local Save intent and independent persisted-source readback. Test synthetic stale and uncertain cases while preserving the operator-only native provider gate.
 
 ## Historical v0.1–v0.2.0 implementation ledger
 
