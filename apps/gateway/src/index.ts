@@ -484,13 +484,14 @@ function mcpDevelopment(request: Request, env: Env, props: AuthProps, agentId: s
         const call = parseDevelopmentCall(incoming.params.name,incoming.params.arguments ?? {});
         target = call.delivery?.target ?? (typeof call.args.target === 'string' ? call.args.target : undefined);
         const inputScope = {props,agentId,...(target ? {target} : {})};
-        if (call.name === 'workspace_status') {
+        if (call.name === 'workspace_status' && call.args.verifySource !== true) {
           data = await rpc(registry(env),'/internal/v2/discover',{...inputScope,args:call.args});
         } else {
           const requested = parseTarget(target);
           const resultOp = call.name === 'operation_status' || call.name === 'cancel_operation';
           const name = call.name as keyof typeof developmentToolArgs;
-          const needed = resultOp ? [] : requiredPermissionsV2(name,call.args);
+          const verifiedStatus = call.name === 'workspace_status';
+          const needed = resultOp ? [] : verifiedStatus ? ['READ_SOURCE'] : requiredPermissionsV2(name,call.args);
           const auth = await rpc<{ workspace: WorkspaceRecord; grant: {permissions:string[]}; policyRevision:number }>(
             registry(env), '/internal/authorize', {...inputScope,permissions:needed,resultAccess:true});
           const stub = workspace(env,requested.workspaceId);
@@ -503,7 +504,8 @@ function mcpDevelopment(request: Request, env: Env, props: AuthProps, agentId: s
             const key = call.delivery?.operationKey ?? ('k2.'+Date.now()+'.'+crypto.randomUUID());
             data = await rpc(stub,'/internal/admit',{
               ...inputScope,workspace:auth.workspace,policyRevision:auth.policyRevision,
-              tool:call.name,args:call.args,operationKey:key,mutating:hasEffectV2(name,call.args),
+              tool:verifiedStatus?'workspace_status_verified':call.name,args:verifiedStatus?{}:call.args,
+              operationKey:key,mutating:!verifiedStatus&&hasEffectV2(name,call.args),
               requiredPermissions:needed,permissions:auth.grant.permissions.filter(permission=>auth.workspace.permissions.includes(permission)),
             });
           }

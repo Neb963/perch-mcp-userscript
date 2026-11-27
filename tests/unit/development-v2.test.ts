@@ -69,3 +69,77 @@ test('Invalid batch tail has zero effects. Valid batch reports partial on a fail
   assert.equal(partial.status,'PARTIAL');
   assert.equal(partial.steps.length,2);
 });
+
+test('actual-pixel capture reports an unavailable interface and opens no surface',async()=>{
+  const {JSDOM}=await import('jsdom');
+  const {DevelopmentPreview}=await import('../../apps/userscript/src/development-preview.js');
+  const dom = new JSDOM('<iframe id="outputIframeEl"></iframe>');
+  try {
+    const f=await fixture('capture_page_image',{});
+    const preview = new DevelopmentPreview({},dom.window.document,async()=> 'a'.repeat(64));
+    await assert.rejects(preview.run('capture_page_image',{},f.context,{
+      target:f.context.envelope.target,grantId:'grant',operationId:'operation',assertCurrent:()=>undefined,
+      authorizePublication:async()=>{throw new Error('Unexpected publication');},
+    }),/No verified userscript interface/);
+    assert.deepEqual(f.permits,[]);
+    preview.dispose();
+  } finally { dom.window.close(); }
+});
+
+test('preview proof is cleared on document load and failed refresh',async()=>{
+  const {JSDOM}=await import('jsdom');
+  const {PreviewAdapter}=await import('../../apps/userscript/src/preview.js');
+  const dom=new JSDOM('<iframe id="outputIframeEl"></iframe>');
+  try {
+    const frame=dom.window.document.querySelector('iframe')!;
+    let fail=false;
+    const revision='a'.repeat(64);
+    const preview=new PreviewAdapter({frame:()=>frame,revision:async()=>revision,requireDocumentProof:true,
+      verified:{refresh:true},bridge:{
+        refresh:async()=>({appliedRevision:fail?'b'.repeat(64):revision,
+          previewGeneration:'document-1',consoleOutput:[],perchanceErrors:[],syntaxErrors:[]}),
+        evaluate:async()=>({consoleOutput:[],perchanceErrors:[],syntaxErrors:[]}),
+      },
+    });
+    await preview.refresh();
+    assert.equal((await preview.freshness()).previewRevision,revision);
+    const epoch=preview.currentEpoch();
+    frame.dispatchEvent(new dom.window.Event('load'));
+    assert.ok(preview.currentEpoch()>epoch);
+    assert.equal((await preview.freshness()).pageFreshnessUnknown,true);
+    await preview.refresh();
+    fail=true;
+    await assert.rejects(preview.refresh(),/did not attest/);
+    assert.equal((await preview.freshness()).pageFreshnessUnknown,true);
+    preview.dispose();
+  } finally { dom.window.close(); }
+});
+
+test('Save uses the native revision and independent saved base, leaving a hold after uncertainty',async()=>{
+  const {saveDevelopment}=await import('../../apps/userscript/src/development-save.js');
+  const f=await fixture('save_generator',{});
+  f.context.envelope.permissions.push('SAVE');
+  const identity={generatorId:'generator',slug:'fixture',draftId:''};
+  const native={identity,files:{'main.pjs':new Uint8Array([65]),'index.html':new Uint8Array()},revision:'a'.repeat(64),
+    dirty:true,saveState:'unsaved'};
+  const saved={...native,revision:'b'.repeat(64)};
+  const mock=f.vfs.adapter as unknown as Record<string,unknown>;
+  mock.options={externalWritesVerified:true};
+  mock.snapshot=async()=>native;
+  let calls=0;
+  mock.save=async (revision:string,context:{onDispatch:()=>Promise<void>})=>{
+    assert.equal(revision,native.revision);
+    await context.onDispatch();
+    calls++;
+    return {status:'UNKNOWN',revision,committed:[]};
+  };
+  await assert.rejects(saveDevelopment({intendedSourceRevision:native.revision,expectedSavedRevision:'c'.repeat(64)},
+    f.context,async()=>saved),/saved base/);
+  assert.equal(calls,0);
+  const result=await saveDevelopment({intendedSourceRevision:native.revision,expectedSavedRevision:saved.revision},f.context,async()=>saved);
+  assert.equal(result.status,'UNKNOWN');
+  assert.equal((await f.vfs.unresolved()).length,1);
+  await assert.rejects(saveDevelopment({intendedSourceRevision:native.revision,expectedSavedRevision:saved.revision},
+    f.context,async()=>saved),/Reconcile/);
+  assert.equal(calls,1);
+});

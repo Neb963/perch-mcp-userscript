@@ -20,7 +20,7 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 | V04 | V03 | Five filesystem tools with targeted reads, exact preconditions and large transfer | Primitives verified; wire integration pending |
 | V05 | V04 | Typed batch, Operation keys, isolated staged compute, retrieval and result delivery | Scoped execution verified; grouped publication and expanded integration pending |
 | V06 | V05 | Preview freshness, diagnostics, viewport, actual-pixel feasibility and verified Save | Pending |
-| V07 | V01–V06 | Exact v2 catalog, archive/export compatibility, retirement and agent knowledge | Pending |
+| V07 | V01–V06 | Exact v2 catalog, archive/export compatibility, retirement and agent knowledge | In progress |
 | V08 | V02–V07 | Manager, compatible migration/rollback and one-click rebind | Pending |
 | V09 | V01–V08 | Native/legacy workload, capacity, OAuth and fault measurements | Pending |
 | V10 | V00–V09 | Exact-head offline qualification, artifacts and unmerged PR | Pending |
@@ -92,6 +92,17 @@ Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179
 - Use native source revision for preview and Save. Invalidate applied preview proof on iframe load/replacement or failed refresh. Verify preview epoch, requested freshness and actual viewport geometry, and bound diagnostic entries.
 - Review documented Violentmonkey and Firefox capture capabilities without opening a real browser session. Keep unavailable capture explicit if exact preview-surface proof cannot be established.
 - Require intended native revision, exact independent saved base, fresh authorized dispatch, durable local Save intent and independent persisted-source readback. Test synthetic stale and uncertain cases while preserving the operator-only native provider gate.
+
+### V06 evidence
+
+- Typecheck and 76 focused tests passed. A frame load and failed refresh clear prior applied proof. Native Save is fenced to the native draft and independently verified saved base. It retains a hold on uncertainty. Capture returns UNSUPPORTED_INTERFACE before opening any capture surface.
+- CAPTURE.md records the documented platform limit and evidence required for OWNER-03. Real source, preview and Save remain DEFERRED_OWNER under OWNER-01. No native pixels, actual provider writes or real client render were exercised.
+
+### V07 plan
+
+- Package the 11 checked-in skills, reference and advisory workflow with standalone Markdown install/use guidance and generated exact runtime tool schemas.
+- Gate all public v2 calls by the 19-tool catalog. Keep unchanged legacy Grant readers and operator Resource archive/export. Verify v2 denials and document what must remain during compatibility rollout.
+- Verify package hashes, provenance and standalone file counts. Treat retirement of compatibility v1 runtime and remaining operator end-to-end automation as separate release gates until verified.
 
 ## Historical v0.1–v0.2.0 implementation ledger
 

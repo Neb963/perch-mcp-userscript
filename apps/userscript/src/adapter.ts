@@ -4,6 +4,8 @@ interface SrcState { ready(): unknown; idle?(): unknown; list(): unknown; readFi
 interface NativePage { Uint8Array?: Uint8ArrayConstructor; userOwnsThisGenerator?:unknown; userCanSaveThisGenerator?:unknown; generatorPublicId?:unknown; app?: { data?: { generator?: { id?: unknown; name?: unknown; publicId?: unknown } }; saveGenerator?: () => unknown; userOwnsThisGenerator?: unknown; userCanSaveThisGenerator?: unknown }; modelTextEditor?: TextEditor; outputTemplateEditor?: TextEditor; srcState?: SrcState; currentInterfaceMode?: unknown; __editorReady?: unknown; __draftChoiceSettled?: unknown; perchanceSaveState?: unknown; __generatorIdentityTransition?: unknown; __draftHandoffClosed?:unknown; editorCollabInitialSyncIsPending?:unknown; __collabRoomFailed?:unknown; yjsProvider?:unknown; aiAgentActivityState?:()=>unknown; __aiGeneratorGuard?:{blocked?:()=>unknown}; editor?: { handleReloadButtonClick?: () => unknown }; editorUndoManagers?: Record<string, { undo?: () => unknown; redo?: () => unknown }> }
 export interface AdapterOptions { cloneInto?: (value: unknown) => unknown; externalWritesVerified?: boolean; maxSnapshotBytes?: number }
 export interface SaveContext {
+  assertCurrent?: () => Promise<void>;
+
   operationId: string;
   permission: boolean;
   previousSavedSnapshot: NativeSnapshot;
@@ -369,7 +371,14 @@ export class NativeAdapter {
     this.assertMutationReady();
     // This callback durably records that an external effect is about to begin.
     // A failure to persist the fence MUST prevent the native dispatch.
+    if (context.assertCurrent) await context.assertCurrent();
     await context.onDispatch?.();
+    if (context.assertCurrent) {
+      if ((await this.snapshot()).revision !== intendedRevision)
+        throw new BrowserError('STALE_REVISION', 'Native draft changed before Save dispatch.');
+      this.assertMutationReady();
+      await context.assertCurrent();
+    }
     let receipt: unknown;
     try { receipt = await this.page.app.saveGenerator(); } catch { return this.unknownSave(intendedRevision); }
     const status = context.receipt?.status ?? (receipt && typeof receipt === 'object' && 'status' in receipt ? receipt.status : undefined);

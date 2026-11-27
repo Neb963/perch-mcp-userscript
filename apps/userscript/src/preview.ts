@@ -22,6 +22,7 @@ export interface PreviewOptions {
   readText?(path: string): Promise<string>;
   writeFile?(path: string, bytes: Uint8Array, expectedRevision: string): Promise<unknown>;
   maxViewport?: number;
+  requireDocumentProof?: boolean;
 }
 function checkedReceipt(value: unknown): PreviewReceipt {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'The native preview did not provide a structured receipt.');
@@ -54,7 +55,24 @@ export class PreviewAdapter {
   private viewportResetTimer?: ReturnType<typeof setTimeout>;
   private readonly viewportIdleMs = 45000;
   private previewBusy = 0;
-  private readonly onFrameLoad = () => this.invalidateAttestation();
+  private documentEpoch = 0;
+  private readonly onFrameLoad = () => this.invalidateDocument();
+  private invalidateDocument(): void {
+    this.invalidateAttestation();
+    this.appliedRevision = undefined;
+    this.generation = undefined;
+    this.documentEpoch++;
+  }
+  currentEpoch(): number {
+    this.syncAttestationFrame();
+    return this.documentEpoch;
+  }
+  dispose(): void {
+    this.restoreViewport();
+    this.attestedFrame?.removeEventListener('load',this.onFrameLoad);
+    this.attestedFrame = null;
+    this.invalidateDocument();
+  }
   private invalidateAttestation(): void {
     this.attested.clear(); this.failedAttestation.clear(); this.verifiedAt.clear();
   }
@@ -62,7 +80,7 @@ export class PreviewAdapter {
     const frame = this.options.frame();
     if (frame !== this.attestedFrame) {
       this.attestedFrame?.removeEventListener('load',this.onFrameLoad);
-      this.invalidateAttestation();
+      this.invalidateDocument();
       this.attestedFrame = frame;
       frame?.addEventListener('load',this.onFrameLoad);
     }
@@ -185,6 +203,7 @@ export class PreviewAdapter {
   }
   async freshness(): Promise<{ pendingSrcChanges: boolean; pageFreshnessUnknown: boolean; previewRevision?: string; previewGeneration?: string }> {
     const current = await this.options.revision();
+    this.syncAttestationFrame();
     return { pendingSrcChanges: this.appliedRevision !== undefined && current !== this.appliedRevision, pageFreshnessUnknown: this.appliedRevision === undefined, previewRevision: this.appliedRevision, previewGeneration: this.generation };
   }
   async refresh(preambleJs?: string): Promise<unknown> {
@@ -193,10 +212,14 @@ export class PreviewAdapter {
     await this.requireCapability('refresh');
     if (preambleJs !== undefined) await this.requireCapability('preamble');
     const expected = await this.options.revision();
+    this.appliedRevision = undefined;
+    this.generation = undefined;
     const receipt = checkedReceipt(await deadline(this.options.bridge.refresh(preambleJs), 30_000));
-    if (receipt.appliedRevision !== expected || await this.options.revision() !== expected) throw new ExecutionError('NATIVE_CONFLICT', 'Source changed during refresh or the native frame did not attest the intended source revision. Refresh again after inspecting manual edits.', 'PARTIAL');
+    if (receipt.appliedRevision !== expected || await this.options.revision() !== expected ||
+        (this.options.requireDocumentProof && !receipt.previewGeneration)) throw new ExecutionError('NATIVE_CONFLICT', 'Source changed during refresh or the native frame did not attest the intended source revision. Refresh again after inspecting manual edits.', 'PARTIAL');
+    this.syncAttestationFrame();
     this.appliedRevision = expected; this.generation = receipt.previewGeneration;
-    this.syncAttestationFrame(); this.attested.add('refresh');
+    this.attested.add('refresh');
     if (this.viewport) await this.setViewport(this.viewport.width, this.viewport.height);
     return { ...receipt, ...await this.freshness() };
   }
@@ -208,8 +231,11 @@ export class PreviewAdapter {
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > 500_000 || new TextEncoder().encode(js).byteLength > 262_144) throw new ExecutionError('INVALID_INPUT', 'Preview code or timeout exceeds its limit.');
     if (options.reload) await this.refresh();
     const before = await this.options.revision();
+    const epoch = this.currentEpoch();
+    const expectedGeneration = this.generation;
     const receipt = checkedReceipt(await deadline(this.options.bridge.evaluate(js, timeout), timeout));
-    if (this.generation && receipt.previewGeneration && receipt.previewGeneration !== this.generation) throw new ExecutionError('STALE_EPOCH', 'Preview document changed during evaluation. Inspect diagnostics before another call.', 'UNKNOWN');
+    if (epoch !== this.currentEpoch() || (expectedGeneration &&
+        (this.options.requireDocumentProof || receipt.previewGeneration) && receipt.previewGeneration !== expectedGeneration)) throw new ExecutionError('STALE_EPOCH', 'Preview document changed during evaluation. Inspect diagnostics before another call.', 'UNKNOWN');
     let savedTo: string | undefined;
     if (options.resultPath) {
       if (!this.options.writeFile || typeof receipt.result !== 'string') throw new ExecutionError('INVALID_INPUT', 'resultPath requires a data URL result and Workspace write access.');

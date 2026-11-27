@@ -181,6 +181,16 @@ async function importPublic(args: BrowserToolArgs<'fetch_generator'>, context: D
 
 export async function executeDevelopment(context: DevelopmentContext, engine?: ComputeWorkerClient, fetchImpl?: typeof fetch) {
   const operation = context.envelope;
+  if (operation.tool === 'workspace_status_verified') {
+    if (!operation.permissions.includes('READ_SOURCE') || Object.keys(operation.args).length !== 0)
+      throw new BrowserError('SCOPE_DENIED','Verified Workspace source requires READ_SOURCE.');
+    await context.assertCurrent();
+    return context.additional('generator_info',{verifySource:true},
+      {target:operation.target,grantId:operation.grantId,operationId:operation.operationId,
+        assertCurrent:context.assertCurrent,authorizePublication:async()=>{
+          throw new BrowserError('SCOPE_DENIED','Verified Workspace status cannot publish.');
+        }});
+  }
   if (!Object.hasOwn(developmentToolArgs,operation.tool)) throw new BrowserError('INVALID_INPUT','Unknown v2 execution tool.');
   const tool = operation.tool as keyof typeof developmentToolArgs;
   const validated = developmentToolArgs[tool].safeParse(operation.args);
