@@ -102,6 +102,13 @@ before(async () => {
 after(async () => {
   await mf?.dispose();
 });
+test("Worker liveness is a separate route from Registry readiness", async () => {
+  const r=await request("/live",undefined,"", "GET");
+  assert.equal(r.status,200);
+  const body=await r.json() as {ok:boolean;role:string};
+  assert.equal(body.ok,true);
+  assert.equal(body.role,"worker-liveness");
+});
 test("bootstrap, admin authentication, idempotency, native binding and Agent isolation", async () => {
   const health = await data("/health", undefined, "");
   assert.equal(health.paired, false);
