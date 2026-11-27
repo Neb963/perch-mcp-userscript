@@ -1,0 +1,91 @@
+name: Verify deployed gateway
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/gateway/**"
+      - ".github/workflows/verify-deployed-gateway.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perch-mcp-production-readiness
+  cancel-in-progress: true
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact Worker version and Registry readiness
+        shell: bash
+        run: |
+          python3 -u - <<'PY'
+          import json, re, sys, time
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError, URLError
+
+          # This installation uses Cloudflare Git integration. Do not deploy,
+          # send credentials, pair, alter Registry state, or call provider tools.
+          origin = "https://perch-mcp-userscript.peterconemannn.workers.dev"
+          expected = re.search(r'export const VERSION = "([0-9.]+)"', Path("apps/gateway/src/common.ts").read_text()).group(1)
+          reasons = {
+              "REGISTRY_QUOTA", "REGISTRY_OVERLOADED", "REGISTRY_STORAGE_FULL",
+              "REGISTRY_STORAGE_CORRUPT", "REGISTRY_STORAGE_UNAVAILABLE",
+              "REGISTRY_SCHEMA_INCOMPATIBLE", "REGISTRY_CONFIGURATION_INVALID",
+              "REGISTRY_TIMEOUT", "REGISTRY_HTTP_ERROR", "REGISTRY_UNCLASSIFIED",
+          }
+
+          def probe(path):
+              req = Request(origin + path, headers={"Accept": "application/json", "Cache-Control": "no-cache", "User-Agent": "perch-mcp-deployment-smoke/1"})
+              try:
+                  try:
+                      response = urlopen(req, timeout=8)
+                  except HTTPError as exc:
+                      response = exc
+                  with response:
+                      status = response.code
+                      data = json.loads(response.read(8192))
+                  return status, data if isinstance(data, dict) else {}
+              except (URLError, OSError, ValueError):
+                  return 0, {}
+
+          def evidence(status, data):
+              # Fixed public fields only; never print arbitrary response text.
+              version = data.get("version")
+              trace = data.get("traceId")
+              reason = data.get("reason")
+              return {"status": status,
+                      "version": version if isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) else None,
+                      "traceId": trace if isinstance(trace, str) and re.fullmatch(r"[0-9a-fA-F-]{36}", trace) else None,
+                      "reason": reason if isinstance(reason, str) and reason in reasons else None,
+                      "paired": data.get("paired") is True,
+                      "configured": data.get("configured") is True}
+
+          print("Expected Worker version:", expected, flush=True)
+          for attempt in range(1, 13):
+              live_status, live = probe("/live")
+              health_status, health = probe("/health")
+              print(json.dumps({"attempt": attempt, "live": evidence(live_status, live),
+                                "health": evidence(health_status, health)}), flush=True)
+              if (live_status == health_status == 200 and live.get("ok") is True
+                  and live.get("version") == health.get("version") == expected
+                  and health.get("schemaVersion") == 1
+                  and health.get("paired") is True and health.get("configured") is True):
+                  metadata_status, metadata = probe("/.well-known/oauth-authorization-server")
+                  print(json.dumps({"oauthMetadataStatus": metadata_status,
+                                    "issuerMatches": metadata.get("issuer") == origin}), flush=True)
+                  if metadata_status == 200 and metadata.get("issuer") == origin:
+                      print("Production readiness and OAuth metadata verified.", flush=True)
+                      sys.exit(0)
+              if (live.get("version") == health.get("version") == expected
+                  and health.get("reason") in {"REGISTRY_QUOTA", "REGISTRY_STORAGE_FULL", "REGISTRY_STORAGE_CORRUPT", "REGISTRY_SCHEMA_INCOMPATIBLE", "REGISTRY_CONFIGURATION_INVALID"}):
+                  sys.exit("Deployed version is blocked by a classified Registry fault; see evidence above.")
+              if attempt != 12:
+                  time.sleep(10)
+          sys.exit("Production readiness was not verified within the bounded deployment window.")
+          PY
