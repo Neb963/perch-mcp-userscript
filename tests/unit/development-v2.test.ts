@@ -174,8 +174,8 @@ test('F12 verified public import stores bytes and a revision-pinned private rece
   assert.deepEqual(f.permits,['public-get','source-publication']);
   const view=await f.vfs.localView();
   assert.deepEqual(view.files.map(x=>x.path).sort(),[
-    'imports/fixture/perch-receipt.json','imports/fixture/index.html',
-    'imports/fixture/main.pjs','scratch/input',
+    'imports/fixture/index.html','imports/fixture/main.pjs',
+    'imports/fixture/perch-receipt.json','scratch/input',
   ]);
   const receipt=JSON.parse(new TextDecoder().decode(await view.read('imports/fixture/perch-receipt.json')));
   assert.equal(receipt.revision,result.imports[0]?.revision);

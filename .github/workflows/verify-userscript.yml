@@ -41,6 +41,14 @@ jobs:
         run: npm run typecheck
       - name: Unit and integration tests
         run: timeout --signal=TERM --kill-after=10s 240s npm test
+      - name: Offline v2 capacity measurement (no provider/deployment)
+        env:
+          BENCHMARK_HISTORIES: "0"
+          BENCHMARK_NATIVE: "true"
+          BENCHMARK_MULTI_CONNECTOR: "true"
+        run: |
+          mkdir -p dist
+          timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/benchmark-development-v2.ts dist/remediation-native.json
       - name: Build userscript and Worker package
         run: npm run build
       - name: Verify release package hashes
@@ -65,5 +73,6 @@ jobs:
             dist/perch-mcp-cloudflare.zip
             dist/SHA256SUMS.txt
             dist/DOWNLOAD-SHA256SUMS.txt
+            dist/remediation-native.json
           if-no-files-found: error
           retention-days: 30

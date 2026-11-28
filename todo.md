@@ -30,6 +30,13 @@ The 3fac671 manager release passed strict typecheck and 667/670 tests in offline
 
 F10 status semantics: stale heartbeat is not verified source. Registry detail must explicitly report unverified SourceRevision/LocalRevision/PreviewRevision/SavedRevision, effective tool permissions, unsupported pixel capture and scoped blockers without reading source. Native generator_info must return reasoned revision objects without implicit verification. A focused local-workerd test exercises a READ_SOURCE-only Connector, unbound discovery, bound Target detail, unauthorized write capability and explicit unavailable verified-source path. Verification pending exact-head CI.
 
+### R04 scoped admission and cost plan
+
+1. Correct v2 `execute_js` admission: local broker reads/write staging are not 1,000 nested remote child RPCs. Preserve v1 estimate, strict conservative positive reserves, exact epoch/transaction state and no weakening of admission accounting. Add v2 batch 1–32 cost bounds and rollover tests.
+2. Reproduce true local SDK/Registry/Workspace costs at 0/150/999/1000 histories, ten individual writes versus one grouped write, ten heterogeneous individual calls versus one 10-step batch, 1/5/10/20/30/50 Workspace indexed discovery and 10/20 isolated Connectors.
+3. Measure native and legacy canonical storage independently. Compare against v0.2 and verified v0.3 baseline; report SQL reads/writes, KV operations, Worker/DO requests, bytes, incomplete billing dimensions, and target breaches without claiming account-global quota.
+4. Retain <=120 SQL reads / <=40 writes as an *unmet* normative target until an exact-head measured workload passes; do not remove fresh scope/revocation/readback checks to improve synthetic metrics. Track OWNER-04 provider billing separately.
+
 ### R03 evidence and next gate
 
 - Exact-head b125c32 CI run [46093489526](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46093489526) passed offline typecheck, unit/integration, build, checksum verification and Wrangler dry-run. Earlier 84242a5 run 46091943832 independently qualified nine OAuth SDK lifetimes up to ten years, nonexpiring v2 consent/refresh/client, suspension and revocation. The default v2 access TTL is now ten years.

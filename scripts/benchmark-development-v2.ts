@@ -56,6 +56,17 @@ try {
     for(const file of files)await cycle('write',{files:[file]},'source-publication');
   });
   await measure('one-ten-file-write',history+11,()=>cycle('write',{files},'source-publication'));
+  // Comparable 10-action heterogeneous workload versus ten separate
+  // transactions. No actual provider effect: synthetic browser replies settle
+  // the same durable MCP/Registry/Workspace lifecycle for each tool.
+  const mixed=Array.from({length:10},(_,i)=>i%2===0?
+    {tool:'read',args:{files:[{path:'main.pjs'}]}}:
+    {tool:'write',args:{files:[{path:'scratch/mixed-'+i,encoding:'utf8',content:'fixture',ifAbsent:true}]}});
+  await measure('ten-mixed-individual-actions',history+12,async()=>{
+    for(const step of mixed)await cycle(step.tool,step.args,
+      step.tool==='write'?'source-publication':undefined);
+  });
+  await measure('one-ten-action-mixed-batch',history+13,()=>cycle('batch',{actions:mixed},'source-publication'));
   for(const count of [1,5,10,20,30,50]) {
     const state=await h.get(admin+'/workspaces');
     const owned=(state.items as unknown[]).length;
