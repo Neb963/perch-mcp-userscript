@@ -45,8 +45,8 @@ test('F10 v2 workspace_status is scope-safe and distinguishes heartbeat from sou
   assert.equal(detailed.readinessReason,'NO_OBSERVATION');
   assert.equal(detailed.dirty,null);
   assert.equal(detailed.freshness,'UNKNOWN');
-  assert.equal((detailed.capabilities as Record<string,Record<string,unknown>>).sourceWrite.permitted,false);
-  assert.equal((detailed.capabilities as Record<string,Record<string,unknown>>).capture.availability,'UNSUPPORTED_INTERFACE');
+  assert.equal((detailed.capabilities as Record<string,Record<string,unknown>>).sourceWrite?.permitted,false);
+  assert.equal((detailed.capabilities as Record<string,Record<string,unknown>>).capture?.availability,'UNSUPPORTED_INTERFACE');
   assert.deepEqual((detailed.diagnostics as Record<string,unknown>).blockers,['NO_OBSERVATION']);
   assert.equal((detailed.negotiatedLimits as Record<string,unknown>).maxBatchActions,32);
   await assert.rejects(status({target,verifySource:true}),/UPGRADE_REQUIRED/);
