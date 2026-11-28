@@ -5,7 +5,8 @@
 - Hypothesis: Worker repeats a generic Registry authorization for result/status or cancel before Workspace performs the necessary *original Operation scope* authorization. Removing the former avoids redundant per-operation Registry SQL while the latter retains fresh revocation, Grant, Target, permission and bindingRevision checks.
 - Changed `apps/gateway/src/index.ts#mcpDevelopment` to route result/cancel by authenticated opaque scope directly to Workspace. In `workspace.ts#authorizeScopedResult`, use that same authoritative Registry result to enforce the former bindingRevision fence without an earlier Worker request.
 - Added Workerd integration coverage for original Grant read/cancel, unrelated Grant denial, altered Target denial and no unauthorized cancellation. This is **not** a completed SQL-budget fix. Compare identical native fixture with 187/44, and revert if there is no measured improvement.
-- Next: one exact-head offline CI/SQL measurement; record actual stage and total counters separately from legacy; no requirement promotion for SQL until ≤120/40.
+- The first W2 CI (46158519983) passed the new original-Grant negative test but exposed a genuine regression in image-result delivery: removed Worker auth had supplied `bindingRevision` to the image hydration guard. Reuse the revision from the Workspace's mandatory fresh Registry authorization instead; preserve the separate image and post-hydration revocation checks (three fresh boundaries, not four). CI was red; no performance result claimed.
+- Next: rerun focused F05 result/revocation scenarios and exact-head offline CI/SQL measurement, record actual counters. Do not promote SQL until ≤120/40.
 
 ## R10 — browser effect-boundary preflight and checkpoint reconciliation (OFFLINE VERIFIED)
 

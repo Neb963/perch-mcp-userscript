@@ -530,7 +530,7 @@ export class Workspace {
     delete op.dispatchAttempt;
     this.operations.put('operation/' + op.operationId, op);
   }
-  private async authorizeScopedResult(op: Operation, b: Record<string, unknown>): Promise<void> {
+  private async authorizeScopedResult(op: Operation, b: Record<string, unknown>): Promise<number> {
     const props = b.props as AuthProps | undefined;
     if (!op.target || op.props.contractVersion !== 2 || props?.contractVersion !== 2 ||
         op.target !== b.target || op.props.grantId !== props.grantId || op.agentId !== b.agentId)
@@ -543,6 +543,7 @@ export class Workspace {
     // checked above; this additionally rejects revision drift.
     if (authority.workspace.bindingRevision !== op.bindingRevision)
       throw new ApiError('NOT_FOUND', 'Operation not found in this scope.', 404);
+    return authority.workspace.bindingRevision;
   }
   private successfulEffect(op: Operation): 'NONE' | 'KNOWN' {
     const retained = op.result as {effectState?: unknown} | undefined;
@@ -918,8 +919,9 @@ export class Workspace {
           404,
         );
       const scoped = !!op.target && typeof b.agentId === 'string';
+      let authorizedBindingRevision: number | undefined;
       if (scoped) {
-        await this.authorizeScopedResult(op, b);
+        authorizedBindingRevision = await this.authorizeScopedResult(op, b);
         const current = this.operations.get('operation/' + operationId);
         if (!current || current.props.grantId !== op.props.grantId || current.target !== op.target)
           throw new ApiError('NOT_FOUND', 'Operation not found in this scope.', 404);
@@ -953,13 +955,20 @@ export class Workspace {
       // no await before serialization, hence no opportunity for a concurrent
       // Registry revocation. Never omit the second check if async image I/O
       // could occur. Image tools preserve the existing post-hydration fence.
+      // Status/cancel no longer performs a duplicate Worker-side Registry
+      // read. Hydrate images using the binding revision from this operation's
+      // already-fresh Registry authorization, preserving both the image's
+      // binding fence and the post-hydration revocation check. Legacy callers
+      // retain their explicit bindingRevision.
+      const imageBindingRevision = authorizedBindingRevision ??
+        (typeof b.bindingRevision === 'number' ? b.bindingRevision : undefined);
       const mightHydrateImage = path === '/internal/status' &&
-        typeof b.agentId === 'string' && typeof b.bindingRevision === 'number' &&
+        typeof b.agentId === 'string' && imageBindingRevision !== undefined &&
         isImageTransferTool(op.tool);
       if (mightHydrateImage) {
         try {
           data = await this.images.hydrate(summary, {workspaceId: op.workspaceId, operationId,
-            agentId: b.agentId as string, bindingRevision: b.bindingRevision as number});
+            agentId: b.agentId as string, bindingRevision: imageBindingRevision});
         } catch (error) {
           if (!scoped) throw error;
           const code = error instanceof ApiError ? error.code : undefined;
