@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { developmentToolDefinitions, parseDevelopmentCall } from '../../packages/contracts/src/development-v2.js';
+import { ToolError } from '../../packages/contracts/src/errors.js';
 import { executeDevelopment, type DevelopmentContext } from '../../apps/userscript/src/development-v2.js';
 import { executeCompute } from '../../apps/userscript/src/compute.js';
 import { BrowserError, digest } from '../../apps/userscript/src/native-types.js';
@@ -39,6 +40,45 @@ test('catalog contains 19 names and rejects nested management, Save, POST and mi
   }
   assert.throws(()=>parseDevelopmentCall('batch',{target,operationKey,actions:[{tool:'fetch_url',
     args:{requests:[{method:'POST',url:'https://fixture.test/',path:'scratch/out',body:'x',ifAbsent:true}]}}]}),/Invalid development/);
+});
+
+test('S03-002/003/004/005/006: malformed standalone requests fail before admission; valid Unicode and bytes pass', () => {
+  const target = 'w2.workspace.1.1', operationKey = 'k2.' + Date.now() + '.' + crypto.randomUUID();
+  const write = (content: string, encoding: 'utf8' | 'base64' = 'utf8', path = 'scratch/new') =>
+    parseDevelopmentCall('write', {target, operationKey,
+      files: [{path, encoding, content, ifAbsent: true}]});
+  const invalid = (fn: () => unknown, code: string = 'INVALID_INPUT') =>
+    assert.throws(fn, (error: unknown) => error instanceof ToolError && error.code === code);
+  invalid(() => parseDevelopmentCall('read', {target, files: [{path: 'main.pjs'}], unrelated: 1}));
+  invalid(() => parseDevelopmentCall('set_viewport_size', {
+    target, operationKey, reset: true, width: 400, height: 300}));
+  invalid(() => parseDevelopmentCall('capture_page_image', {target, format: 'gif'}));
+  invalid(() => parseDevelopmentCall('read', {target, files: [{path: 'main.pjs', encoding: 'latin1'}]}));
+  for (const text of ['\uD800', '\uDC00', 'valid\uD800invalid']) {
+    invalid(() => write(text));
+    invalid(() => parseDevelopmentCall('execute_js', {target, js: text, access: {}}));
+    invalid(() => parseDevelopmentCall('batch', {target, operationKey,
+      actions: [{tool: 'write', args: {files: [{path: 'scratch/new', encoding: 'utf8', content: text, ifAbsent: true}]}}]}));
+  }
+  const emoji = 'source 😀 stable';
+  assert.equal((write(emoji).args.files as {content: string}[])[0]?.content, emoji);
+  assert.equal((write('', 'base64').args.files as {content: string}[])[0]?.content, '');
+  assert.equal((write('8J+YgA==', 'base64').args.files as {content: string}[])[0]?.content, '8J+YgA==');
+  for (const bad of ['!', 'AAA', 'AB==', 'A===', 'A=AA', 'AA A']) invalid(() => write(bad, 'base64'));
+  invalid(() => write('/w==', 'base64', 'index.html'));
+  const transferId = '550e8400-e29b-41d4-a716-446655440000';
+  for (const bad of ['!!AA', 'AAA', 'AB==']) invalid(() =>
+    parseDevelopmentCall('write', {target, operationKey, mode: 'chunk', transferId, offset: 0, data: bad}));
+  assert.equal((parseDevelopmentCall('write', {target, operationKey, mode: 'chunk', transferId,
+    offset: 0, data: 'AAAA'}).args.data), 'AAAA');
+  invalid(() => parseDevelopmentCall('write', {target, operationKey, files: [
+    {path: 'scratch/A', encoding: 'utf8', content: 'a', ifAbsent: true},
+    {path: 'scratch/a', encoding: 'utf8', content: 'b', ifAbsent: true},
+  ]}), 'PATH_DENIED');
+  invalid(() => parseDevelopmentCall('delete', {target, operationKey,
+    paths: [{path: 'scratch/existing'}]}));
+  invalid(() => parseDevelopmentCall('rename', {target, operationKey,
+    moves: [{from: 'scratch/existing', to: 'src/moved', destination: 'absent', ifSha256: 'a'.repeat(64)}]}), 'PATH_DENIED');
 });
 
 test('100 QuickJS reads share a local read view and a denied publication leaves scratch unchanged', async () => {

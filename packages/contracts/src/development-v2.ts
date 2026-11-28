@@ -1,5 +1,5 @@
 import { z } from 'zod/v4';
-import { filesystemV2Schemas, filesystemInlineWriteSchema, filesystemV2Permissions, preflightBatchMutation, type FilesystemToolV2 } from './filesystem-v2.js';
+import { base64Length, filesystemV2Schemas, filesystemInlineWriteSchema, filesystemV2Permissions, preflightBatchMutation, type FilesystemToolV2 } from './filesystem-v2.js';
 import { cancelOperationV2Schema, deliveryFields, operationKeySchema, operationStatusV2Schema, targetV2Schema } from './operations-v2.js';
 import { assertNoFilePathConflicts, assertNoPathCollisions, canonicalPath } from './paths.js';
 import { LIMITS } from './envelopes.js';
@@ -149,6 +149,17 @@ const batchEnvelopeReserve = 4096;
 export const batchResultBudget = 192 * 1024;
 const batchLedgerBaseBytes = 16 * 1024;
 
+/** Reject non-scalar Unicode before an MCP request can admit or authorize an
+ * effect. TextEncoder otherwise silently replaces isolated UTF-16 surrogates.
+ * Keep valid supplementary code points (including emoji) intact. */
+function stringifyWellFormed(value: unknown): string {
+  return JSON.stringify(value, (_key, field: unknown) => {
+    if (typeof field === 'string' && /[\uD800-\uDFFF]/u.test(field))
+      throw new ToolError('INVALID_INPUT', 'Development input contains unpaired Unicode surrogates.');
+    return field;
+  });
+}
+
 function receiptPaths(step: BatchArgumentsV2['actions'][number]): string[] {
   switch (step.tool) {
     case 'read': case 'write': return step.args.files.map(file => file.path);
@@ -170,12 +181,7 @@ export function batchEvidenceReserve(batch: BatchArgumentsV2): number {
  * at the trusted browser boundary, where the Operator's policy is stored.
  */
 export function preflightDevelopmentBatch(batch: BatchArgumentsV2, approvedHosts?: readonly string[]): void {
-  const serialized = JSON.stringify(batch, (_key, value: unknown) => {
-    if (typeof value === 'string' && /[\uD800-\uDFFF]/u.test(value)) {
-      throw new ToolError('INVALID_INPUT', 'Batch contains unpaired Unicode surrogates.');
-    }
-    return value;
-  });
+  const serialized = stringifyWellFormed(batch);
   if (utf8.encode(serialized).byteLength > LIMITS.transportBytes - batchEnvelopeReserve) {
     throw new ToolError('LIMIT_EXCEEDED', 'Batch exceeds the serialized browser envelope budget.');
   }
@@ -260,6 +266,7 @@ export function parseDevelopmentCall(name: string, raw: unknown) {
   if (Object.hasOwn(special, name)) {
     const parsed = special[name as keyof typeof special].safeParse(raw);
     if (!parsed.success) throw new ToolError('INVALID_INPUT', 'Invalid operation scope or status arguments.');
+    stringifyWellFormed(parsed.data);
     return {name: name as DevelopmentTool, args: parsed.data as Record<string, unknown>};
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw))
@@ -271,6 +278,21 @@ export function parseDevelopmentCall(name: string, raw: unknown) {
   const parsed = developmentToolArgs[tool].safeParse(args);
   if (!parsed.success) throw new ToolError('INVALID_INPUT', 'Invalid development tool arguments.');
   if (tool === 'batch') preflightDevelopmentBatch(parsed.data as BatchArgumentsV2);
+  else {
+    stringifyWellFormed(parsed.data);
+    // Public admission rejects invalid bytes, conflicting paths and missing
+    // mutation preconditions before the operation is durably recorded.
+    // Browser execution independently revalidates current file state.
+    if (tool === 'write') {
+      const args = parsed.data as z.infer<typeof filesystemV2Schemas.write>;
+      if ('files' in args) preflightBatchMutation({tool:'write',args});
+      else if (args.mode === 'chunk') base64Length(args.data);
+    } else if (tool === 'delete') {
+      preflightBatchMutation({tool:'delete',args:parsed.data as z.infer<typeof filesystemV2Schemas.delete>});
+    } else if (tool === 'rename') {
+      preflightBatchMutation({tool:'rename',args:parsed.data as z.infer<typeof filesystemV2Schemas.rename>});
+    }
+  }
   if (hasEffectV2(tool, parsed.data as Record<string, unknown>) && operationKey === undefined)
     throw new ToolError('INVALID_INPUT', 'This tool requires an operationKey.');
   return {name: name as DevelopmentTool, args: parsed.data as Record<string, unknown>, delivery: delivery.data};

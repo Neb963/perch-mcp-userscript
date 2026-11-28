@@ -76,7 +76,7 @@ const encoder = new TextEncoder();
 const base64Alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
 /** Count decoded bytes and reject noncanonical padding without materializing binary input. */
-function base64Length(value: string): number {
+export function base64Length(value: string): number {
   const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
   const bodyEnd = value.length - padding;
   const tail = base64Alphabet.indexOf(value.charAt(bodyEnd - 1));
