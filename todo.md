@@ -3,6 +3,13 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### Exact-head CI closure F12/A10/A15/S10-021
+
+- `b7daa00` [offline 46141689975](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46141689975): 703 passed, 0 failed, one historical skip; typecheck, native/legacy benchmarks, package hash, Wrangler dry-run PASS.
+- Immutable public revision manifests preserve prior byte-identical source copies and block archive-address collision. Targeted old-Epoch Hold resolution, stale staged-transfer abort, and delayed manager response all have focused production-path negative regressions.
+- [R05 independent proof](docs/verification/v0.3-remediation/r05/F12-HISTORICAL-AND-MANAGER-EVIDENCE.md) promotes four previously FAIL clauses. Register 1317: PASS 86, FAIL 6, NOT_STARTED 1186, OWNER 24, CAPTURE blocked 1, superseded 14.
+- Native ordinary SQL benchmark still **187/46 >120/40**, unsaved preview pixel capability unsupported, and remaining 1186 normative clauses lack independently accepted evidence. No production tests, deployment, or merge.
+
 ### 2026-11-28 F12 integration-test fixture and R05 semantic evidence fix
 
 - The offline public-generator adapter reads provider metadata twice per independent snapshot and does two independent snapshots. Synthetic version generation must therefore advance every **four** requests, not two. The 89ac2b3 offline test correctly failed on inconsistent fake snapshots before publication; fixed the test fixture without altering the production source or weakening the check.

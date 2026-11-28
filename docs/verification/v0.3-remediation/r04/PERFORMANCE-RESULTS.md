@@ -1,3 +1,5 @@
+> **Latest benchmark cross-check (2026-11-28):** Exact code `b7daa005b6b3a4e6166a2ac97159cb708a402c29` (offline [CI 46141689975](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46141689975)) retains **187 read/46 write native**, **249/76 legacy** over the identical five-stage lifecycle. The ≤120/40 native objective remains unmet by 67 read rows and 6 written rows. Earlier baselines below are preserved for comparison.
+
 > **Newer verified native/legacy measurement (2026-11-28):** Exact commit `5c045bc74b9be3c5c6bb970a6f0934d5a6cc7c88`, [run 46140138366](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46140138366), is **187 SQL reads / 46 writes native** and **249 / 76 legacy** across the identical five-stage lifecycle. Both remain above the native ≤120/40 objective. Historical tables below intentionally preserve their earlier source SHA and numbers; do not treat them as current.
 
 # R04 measured Cloudflare cost and specification targets
