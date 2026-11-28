@@ -48,6 +48,12 @@ F10 status semantics: stale heartbeat is not verified source. Registry detail mu
 - Remaining: F06 conservative historical storage reclamation, actual preview pixels feasibility, all remaining A01–A34 matrix entries, full R04 performance and R05 final exact-head qualification. No unfinished row is PASS.
 R05 first exact-head CI qualification at `42ab329` [run 46097599704](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46097599704) succeeded: 686 tests passed, zero failed, one skipped, both offline cost paths, inventory generation, release build/hash check and Wrangler dry-run. Inventory has 1,317 distinct clauses: 54 PASS, 1,196 NOT_STARTED, 28 FAIL, 24 DEFERRED_OWNER, 1 BLOCKED_FEASIBILITY and 14 SUPERSEDED; the strict release gate fails by design. The artifact initially stamped synthetic PR merge `GITHUB_SHA`; next checkpoint corrects provenance to the checked-out source SHA and tree, enforcing expected PR head in CI.
 
+### R04 measured 34657b7 result and batching guidance
+
+- Exact-head native/legacy benchmark [46105833686](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46105833686): **193/57 native**, **246/85 legacy** for equivalent full ordinary lifecycle; native admission stats consolidated one read (194→193). The objective is *Strive <=120/40* (original spec §8.1), not a waiver of mandatory safe replay/revocation/recovery.
+- Ten heterogeneous separate native Gateway lifecycles consumed 2,130 reads / 550 writes; one synthetic ten-step batch lifecycle consumed 233 / 57, reductions 89.1%/89.6%. Browser nested effects were not executed in this benchmark, so runtime effect cost remains unverified.
+- Update packaged agent knowledge to prefer correctly scoped, fully preflighted 1–32-step batches and explicit per-step receipts, keeping Save/POST, stale dependent actions and unknown effects separate. This operationally reduces free-tier overhead without speculative durability redesign.
+- Further 73-read/17-write difference requires substantial Registry/Workspace persistence/index changes. Do not drop independent canonical receipts or indexes simply to satisfy the aspirational metric; design additive, reversible migration and prove full fault coverage before treating a structural rewrite as ready.
 ### R04 native atomic admission caps snapshot
 
 - `dfdbc6c` native full read lifecycle measured **194 SQL reads / 57 writes**; exact v2 terminal reply removed five global-expiry read rows and retained late-observation UNKNOWN outcome. Native and legacy tests passed.

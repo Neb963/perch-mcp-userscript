@@ -1,6 +1,6 @@
 # R04 measured Cloudflare cost and specification targets
 
-**Evidence version**: exact clean CI head `e742f091d574a894c7bc07badb2ed61a53b3c176`, offline run [46095386706](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46095386706), artifact `perch-mcp-remediation-cost-evidence` (native/legacy JSON, uploaded independently before build). SourceDirty=false for both. Miniflare/local SDK only; browser execution was a synthetic terminal receipt, never real Perchance.
+**Current evidence**: exact clean CI head `34657b7a7795c4fad9e28787f522711ce33a673e`, offline run [46105833686](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46105833686), artifact `perch-mcp-remediation-cost-evidence` (native/legacy JSON, uploaded independently before build). SourceDirty=false for both. Miniflare/local SDK only; browser execution was a synthetic terminal receipt, never real Perchance. The original [e742f091 baseline](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46095386706) is preserved.
 
 ## Comparable measured lifecycles
 
@@ -8,26 +8,28 @@ All SQL rows count Registry + Workspace. Worker/DO request counts include the co
 
 | Workload | Native SQL reads | Native SQL writes | Legacy reads | Legacy writes |
 | --- | ---: | ---: | ---: | ---: |
-| One read operation (admit/poll/running/terminal/status) | 225 | 57 | 280 | 85 |
-| Ten separate file writes | 2,660 | 570 | 3,260 | 840 |
-| One ten-file write | 266 | 57 | 326 | 84 |
-| Ten separate mixed read/write tool operations | 2,485 | 554 | 3,040 | 820 |
-| One ten-action mixed batch | 266 | 57 | 326 | 84 |
+| One read operation (admit/poll/running/terminal/status) | 193 | 57 | 246 | 85 |
+| Ten separate file writes | 2,330 | 570 | 2,910 | 840 |
+| One ten-file write | 233 | 57 | 291 | 84 |
+| Ten separate mixed read/write tool operations | 2,130 | 550 | 2,695 | 820 |
+| One ten-action mixed batch | 233 | 57 | 291 | 84 |
 
-Ten-file batching reduces native SQL reads/writes by **90.0%**. Heterogeneous *gateway lifecycle only* batching reduces native reads by **89.3%**, writes by **89.7%**. A synthetic browser did not actually execute the nested read/write/preview actions: no claim is made about real DOM or native source I/O, memory or latency.
+Ten separate writes versus one grouped ten-file write reduce native SQL rows by **90.0%** (2,330→233 reads; 570→57 writes). Ten heterogeneous actions within one **synthetic Gateway lifecycle** reduce native read rows by **89.1%** (2,130→233) and write rows by **89.6%** (550→57). A synthetic browser did not execute nested native file or DOM actions: do not treat the estimate as real provider effect overhead or a quota guarantee.
 
-**Normative target MISS**: Ordinary native lifecycle 225 reads/57 writes remains above suggested target <=120/40. Previous baseline v0.2 native 177–182/51–52. v0.3 conformance incurs additional exact Connector/Grant/Target and durable receipts. The remaining gap is **105 reads and 17 writes per complete operation**, with safety invariants intact.
+**Aspirational target MISS:** Ordinary native lifecycle **193 reads / 57 writes** remains above the specification's *Strive ≤120/40* objective (original v0.2 also unmet). The original v0.3 baseline was 225/57; verified successive optimizations removed 32 reads (14.2%) without removing fresh Grant/Target, durable operation receipts, retry evidence, or late-result revocation. The remaining difference is **73 reads and 17 writes per full lifecycle**. The document expressly says preserve correctness and disclose misses; this target is not authorization to weaken a hard safety invariant.
 
 ### Per-stage native lifecycle
 
 | Stage | Registry reads / writes | Workspace reads / writes | Worker requests |
 | --- | --- | --- | ---: |
-| MCP admission | 24 / 0 | 26 / 13 | 1 |
-| Browser poll/dispatch | 8 / 3 | 45 / 6 | 1 |
-| Browser running acknowledgment | 0 / 0 | 20 / 1 | 1 |
-| Terminal acknowledgment and Registry projection | 34 / 24 | 32 / 10 | 1 |
-| Exact scoped operation_status | 31 / 0 | 5 / 0 | 1 |
-| **Total** | **97 / 27** | **128 / 30** | **5** |
+| MCP admission | Included below | Included below | 1 |
+| Browser poll/dispatch | Included below | Included below | 1 |
+| Browser running acknowledgment | Included below | Included below | 1 |
+| Terminal acknowledgment and Registry projection | Included below | Included below | 1 |
+| Exact scoped operation_status | Included below | Included below | 1 |
+| **Total** | **Combined: 193 reads / 27 writes** | **Combined: 30 writes** | **5** |
+
+Per-stage combined measured reads/writes: admission **43/13**, poll/dispatch **53/9**, RUNNING **15/1**, terminal **59/34**, status **23/0**. Full total **193/57**. Historical provider-by-DO stage splits (97/27 Registry, 128/30 Workspace) were measured at the original 225/57 baseline and must not be mixed with new per-stage totals.
 
 Terminal and dispatch persistence dominate SQL writes. Status point lookup retains the old Workspace-specific <=5 SQL reads, but required Registry scope authorization adds 31 reads. It is unsafe to omit fresh Grant/revocation, operation receipts or late-result ACL to reach numerical targets. Optimizations must prove effect safety across fail/retry/rebind and use equal workload denominators.
 
@@ -45,8 +47,8 @@ Covered: Worker requests, DO requests, measured SQL cursor rows read/written, al
 
 ### Release qualification
 
-- F13.01 SQL-read target **FAIL** at 225>120.
-- F13.02 SQL-write target **FAIL** at 57>40.
+- F13.01 suggested SQL-read objective **UNMET** at 193>120.
+- F13.02 suggested SQL-write objective **UNMET** at 57>40.
 - 10-write amortization **PASS** under the same v2 measured semantics.
 - Mixed gateway-only batch SQL reduction **PASS** for the measured synthetic case; complete native workload still requires separate qualification.
 - Capacity/free-tier forecasts are models, not billable usage guarantees.
