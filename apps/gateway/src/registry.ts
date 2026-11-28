@@ -1606,7 +1606,13 @@ export class Registry {
       throw new ApiError('UPGRADE_REQUIRED', 'Connector authority is unavailable.', 409);
     if (!props || props.contractVersion !== 2)
       throw new ApiError('AUTH_REQUIRED', 'A v2 Grant is required.', 401);
-    const grant = this.db.get<GrantRecord | undefined>('grant/' + id(props.grantId));
+    // Read Grant and the claimed Connector together, then verify the exact
+    // signed owner relationship. The combined read is fresh per authorization,
+    // never cached across requests or asynchronous awaits.
+    const grantKey='grant/' + id(props.grantId);
+    const agentKey='agent/' + id(props.agentId);
+    const authority=this.db.getMany<GrantRecord|AgentRecord>([grantKey,agentKey]);
+    const grant=authority.get(grantKey) as GrantRecord|undefined;
     if (!grant || grant.contractVersion !== 2 || !grantIsActive(grant) ||
         grant.agentId !== props.agentId || grant.agentId !== b.agentId ||
         grant.credentialEpoch !== core.credentialEpoch || grant.credentialEpoch !== props.credentialEpoch ||
@@ -1616,7 +1622,8 @@ export class Registry {
         props.workspaceId !== '' || props.bindingRevision !== 0 ||
         grant.workspaceId !== '' || grant.bindingRevision !== 0)
       throw new ApiError('REVOKED', 'Connector Grant is unavailable.', 403);
-    const agent = this.getAgent(grant.agentId);
+    const agent=authority.get(agentKey) as AgentRecord|undefined;
+    if (!agent) throw new ApiError('NOT_FOUND', 'Agent does not exist.', 404);
     if (agent.contractVersion !== 2 || agent.endpoint !== grant.audience ||
         agent.endpoint !== core.issuer + '/mcp/' + agent.id)
       throw new ApiError('REVOKED', 'Connector Grant is unavailable.', 403);

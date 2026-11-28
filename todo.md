@@ -30,6 +30,12 @@ The 3fac671 manager release passed strict typecheck and 667/670 tests in offline
 
 F10 status semantics: stale heartbeat is not verified source. Registry detail must explicitly report unverified SourceRevision/LocalRevision/PreviewRevision/SavedRevision, effective tool permissions, unsupported pixel capture and scoped blockers without reading source. Native generator_info must return reasoned revision objects without implicit verification. A focused local-workerd test exercises a READ_SOURCE-only Connector, unbound discovery, bound Target detail, unauthorized write capability and explicit unavailable verified-source path. Verification pending exact-head CI.
 
+### R04 canonical multi-key authorization read (2026-11-28)
+
+- Exact-head benchmark 34657b7 / run 46105833686 still measures 193 SQL rows read and 57 written per native five-stage operation, target strive <=120/40. Do not silently alter numerator/denominator.
+- Add a bounded getMany read to SqlRecords, using one prepared SQLite IN query with 1–8 unique keys, ordered chunk assembly and corruption failure, no source, secrets or SQL string interpolation. The canonical maps exist only in the current function invocation.
+- V2 authenticateConnector reads fresh Grant and *claimed* Connector candidates in one SELECT, then executes unchanged owner, credentialEpoch, audience, suspension, permission-ceiling and revocation checks. Identity is never accepted merely because a requested candidate row exists. Existing v1 reads are unchanged.
+- Verify updated suite and exact-head five-stage/legacy synthetic workload before accepting any reduction. If Cloudflare query plan reads more rows or changes revocation semantics, revert the optimization; it is a reversible query-only change.
 ### R04 scoped admission and cost plan
 
 1. Correct v2 `execute_js` admission: local broker reads/write staging are not 1,000 nested remote child RPCs. Preserve v1 estimate, strict conservative positive reserves, exact epoch/transaction state and no weakening of admission accounting. Add v2 batch 1–32 cost bounds and rollover tests.
