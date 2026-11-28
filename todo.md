@@ -1,10 +1,11 @@
 # Implementation ledger
 
-## W2B — native admission expiration fast-path experiment (CI PENDING)
+## W2B — admission expiration fast-path (REJECTED AND REVERTED)
 
-- Hypothesis: native `/internal/admit` routinely invokes `expire()` even though no operation deadline, retention excess, historical maintenance item or dirty migration row is due. The original expiration engine issues multiple bounded index/stat lookups and can be skipped only if a single synchronous SQL predicate proves that the canonical state is clean.
-- Added `Workspace.nativeAdmissionMaintenanceDue` to check operation and maintenance deadlines, maintenance dirty/preparation and retention excess, without an `await`. True/unknown/legacy paths retain the full `expire()` transaction. No idempotency, lease, Grant/Target, cancellation, outbox or uncertain-effect handling was changed.
-- **Not yet verified**. Compare identical native and legacy five-stage benchmark to **180/44** and **244/74**; check deadline/alarm, interrupted migration, revocation and result retention tests. Revert if there is no concrete row saving or any safety regression.
+- [Exact-head offline CI 46159986488](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46159986488) passed typecheck and offline tests and measured identical native lifecycle **181 reads / 44 writes**, versus R11 baseline **180/44**; legacy unchanged at **244/74**. Admission was **45/10** rather than **44/10**; all other stages unchanged.
+- The native-only indexed maintenance shortcut incurred one extra read and therefore cannot justify the extra conditional runtime path. **Removed the new method and restored original full admission cleanup**; original revision-gating, historical recovery and deadlines remain unchanged.
+- [R13 rejection report](docs/verification/v0.3-remediation/r13/SQL-EXPERIMENT-NEGATIVE.md). Do not retry another version of the same admission expiration shortcut absent a measured counterexample. Next measurable structural target: Registry terminal/read amplification and physical write/index schema. Native SQL target remains unmet.
+
 
 ## W4 — exact development catalog and batching input qualification (OFFLINE VERIFIED)
 

@@ -343,25 +343,6 @@ export class Workspace {
       /* Persistent terminal rows remain the outbox for the next request/alarm. */
     }
   }
-  /** Native admission needs cleanup only if a canonical deadline is due,
-   * capacity retention is full, or an unprepared historical maintenance row
-   * may hide a deadline. The query is read-only; a positive result runs the
-   * original full expiration transaction unchanged. Unknown state fails
-   * closed instead of skipping maintenance. */
-  private nativeAdmissionMaintenanceDue(): boolean {
-    if (this.operations.migrating || this.mediaPreparing) return true;
-    const now=Date.now();
-    const row=this.db.query<{due:number}>(`SELECT CASE WHEN
-      EXISTS(SELECT 1 FROM operation_native_v2 WHERE due IS NOT NULL AND due<=? LIMIT 1)
-      OR EXISTS(SELECT 1 FROM workspace_maintenance_v2 WHERE due IS NOT NULL AND due<=? LIMIT 1)
-      OR EXISTS(SELECT 1 FROM workspace_maintenance_dirty_v2 LIMIT 1)
-      OR EXISTS(SELECT 1 FROM workspace_maintenance_prepare_v2 WHERE complete=0 LIMIT 1)
-      OR EXISTS(SELECT 1 FROM operation_native_stats_v2 WHERE id=1 AND eligible>1000)
-      THEN 1 ELSE 0 END AS due`,now,now)[0];
-    if (!row || (row.due!==0 && row.due!==1))
-      throw new ApiError('GATEWAY_DEGRADED','Native maintenance deadline authority is unavailable.',503);
-    return row.due===1;
-  }
   private expire(): void {
     this.db.transaction(() => {
       const now = Date.now();
@@ -723,13 +704,7 @@ export class Workspace {
       return json(result);
     }
     if (path.startsWith("/internal/") && !["/internal/status", "/internal/cancel"].includes(path) &&
-        (path!=="/internal/recovery"||this.operations.journalReady)) {
-      // Only native v2 admission may take the conservative read-only gate.
-      // All legacy, recovery and other internal entrypoints preserve full
-      // synchronous cleanup. An expired/dirty/full state runs it unchanged.
-      if (path!=="/internal/admit" || !this.operations.native ||
-          this.nativeAdmissionMaintenanceDue()) this.expire();
-    }
+        (path!=="/internal/recovery"||this.operations.journalReady)) this.expire();
     if (path === '/internal/settle-transition') {
       if (!this.operations.journalReady)
         throw new ApiError('TRANSITION_BLOCKED', 'Operation journal is preparing its authority.', 409);
