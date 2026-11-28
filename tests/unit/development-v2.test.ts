@@ -226,6 +226,7 @@ test('S03-028/029 selected local read bounds, ranges, consistency and READ_SOURC
   ];
   assert.equal(selected.length,64);
   const target=f.context.envelope.target;
+  const hash='a'.repeat(64);
   const accepted=parseDevelopmentCall('read',{target,files:selected,expectedLocalRevision:correctRevision});
   assert.equal((accepted.args.files as unknown[]).length,64);
   const result=await executeDevelopment({...f.context,envelope:{...f.context.envelope,args:accepted.args}})
@@ -243,7 +244,7 @@ test('S03-028/029 selected local read bounds, ranges, consistency and READ_SOURC
   }}}) as {files:{content:string}[]};
   assert.match(line.files[0]?.content??'',/^beta/);
   assert.doesNotMatch(line.files[0]?.content??'',/alpha/);
-  assert.throws(()=>parseDevelopmentCall('read',{target,files:[...selected,selected[0]]}),
+  assert.throws(()=>parseDevelopmentCall('read',{target,files:[...selected,{path:'scratch/extra',encoding:'utf8'}]}),
     (error:unknown)=>error instanceof ToolError);
   f.context.envelope.args={files:[{path:'scratch/input',encoding:'utf8'}]};
   f.context.envelope.permissions=['WRITE_SOURCE'];
