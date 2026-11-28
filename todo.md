@@ -3,6 +3,12 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### 2026-11-28 exact A01 and canonical-integrity qualification
+
+- Exact implementation source `0c4a44e9c1006f329f2efe3cf9813a712c1c4425`, [CI 46147393916](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46147393916): **708 passed, zero failed, one historical skip**; complete offline build, inventory, hashes and Wrangler dry-run. Native 187/44, legacy 251/74; SQL target FAIL remains. All eight downloaded hashes and TXT/JS identity independently verified.
+- [A01 direct evidence](docs/verification/v0.3-remediation/r05/A01-DISCOVERY-QUALIFICATION.md) records actual production-route test of exact three-Connector owned discovery, no foreign record reads or Workspace lookup, 50-row bounded pagination and stale cursor rejection. Five rows promoted to PASS; current 1,317: PASS 93, FAIL 4, NOT_STARTED 1,181, OWNER 24, BLOCKED 1, SUPERSEDED 14. This is not proof of the other clauses or full release eligibility.
+- Evidence-only commit records the already verified code SHA, not a self-referential artifact SHA. No live action or deployment. No authorization or durable receipt weakening.
+
 ### Fresh Registry index benchmark; canonical integrity and A01 evidence
 
 - `ec4b9fd` [offline CI 46147027731](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46147027731) passes all steps. Native five-stage workerd measurement is **187 reads / 44 writes** versus 187/46 baseline (terminal 56/25 rather than 56/27). Legacy is 251/74 versus 249/76; the fresh-only layout trades two additional legacy reads for two fewer writes. Existing databases retain their original index; no migration. Native objective remains unmet.

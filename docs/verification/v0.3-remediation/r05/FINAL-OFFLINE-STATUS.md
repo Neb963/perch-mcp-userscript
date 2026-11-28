@@ -1,5 +1,11 @@
 # R05 — Offline takeover exit, exact-head evidence and unresolved gates
 
+## 2026-11-28 continuation update (supersedes earlier numeric status below)
+
+**Verified implementation source:** `0c4a44e9c1006f329f2efe3cf9813a712c1c4425`; tree `6346f68e81e0f2fa1e4d8d96b03f5ff372984943`. [CI 46147393916](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46147393916): **708 passed, 0 failed, 1 historical skip**; all workflow steps success including exact artifact build/hash checks and nondeployment Wrangler dry-run. All eight downloaded checksums independently matched. Installer TXT/JS byte-identical, SHA-256 `93685686ff9990058fbed4014955cd67d2c3018e1d7186b114ca873f61e4e70e`; candidate ZIP `294d1ed10491908a005424c76657847dd7acd790b82c376cb865f3ed4a158bba`. Installer runtime bytes are unchanged from the previous synthetic UI evidence, which remains historical and not native acceptance.
+
+Fresh partial Registry workspace indexes are directly qualified; canonical record read validation rejects missing/noncanonical parts before parsing. The exact A01 production-route test closes five acceptance rows (see [A01 evidence](A01-DISCOVERY-QUALIFICATION.md)). **Current register: 1,317 total; PASS 93, FAIL 4, NOT_STARTED 1,181, DEFERRED_OWNER 24, BLOCKED_FEASIBILITY 1, SUPERSEDED_BY_OWNER_AMENDMENT 14, IMPLEMENTED_UNVERIFIED 0.** Strict release gate remains NOT ELIGIBLE. Native lifecycle **187/44**, legacy **251/74**; SQL target remains unmet. No live access, deployment, reset or merge. The following previous checkpoint is retained for historical provenance.
+
 **Verified code and docs head:** `a736513b20d8ae44060e9454eb78e60e70c11b54`  
 **Verified source tree:** `528cdf9572d360f0a302aa18fd48415c1de94d40`  
 **CI:** [run 46143344849](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46143344849), successful: **705 unit/integration tests passed, 0 failed, 1 historical skipped**; locked installation, strict typechecking, local Workerd/Miniflare benchmark, deterministic inventory, release build/hash verification and Wrangler **dry-run only**.
