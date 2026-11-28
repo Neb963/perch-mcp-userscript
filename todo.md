@@ -1,5 +1,11 @@
 # Implementation ledger
 
+## W2B — native admission expiration fast-path experiment (CI PENDING)
+
+- Hypothesis: native `/internal/admit` routinely invokes `expire()` even though no operation deadline, retention excess, historical maintenance item or dirty migration row is due. The original expiration engine issues multiple bounded index/stat lookups and can be skipped only if a single synchronous SQL predicate proves that the canonical state is clean.
+- Added `Workspace.nativeAdmissionMaintenanceDue` to check operation and maintenance deadlines, maintenance dirty/preparation and retention excess, without an `await`. True/unknown/legacy paths retain the full `expire()` transaction. No idempotency, lease, Grant/Target, cancellation, outbox or uncertain-effect handling was changed.
+- **Not yet verified**. Compare identical native and legacy five-stage benchmark to **180/44** and **244/74**; check deadline/alarm, interrupted migration, revocation and result retention tests. Revert if there is no concrete row saving or any safety regression.
+
 ## W4 — exact development catalog and batching input qualification (OFFLINE VERIFIED)
 
 - Candidate atomic clauses: S03-011/012/014 (19-tool Workerd catalog, unavailable capture metadata, conservative read-only annotations); S03-015/021/022/023 (closed nested batch, effect operationKey, optional pure-read key and nested delivery field rejection).
