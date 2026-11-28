@@ -150,7 +150,11 @@ export class OperationStore<T extends StoredOperation> {
       this.db.query(`CREATE INDEX IF NOT EXISTS operation_native_active_v2 ON ${TABLE}(active,sequence) WHERE active=1`);
       this.db.query(`CREATE INDEX IF NOT EXISTS operation_native_recovery_v2 ON ${TABLE}(created) WHERE ${RECOVERY}`);
       this.db.query(`CREATE INDEX IF NOT EXISTS operation_native_due_v2 ON ${TABLE}(due) WHERE due IS NOT NULL`);
-      this.db.query(`CREATE INDEX IF NOT EXISTS operation_native_terminal_v2 ON ${TABLE}(terminal DESC)`);
+      // Active operations have terminal=NULL. Keep them out of the terminal
+      // ordering index so admitting/dispatching an operation cannot rewrite
+      // that B-tree before a genuine terminal transition. Existing old-index
+      // databases remain compatible; IF NOT EXISTS never replaces them.
+      this.db.query(`CREATE INDEX IF NOT EXISTS operation_native_terminal_v2 ON ${TABLE}(terminal DESC) WHERE terminal IS NOT NULL`);
       this.db.query(`CREATE INDEX IF NOT EXISTS operation_native_retention_v2 ON ${TABLE}(retention) WHERE retention IS NOT NULL`);
       for(const [event,row]of [['INSERT','NEW'],['DELETE','OLD']]as const) {
         this.db.query(`CREATE TRIGGER IF NOT EXISTS operation_migration_${event.toLowerCase()}_v2 AFTER ${event} ON records WHEN ${row}.key LIKE 'operation/%' BEGIN INSERT INTO operation_migration_dirty_v2 VALUES(${row}.key) ON CONFLICT(key) DO NOTHING; END`);

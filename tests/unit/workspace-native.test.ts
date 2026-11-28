@@ -70,3 +70,36 @@ test('incomplete phase/timestamp state blocks cutover rather than manufacturing 
     const store=new OperationStore(f.db,'native');assert.throws(()=>store.prepareStep(),/SQLITE_RECORD_CORRUPT/);assert.equal(store.blocked,true);assert.deepEqual(f.db.get('operation/incomplete'),incomplete);assert.equal(f.db.get('schema'),undefined);
   }finally{f.close();}
 });
+
+test('R04 partial terminal index excludes active rows, preserves terminal ordering and old physical schema',()=>{
+  const f=fixture();
+  try {
+    const store=new OperationStore<StoredOperation&Record<string,unknown>>(f.db,'native');
+    finish(store);
+    const ddl=f.sqlite.prepare("SELECT sql FROM sqlite_master WHERE name='operation_native_terminal_v2'").get() as {sql:string};
+    assert.match(ddl.sql,/WHERE terminal IS NOT NULL/);
+    const current={...op('partial-index'),phase:'ADMITTED',terminalAt:undefined,
+      terminalNotified:undefined,result:undefined};
+    store.put('operation/partial-index',current);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_native_v2 WHERE terminal IS NOT NULL").get()!.n,0);
+    assert.equal(store.stats().activeCount,1);
+    const running=store.get('operation/partial-index')!;
+    running.phase='RUNNING';
+    store.put('operation/partial-index',running);
+    const terminal=store.get('operation/partial-index')!;
+    terminal.phase='SUCCEEDED';
+    terminal.terminalAt=Date.now();
+    terminal.terminalNotified=true;
+    terminal.result={operationId:'partial-index',status:'SUCCEEDED',effectState:'NONE'};
+    store.put('operation/partial-index',terminal);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_native_v2 WHERE terminal IS NOT NULL").get()!.n,1);
+    assert.ok(store.lastActivityAt()>0);
+    f.sqlite.exec("DROP INDEX operation_native_terminal_v2");
+    f.sqlite.exec("CREATE INDEX operation_native_terminal_v2 ON operation_native_v2(terminal DESC)");
+    const legacyShape=new OperationStore<StoredOperation&Record<string,unknown>>(f.db,'legacy');
+    assert.equal(legacyShape.native,true);
+    assert.equal(legacyShape.get('operation/partial-index')!.phase,'SUCCEEDED');
+    legacyShape.delete('operation/partial-index');
+    assert.equal(legacyShape.lastActivityAt(),0);
+  }finally{f.close();}
+});

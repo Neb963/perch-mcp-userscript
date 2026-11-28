@@ -30,6 +30,11 @@ The 3fac671 manager release passed strict typecheck and 667/670 tests in offline
 
 F10 status semantics: stale heartbeat is not verified source. Registry detail must explicitly report unverified SourceRevision/LocalRevision/PreviewRevision/SavedRevision, effective tool permissions, unsupported pixel capture and scoped blockers without reading source. Native generator_info must return reasoned revision objects without implicit verification. A focused local-workerd test exercises a READ_SOURCE-only Connector, unbound discovery, bound Target detail, unauthorized write capability and explicit unavailable verified-source path. Verification pending exact-head CI.
 
+### R04 measured Activity savings and native terminal partial index (2026-11-28)
+
+- cacc613 exact-head CI 46110889498 succeeded. Native lifecycle now 194 reads/49 writes; legacy249/76. Removing the new-only combined Activity index reduced one write per complete native terminal and retained correctness of ordered Workspace/phase query and native readback.
+- For newly initialized native operation tables only, change operation_native_terminal_v2 from indexing NULL active rows to a partial index `WHERE terminal IS NOT NULL`. The existing lastTerminal aggregate/cleanup query explicitly filters nonnull terminal, so the same ordering/plan applies with fewer write-amplifying entries.
+- Verify ADMITTED->RUNNING->SUCCEEDED transition and native stats, durable receipt, cold reopen and compatibility with an old physical full terminal index. All historical databases retain their original index via CREATE INDEX IF NOT EXISTS. Re-measure both modes; revert if negative or ineffective.
 ### R04 measured count savings and native Activity index (2026-11-28)
 
 - Exact-head 9de5803 CI 46110662684 PASS: native 194 reads/50 writes; legacy249/76, versus prior native 194/52; verifies fresh selective Registry counts and retained UNKNOWN binding hold.
