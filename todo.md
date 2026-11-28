@@ -30,6 +30,11 @@ The 3fac671 manager release passed strict typecheck and 667/670 tests in offline
 
 F10 status semantics: stale heartbeat is not verified source. Registry detail must explicitly report unverified SourceRevision/LocalRevision/PreviewRevision/SavedRevision, effective tool permissions, unsupported pixel capture and scoped blockers without reading source. Native generator_info must return reasoned revision objects without implicit verification. A focused local-workerd test exercises a READ_SOURCE-only Connector, unbound discovery, bound Target detail, unauthorized write capability and explicit unavailable verified-source path. Verification pending exact-head CI.
 
+### R04 exact measured physical canonical storage and Registry index (2026-11-28)
+
+- Exact-head 1b053013 CI 46109926275 succeeded. A fresh canonical records WITHOUT ROWID table measured native five-stage **194 reads /54 writes**, legacy **250/80**, compared with previous rowid baseline 193/57 and 246/85. This is a three-write reduction with one additional native read; no existing DO physical schema was migrated. Keep explicit fresh-install-only qualification.
+- Follow-up measured-index hypothesis: remove redundant registry_kind_v1 secondary index on *new* RegistryIndex instances; use the canonical kind-prefixed primary key range for deterministic 100-row paging, preserving expired approval filtering and corruption checks. Existing RegistryIndex schema marker prevents unrequested index replacement. Verify EXPLAIN, 213 Grant records, approval expiry, indexed workspace Grant lookup, legacy coexisting secondary index and full external permission negatives.
+- Commit only with exact-head offline CI, compare both legacy/native SQL and repeat at 0/150/999/1000 histories as practical. Threshold 120/40 still unmet; no permission checks or durable receipts removed.
 ### R04 measured no-op fast path and fresh physical schema (2026-11-28)
 
 - ce51cf6 exact-head CI 46109712786 succeeded, but SQL rows native five-stage **193/57**, legacy **246/85**, identical to verified de350a/34657 baseline. The active-poll deadline shortcut adds complexity without measured SQL saving. Revert the Workspace source and remove its additional test before further optimization.

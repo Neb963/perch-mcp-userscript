@@ -26,7 +26,10 @@ export class RegistryIndex {
     if (tables.some(row => row.name === "registry_index_version_v1")) return;
     db.transaction(()=>{
       db.query("CREATE TABLE registry_entity_v1 (key TEXT PRIMARY KEY, kind TEXT NOT NULL, due INTEGER, expires INTEGER, workspace TEXT NOT NULL, state TEXT NOT NULL, hold INTEGER NOT NULL, revision INTEGER, endpoint TEXT) WITHOUT ROWID");
-      db.query("CREATE INDEX registry_kind_v1 ON registry_entity_v1(kind,key)");
+      // Fresh v1 indexes can use the canonical key prefix for bounded pages.
+      // The redundant kind/key index amplified every permit/terminal-notice
+      // UPSERT. Already initialized databases retain their old index until a
+      // separately authorized compatible migration; this is additive-safe.
       db.query("CREATE INDEX registry_due_v1 ON registry_entity_v1(kind,due) WHERE due IS NOT NULL");
       db.query("CREATE INDEX registry_workspace_v1 ON registry_entity_v1(kind,workspace,state,hold)");
       db.query("CREATE INDEX registry_approval_v1 ON registry_entity_v1(kind,expires,key) WHERE kind='approval'");
@@ -181,7 +184,26 @@ export class RegistryIndex {
   count(kind:Kind):number {this.sync();return this.db.query<{count:number}>("SELECT count FROM registry_counts_v1 WHERE kind=?",kind)[0]?.count??0;}
   activeGrantCount(now:number):number {this.sync();return this.db.query<{count:number}>("SELECT count(*) AS count FROM registry_entity_v1 WHERE kind='grant' AND state='active' AND (expires IS NULL OR expires>?)",now)[0]?.count??0;}
   approvalFull(now:number):boolean {this.sync();return this.db.query("SELECT key FROM registry_entity_v1 WHERE kind='approval' AND expires>? ORDER BY expires LIMIT 1 OFFSET 99",now).length>0;}
-  page(kind:Kind,offset:number,now:number):string[]{this.sync();return (kind==="approval"?this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind=? AND expires>? ORDER BY key LIMIT 100 OFFSET ?",kind,now,offset):this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind=? ORDER BY key LIMIT 100 OFFSET ?",kind,offset)).map(r=>r.key);}
+  page(kind:Kind,offset:number,now:number):string[]{
+    this.sync();
+    // Legacy Library is one canonical singleton, not a prefix namespace.
+    if(kind==="library"){
+      const singleton=this.db.query<{key:string;kind:string}>(
+        "SELECT key,kind FROM registry_entity_v1 WHERE key='library' LIMIT 1");
+      if(singleton.some(row=>row.kind!=="library"))throw new Error("SQLITE_RECORD_CORRUPT");
+      return offset===0?singleton.map(row=>row.key):[];
+    }
+    const prefix=kind+"/";
+    const rows=kind==="approval"?
+      this.db.query<{key:string;kind:string}>("SELECT key,kind FROM registry_entity_v1 WHERE key>=? AND key<? AND expires>? ORDER BY key LIMIT 100 OFFSET ?",
+        prefix,prefix+"\uffff",now,offset):
+      this.db.query<{key:string;kind:string}>("SELECT key,kind FROM registry_entity_v1 WHERE key>=? AND key<? ORDER BY key LIMIT 100 OFFSET ?",
+        prefix,prefix+"\uffff",offset);
+    // Dirty legacy writes still produce the same derived Kind as canonical
+    // key prefix. A corrupted projection never becomes a result list.
+    if(rows.some(row=>row.kind!==kind))throw new Error("SQLITE_RECORD_CORRUPT");
+    return rows.map(row=>row.key);
+  }
   grants(workspace:string):string[]{this.sync();return this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind='grant' AND workspace=? AND state='active'",workspace).map(r=>r.key);}
   bindingBlocked(workspace:string):boolean {this.sync();return !!(this.db.query("SELECT key FROM registry_entity_v1 WHERE kind='permit' AND workspace=? AND state='consumed' LIMIT 1",workspace).length||this.db.query("SELECT key FROM registry_entity_v1 WHERE kind='terminal-notice' AND workspace=? AND hold=1 LIMIT 1",workspace).length);}
   libraryRevision():number {this.sync(false,true);return this.db.query<{revision:number|null}>("SELECT revision FROM registry_entity_v1 WHERE key='library'")[0]?.revision??0;}
