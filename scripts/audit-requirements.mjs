@@ -3,6 +3,7 @@
 // evidence in the authority matrix can do that. A passing code suite is not a
 // substitute for an individually verified specification requirement.
 import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
+import {execFileSync} from 'node:child_process';
 import {dirname,resolve} from 'node:path';
 const base='docs/verification/v0.3-remediation/';
 const matrices=['SPEC-00-05.md','SPEC-06-13.md','ACCEPTANCE-TRACEABILITY.md','AUDIT-TRACEABILITY.md'];
@@ -23,6 +24,11 @@ function cells(line){
   }
   return out;
 }
+const checkedAtCommit=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+const checkedAtTree=execFileSync('git',['rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim();
+const expected=process.env.PERCH_EXPECTED_COMMIT;
+if(expected && (!/^[a-f0-9]{40}$/.test(expected) || expected!==checkedAtCommit))
+  throw new Error('R05 exact-head inventory refused: checked-out commit does not match the intended head.');
 const rows=[],badRows=[],badEvidence=[],seen=new Set();
 for(const matrix of matrices){
  const body=readFileSync(resolve(base+matrix),'utf8');
@@ -49,7 +55,7 @@ const counts=Object.fromEntries([...allowed].map(s=>[s,rows.filter(x=>x.status==
 const unresolved=rows.filter(x=>!['PASS','DEFERRED_OWNER','SUPERSEDED_BY_OWNER_AMENDMENT'].includes(x.status));
 const byPhase=Object.fromEntries([...new Set(rows.map(r=>r.phase))].sort().map(p=>[p,
   {total:rows.filter(x=>x.phase===p).length,unresolved:unresolved.filter(x=>x.phase===p).length}]));
-const report={schemaVersion:1,authority:matrices,checkedAtCommit:process.env.GITHUB_SHA??null,
+const report={schemaVersion:1,authority:matrices,checkedAtCommit,checkedAtTree,
   total:rows.length,counts,byPhase,
   releaseEligible:!badRows.length&&!badEvidence.length&&!unresolved.length,
   unresolved:unresolved.map(({id,matrix,phase,status})=>({id,matrix,phase,status})),

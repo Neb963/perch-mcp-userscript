@@ -60,6 +60,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Enumerate atomic requirements (strict release gate remains separate)
+        env:
+          # GITHUB_SHA is often the synthetic PR merge commit even when checkout
+          # explicitly selects the source head. Validate against that head.
+          PERCH_EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           node scripts/audit-requirements.mjs --out "$RUNNER_TEMP/requirement-coverage.json"
       - name: Publish atomic requirement inventory
