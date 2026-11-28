@@ -67,3 +67,34 @@ test('R04 expiry, v1 index coexistence, dirty updates and corruption retain exac
   assert.throws(()=>f.index.page('grant',0,now),/SQLITE_RECORD_CORRUPT/);
  }finally{f.close();}
 });
+
+test('R04 derived count triggers write only hot count kinds, all non-hot counts remain exact',()=>{
+  const f=fixture();
+  try {
+    const now=Date.now();
+    for(const kind of ['idempotency','workspace','agent'] as const){
+      const key=kind+'/one';
+      f.db.put(key,{id:'one',workspaceId:'w',state:'active',expires:now+60000});
+      assert.equal(f.index.count(kind),1,kind);
+      assert.deepEqual(f.db.query<{count:number}>(
+        'SELECT count FROM registry_counts_v1 WHERE kind=?',kind).map(x=>x.count),[1],kind);
+    }
+    f.db.put('permit/op-1',{workspaceId:'w',createdAt:now,epoch:1,state:'consumed'});
+    f.db.put('terminal-notice/w/op-1',{workspaceId:'w',phase:'UNKNOWN',expires:now+60000,
+      event:{workspaceId:'w',operationId:'op-1',phase:'UNKNOWN',tool:'write',timestamp:now}});
+    assert.equal(f.index.count('permit'),1);
+    assert.equal(f.index.count('terminal-notice'),1);
+    assert.deepEqual(f.db.query('SELECT count FROM registry_counts_v1 WHERE kind=?','permit'),[]);
+    assert.deepEqual(f.db.query('SELECT count FROM registry_counts_v1 WHERE kind=?','terminal-notice'),[]);
+    assert.equal(f.index.bindingBlocked('w'),true);
+    f.db.delete('permit/op-1');
+    assert.equal(f.index.bindingBlocked('w'),true,'UNKNOWN notice continues to hold a fresh bind');
+    assert.equal(f.index.count('permit'),0);
+    f.db.delete('terminal-notice/w/op-1');
+    assert.equal(f.index.bindingBlocked('w'),false);
+    assert.equal(f.index.count('terminal-notice'),0);
+    const reopened=new RegistryIndex(f.db);
+    assert.equal(reopened.count('workspace'),1);
+    assert.equal(reopened.count('terminal-notice'),0);
+  }finally{f.close();}
+});

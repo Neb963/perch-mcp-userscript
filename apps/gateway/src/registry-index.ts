@@ -4,6 +4,9 @@ import { CanonicalActivity, type ActivityStorageMode, type ActivityMigrationStat
 type Event = Record<string,unknown>;
 type Key = { key: string };
 type Kind = "approval"|"grant"|"permit"|"terminal-notice"|"idempotency"|"workspace"|"agent"|"library";
+/** Only these kinds have hot count reads. Derived counts for all others are
+ * computed on demand from indexed rows, avoiding permit/terminal write costs. */
+const COUNTED_KINDS=new Set<Kind>(["idempotency","workspace","agent"]);
 const PREFIXES = ["approval/","grant/","permit/","terminal-notice/","idempotency/","workspace/","agent/"] as const;
 const TRACKED = (row:string) => `(${PREFIXES.map(p=>`${row}.key LIKE '${p}%'`).join(" OR ")} OR ${row}.key IN ('activity','library'))`;
 const RETENTION = 7*86400000;
@@ -35,8 +38,8 @@ export class RegistryIndex {
       db.query("CREATE INDEX registry_approval_v1 ON registry_entity_v1(kind,expires,key) WHERE kind='approval'");
       db.query("CREATE TABLE registry_dirty_v1 (key TEXT PRIMARY KEY) WITHOUT ROWID");
       db.query("CREATE TABLE registry_counts_v1 (kind TEXT PRIMARY KEY, count INTEGER NOT NULL) WITHOUT ROWID");
-      db.query("CREATE TRIGGER registry_count_insert_v1 AFTER INSERT ON registry_entity_v1 BEGIN INSERT INTO registry_counts_v1 VALUES(NEW.kind,1) ON CONFLICT(kind) DO UPDATE SET count=count+1; END");
-      db.query("CREATE TRIGGER registry_count_delete_v1 AFTER DELETE ON registry_entity_v1 BEGIN UPDATE registry_counts_v1 SET count=count-1 WHERE kind=OLD.kind; END");
+      db.query("CREATE TRIGGER registry_count_insert_v1 AFTER INSERT ON registry_entity_v1 WHEN NEW.kind IN ('idempotency','workspace','agent') BEGIN INSERT INTO registry_counts_v1 VALUES(NEW.kind,1) ON CONFLICT(kind) DO UPDATE SET count=count+1; END");
+      db.query("CREATE TRIGGER registry_count_delete_v1 AFTER DELETE ON registry_entity_v1 WHEN OLD.kind IN ('idempotency','workspace','agent') BEGIN UPDATE registry_counts_v1 SET count=count-1 WHERE kind=OLD.kind; END");
       db.query("CREATE TABLE registry_activity_v1 (key TEXT PRIMARY KEY, base TEXT, notice TEXT, workspace TEXT NOT NULL, phase TEXT NOT NULL, held INTEGER NOT NULL, updated INTEGER NOT NULL) WITHOUT ROWID");
       db.query("CREATE INDEX registry_activity_order_v1 ON registry_activity_v1(held DESC,updated DESC,key)");
       db.query("CREATE INDEX registry_activity_workspace_v1 ON registry_activity_v1(workspace,held DESC,updated DESC,key)");
@@ -181,7 +184,14 @@ export class RegistryIndex {
   }
   due(kind:Kind,now:number):string[]{this.sync();return this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind=? AND due IS NOT NULL AND due<? ORDER BY due LIMIT 128",kind,now).map(r=>r.key);}
   nextDue():number|undefined {this.sync();const times=(["approval","grant","permit","terminal-notice","idempotency"] as const).map(kind=>this.db.query<{due:number}>("SELECT due FROM registry_entity_v1 WHERE kind=? AND due IS NOT NULL ORDER BY due LIMIT 1",kind)[0]?.due).filter((n):n is number=>n!==undefined);return times.length?Math.min(...times):undefined;}
-  count(kind:Kind):number {this.sync();return this.db.query<{count:number}>("SELECT count FROM registry_counts_v1 WHERE kind=?",kind)[0]?.count??0;}
+  count(kind:Kind):number {
+    this.sync();
+    if(COUNTED_KINDS.has(kind))
+      return this.db.query<{count:number}>("SELECT count FROM registry_counts_v1 WHERE kind=?",kind)[0]?.count??0;
+    // This non-hot path retains exact counts on both fresh and legacy schemas
+    // even if a previous binary tracked additional kinds in the side table.
+    return this.db.query<{count:number}>("SELECT count(*) AS count FROM registry_entity_v1 WHERE kind=?",kind)[0]?.count??0;
+  }
   activeGrantCount(now:number):number {this.sync();return this.db.query<{count:number}>("SELECT count(*) AS count FROM registry_entity_v1 WHERE kind='grant' AND state='active' AND (expires IS NULL OR expires>?)",now)[0]?.count??0;}
   approvalFull(now:number):boolean {this.sync();return this.db.query("SELECT key FROM registry_entity_v1 WHERE kind='approval' AND expires>? ORDER BY expires LIMIT 1 OFFSET 99",now).length>0;}
   page(kind:Kind,offset:number,now:number):string[]{

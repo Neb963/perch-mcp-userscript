@@ -30,6 +30,11 @@ The 3fac671 manager release passed strict typecheck and 667/670 tests in offline
 
 F10 status semantics: stale heartbeat is not verified source. Registry detail must explicitly report unverified SourceRevision/LocalRevision/PreviewRevision/SavedRevision, effective tool permissions, unsupported pixel capture and scoped blockers without reading source. Native generator_info must return reasoned revision objects without implicit verification. A focused local-workerd test exercises a READ_SOURCE-only Connector, unbound discovery, bound Target detail, unauthorized write capability and explicit unavailable verified-source path. Verification pending exact-head CI.
 
+### R04 selective derived count maintenance (2026-11-28)
+
+- Exact ad6d01a CI 46110343560 PASSED and measured native 194 reads / 52 writes, legacy 249 / 78. The omitted new-only `registry_kind_v1` index reduced two writes per complete lifecycle and preserved 100-row ordered paging, 213 Grant entries, expiry and corruption rejection.
+- Introduce a further new-only SQLite trigger optimization: registry_counts_v1 persists only kinds with hot calls (`workspace`, `agent`, `idempotency`). Permit and terminal-notice counts remain exactly computable on demand from registry_entity_v1 and no longer increment a redundant counter in the common dispatch/terminal path. Existing derived-index schema is left untouched and remains compatible.
+- Test UNKNOWN terminal-notice bind holds, permit delete, count fallback, persisted hot counts and cold reconstruction. Preserve Activity, 7d expiry and read/list pagination. Evaluate exact-head native and legacy benchmarks; if any regression occurs, revert without changing protocol semantics.
 ### R04 exact measured physical canonical storage and Registry index (2026-11-28)
 
 - Exact-head 1b053013 CI 46109926275 succeeded. A fresh canonical records WITHOUT ROWID table measured native five-stage **194 reads /54 writes**, legacy **250/80**, compared with previous rowid baseline 193/57 and 246/85. This is a three-write reduction with one additional native read; no existing DO physical schema was migrated. Keep explicit fresh-install-only qualification.
