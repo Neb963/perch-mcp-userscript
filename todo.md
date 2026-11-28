@@ -1,5 +1,13 @@
 # Implementation ledger
 
+## R10 — browser effect-boundary preflight and checkpoint reconciliation (CI PENDING)
+
+- Verified entry branch HEAD: `8d979e6c97e499bf8d43c5bc3cf4feef2b743738`; exact-head [CI 46156655650](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46156655650) passed 730/0/1. Updated stale FINISHING-STATE.md commit/CI/artifact fields.
+- Recheck standalone development tool arguments through canonical admission preflight before browser execution; reject reserved transport/delivery fields, malformed bytes, duplicate paths, and invalid mutation preconditions even after upstream admission. Preserve permission ceilings and batch host policy checks.
+- Added direct `S03-009` negative tests and one valid write in `tests/unit/development-v2.test.ts`. **Awaiting exact-head offline verification; do not promote S03-009 or claim a PASS.**
+- Next: examine exact-head CI, fix any test/type failures, qualify only with direct evidence. Continue SQL-cost structural experiments independently. No live tests, deployments, owner data modifications or merge.
+
+
 ## R09 — bounded v2 input admission (offline verified)
 
 - Exact source `2e2f5221baddf0bf404accfe66ea8c3be230c46f`; [offline CI 46156403985](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46156403985) **730 PASS, 0 FAIL, 1 historical SKIP**. Executed full pinned CI test/build/benchmark/artifact workflow; no production or native Firefox operations.

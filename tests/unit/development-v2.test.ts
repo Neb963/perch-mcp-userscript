@@ -101,6 +101,34 @@ test('S03-007/008 admission rejects excessive nesting and UTF-8 serialized bytes
   assert.equal(parseDevelopmentCall('read',{target,files:[{path:'main.pjs'}]}).name,'read');
 });
 
+test('S03-009 browser revalidates admitted standalone mutations before any effect',async()=>{
+  const file={path:'scratch/revalidated.txt',encoding:'utf8' as const,content:'safe',ifAbsent:true as const};
+  const f=await fixture('write',{files:[file]});
+  const before=(await f.vfs.localView()).files.map(row=>row.path);
+  const denied=async(args:Record<string,unknown>,code?:string)=>{
+    f.context.envelope.args=args;
+    await assert.rejects(executeDevelopment(f.context),
+      (error:unknown)=>error instanceof BrowserError&&(!code||error.code===code));
+    assert.deepEqual((await f.vfs.localView()).files.map(row=>row.path),before);
+    assert.deepEqual(f.permits,[],'Invalid admitted work must not acquire a publication permit');
+  };
+  await denied({files:[file,{...file,content:'duplicate'}]},'PATH_DENIED');
+  await denied({files:[{...file,content:'AA A',encoding:'base64'}]});
+  await denied({files:[file],target:'w2.other.1.1'},'INVALID_INPUT');
+  await denied({files:[file],operationKey:'k2.malformed'},'INVALID_INPUT');
+  await denied({files:[file],unrecognized:true},'INVALID_INPUT');
+  f.context.envelope.args={files:[file]};
+  f.context.envelope.permissions=['READ_SOURCE'];
+  await assert.rejects(executeDevelopment(f.context),
+    (error:unknown)=>error instanceof BrowserError&&error.code==='SCOPE_DENIED');
+  assert.deepEqual(f.permits,[]);
+  f.context.envelope.permissions=['READ_SOURCE','WRITE_SOURCE'];
+  const result=await executeDevelopment(f.context);
+  assert.ok(result);
+  assert.deepEqual(f.permits,['source-publication']);
+  assert.equal(new TextDecoder().decode(await (await f.vfs.localView()).read(file.path)),'safe');
+});
+
 test('100 QuickJS reads share a local read view and a denied publication leaves scratch unchanged', async () => {
   const input = {js:'let count=0; for(let i=0;i<100;i++) if(await fs.readTextFile("scratch/input")==="A") count++; return count;',
     access:{read:['scratch/input'],maxReads:100}};

@@ -1,5 +1,5 @@
 import { browserToolSchemas, developmentToolArgs, type BatchArgumentsV2, type BrowserToolArgs,
-  type BrowserToolV2, batchEvidenceReserve, batchResultBudget, hasEffectV2, preflightDevelopmentBatch, requiredPermissionsV2 } from '../../../packages/contracts/src/development-v2.js';
+  type BrowserToolV2, batchEvidenceReserve, batchResultBudget, hasEffectV2, parseDevelopmentCall, preflightDevelopmentBatch, requiredPermissionsV2 } from '../../../packages/contracts/src/development-v2.js';
 import { ToolError } from '../../../packages/contracts/src/errors.js';
 import { assertNoFilePathConflicts, pathMatchesRules } from '../../../packages/contracts/src/paths.js';
 import type { BrowserEnvelopeV2, SegmentRequest } from '../../../packages/contracts/src/operations-v2.js';
@@ -350,9 +350,19 @@ export async function executeDevelopment(context: DevelopmentContext, engine?: C
   }
   if (!Object.hasOwn(developmentToolArgs,operation.tool)) throw new BrowserError('INVALID_INPUT','Unknown v2 execution tool.');
   const tool = operation.tool as keyof typeof developmentToolArgs;
-  const validated = developmentToolArgs[tool].safeParse(operation.args);
-  if (!validated.success) throw new BrowserError('INVALID_INPUT','Invalid v2 browser tool arguments.');
-  const args = validated.data as Record<string,unknown>;
+  // Revalidate at the effect boundary even if an upstream caller admitted it.
+  // Reserved delivery fields must not be smuggled inside browser arguments.
+  if (['target','operationKey','waitMs'].some(field=>Object.hasOwn(operation.args,field)))
+    throw new BrowserError('INVALID_INPUT','Reserved delivery field in v2 browser arguments.');
+  let args:Record<string,unknown>;
+  try {
+    args = parseDevelopmentCall(tool,{
+      ...operation.args,target:operation.target,operationKey:operation.operationKey,
+    }).args;
+  } catch (error) {
+    if (error instanceof ToolError) throw new BrowserError(error.code,error.message,error.recovery);
+    throw error;
+  }
   if (operation.transferRecoveryOnly && (tool !== 'write' || (args.mode !== 'commit' && args.mode !== 'abort')))
     throw new BrowserError('SCOPE_DENIED', 'Transfer recovery may only inspect a scoped commit or abort handle.');
   if (!requiredPermissionsV2(tool,args).every(permission=>operation.permissions.some(grant=>grant===permission)))
