@@ -59,6 +59,52 @@ test('100 QuickJS reads share a local read view and a denied publication leaves 
   assert.deepEqual(denied.permits,['read-view','source-publication']);
 });
 
+test('F09 directory-scoped compute lists metadata and hydrates only requested native bytes', async () => {
+  const files = new Map(Array.from({length:100},(_,i) => ['src/file-'+i+'.txt', new Uint8Array([65+i%26])] as const));
+  const f = await fixture('execute_js', {
+    js: 'const paths=await fs.list("src"); let count=0; for(let i=0;i<100;i++) if(await fs.readTextFile("src/file-0.txt")==="A") count++; return {listed:paths.length,count};',
+    access:{read:['src/'],maxReads:101,maxBytes:1024},
+  });
+  const reads:string[][]=[];
+  const adapter=f.vfs.adapter as unknown as Record<string,unknown>;
+  adapter.listSourceMetadata=async()=>[
+    {path:'main.pjs',bytes:null,sha256:null},
+    {path:'index.html',bytes:null,sha256:null},
+    ...[...files.keys()].map(path=>({path,bytes:1,sha256:null})),
+  ];
+  adapter.readSourceView=async(paths:string[],prefixes:string[])=>{
+    assert.deepEqual(prefixes,[],'Directory permissions must not hydrate all matching source');
+    reads.push(paths.slice());
+    return new Map(paths.map(path=>[path,files.get(path)?.slice()??null]));
+  };
+  const result=await executeDevelopment(f.context,{execute:executeCompute}) as {result:unknown};
+  assert.deepEqual(result.result,{listed:100,count:100});
+  assert.deepEqual(reads,[['src/file-0.txt']]);
+  assert.deepEqual(f.permits,['read-view']);
+});
+
+test('F09 lazy native read invalidates the view after a same-size edit to a previously selected file', async () => {
+  const f=await fixture('execute_js',{
+    js:'await fs.readTextFile("src/a.txt"); await fs.readTextFile("src/b.txt"); return "unexpected";',
+    access:{read:['src/'],maxReads:3,maxBytes:1024},
+  });
+  const files=new Map([['src/a.txt',new Uint8Array([65])],['src/b.txt',new Uint8Array([66])]]);
+  const adapter=f.vfs.adapter as unknown as Record<string,unknown>;
+  adapter.listSourceMetadata=async()=>[
+    {path:'main.pjs',bytes:null,sha256:null},
+    {path:'index.html',bytes:null,sha256:null},
+    ...[...files.keys()].map(path=>({path,bytes:1,sha256:null})),
+  ];
+  adapter.readSourceView=async(paths:string[],prefixes:string[])=>{
+    assert.deepEqual(prefixes,[]);
+    if(paths.includes('src/b.txt'))files.set('src/a.txt',new Uint8Array([90]));
+    return new Map(paths.map(path=>[path,files.get(path)?.slice()??null]));
+  };
+  await assert.rejects(executeDevelopment(f.context,{execute:executeCompute}),
+    (error:unknown)=>(error as {code?:string}).code==='STALE_REVISION');
+  assert.deepEqual(f.permits,['read-view']);
+});
+
 test('Invalid batch tail has zero effects. Valid batch reports partial on a failing subsequent action.', async () => {
   const first={tool:'write',args:{files:[{path:'scratch/new',encoding:'utf8',content:'safe',ifAbsent:true}]}};
   const f=await fixture('batch',{actions:[first,{tool:'read',args:{files:[{path:'../../outside'}]}}]});
