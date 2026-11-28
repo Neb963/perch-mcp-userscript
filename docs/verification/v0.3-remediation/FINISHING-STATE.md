@@ -40,6 +40,8 @@ This is an *operational index*, not a second requirement database. Normative aut
 
 ## C. Active work and immediately executable queue
 
+**R15 active, CI pending:** Added concrete actual-browser `executeDevelopment` success and failure cases for `S03-031/033/035/037/049`, including transfer stage/commit permission changes, guarded delete/rename, metadata-only list and isolated QuickJS read. No statuses promoted pending exact-head CI. W2 180/44 and owner screenshot remain unresolved.
+
 **R14 completed direct qualification:** `S03-010`, `S03-020`, `S03-028`, `S03-029` passed typed image rejection/redaction, common wait-bound enforcement, selected 64-file browser reads/line/byte ranges and wrong READ_SOURCE denial at [`324fd2f`](https://github.com/Neb963/perch-mcp-userscript/commit/324fd2f348232b90830f8debbd1cf698e1d56fd0) / [CI 46160911551](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46160911551), **736 PASS/0 FAIL/1 historical SKIP**. [R14 evidence](r14/DIRECT-QUALIFICATION.md). Exactly four NOT_STARTED rows promoted. No screenshot, SQL or owner gate waived.
 
 **R12 completed direct qualification:** Clauses `S03-011`, `S03-012`, `S03-014`, `S03-015`, `S03-021`, `S03-022`, `S03-023` pass direct real v2 tools/list Workerd and production parser assertions on exact source [`5451c65`](https://github.com/Neb963/perch-mcp-userscript/commit/5451c65b80cc0a0b25ac9905f03c15ddd7ccdfea) / [CI 46159246081](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46159246081), 733 PASS/0 FAIL/1 SKIP. [R12 evidence](r12/DIRECT-QUALIFICATION.md). Exactly seven `NOT_STARTED` rows promoted, no other row altered. Catalog cannot capture actual preview pixels yet; screenshot feasibility remains explicitly blocked.

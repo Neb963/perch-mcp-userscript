@@ -7,6 +7,12 @@
 - **S03-028/029**: real browser executor reads exactly 64 existing selected private files, byte and line ranges, rejects 65 items, fails wrong READ_SOURCE before revealing bytes and refuses stale revision.
 - [Exact-head CI 46160911551](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46160911551) succeeded on `324fd2f`: **736 PASS, 0 FAIL, 1 historical SKIP**. Promoted exactly four directly observed clauses (S03-010, S03-020, S03-028, S03-029), [R14 direct evidence](docs/verification/v0.3-remediation/r14/DIRECT-QUALIFICATION.md). Native SQL 180/44, screenshot pixels and all owner gates unchanged.
 
+## R15 — direct capability-ceiling qualification (CI PENDING)
+
+- Test actual userscript executor `executeDevelopment` for `S03-031/033/035/037/049`: zero-byte transfer start with WRITE_SOURCE only, commit with WRITE+READ, and matching delete/rename source-digest preconditions; all denied variants must leave file revision and publication permits unchanged.
+- Test `list_files` metadata-only with READ_SOURCE, deny WRITE_SOURCE-only; QuickJS declared local read/write requires COMPUTE plus exact READ_SOURCE/WRITE_SOURCE. Include real positive filesystem effects, isolated compute and negative capability checks.
+- Verify exact-head CI and original 180/44 native benchmark. **Do not promote clauses or claim PASS before direct offline assertions succeed.** No provider or live browser operations.
+
 ## W2B — admission expiration fast-path (REJECTED AND REVERTED)
 
 - [Exact-head offline CI 46159986488](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46159986488) passed typecheck and offline tests and measured identical native lifecycle **181 reads / 44 writes**, versus R11 baseline **180/44**; legacy unchanged at **244/74**. Admission was **45/10** rather than **44/10**; all other stages unchanged.

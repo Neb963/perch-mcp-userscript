@@ -257,6 +257,81 @@ test('S03-028/029 selected local read bounds, ranges, consistency and READ_SOURC
   assert.deepEqual(f.permits,[]);
 });
 
+test('R15 guarded filesystem and compute authorization enforce exact capability ceilings',async()=>{
+  const shaA=await digest(new Uint8Array([65]));
+  const zeroSha=await digest(new Uint8Array());
+  const read=['READ_SOURCE'],write=['WRITE_SOURCE'],both=['READ_SOURCE','WRITE_SOURCE'];
+  const denied=async(tool:string,args:Record<string,unknown>,ceilings:string[])=>{
+    const f=await fixture(tool,args);
+    f.context.envelope.permissions=ceilings;
+    const original=(await f.vfs.localView()).revision.value;
+    await assert.rejects(executeDevelopment(f.context,{execute:executeCompute}),
+      (error:unknown)=>error instanceof BrowserError && error.code==='SCOPE_DENIED',
+      tool+' must fail before any filesystem/provider effect');
+    assert.equal((await f.vfs.localView()).revision.value,original);
+    assert.deepEqual(f.permits,[]);
+  };
+  const removal={paths:[{path:'scratch/input',ifSha256:shaA}]};
+  const move={moves:[{from:'scratch/input',to:'scratch/renamed',ifSha256:shaA,destination:'absent'}]};
+  for (const ceiling of [read,write]) {
+    await denied('delete',removal,ceiling);
+    await denied('rename',move,ceiling);
+  }
+  const del=await fixture('delete',removal);
+  del.context.envelope.permissions=both;
+  const removed=await executeDevelopment(del.context) as {status:string};
+  assert.equal(removed.status,'SUCCEEDED');
+  assert.ok(!(await del.vfs.localView()).files.some(f=>f.path==='scratch/input'));
+  assert.deepEqual(del.permits,['source-publication']);
+  const ren=await fixture('rename',move);
+  ren.context.envelope.permissions=both;
+  const renamed=await executeDevelopment(ren.context) as {status:string};
+  assert.equal(renamed.status,'SUCCEEDED');
+  assert.deepEqual((await ren.vfs.localView()).files.map(f=>f.path),['scratch/renamed']);
+  assert.equal(new TextDecoder().decode(await (await ren.vfs.localView()).read('scratch/renamed')),'A');
+  assert.deepEqual(ren.permits,['source-publication']);
+
+  const f=await fixture('write',{mode:'start',path:'scratch/empty-file',totalBytes:0,sha256:zeroSha,
+    encoding:'utf8',ifAbsent:true});
+  f.context.envelope.permissions=write;
+  const started=await executeDevelopment(f.context) as {transferId:string};
+  assert.match(started.transferId,/^[a-f0-9-]{36}$/);
+  assert.deepEqual(f.permits,[]);
+  assert.ok(!(await f.vfs.localView()).files.some(row=>row.path==='scratch/empty-file'),
+    'Private staging must not publish a source file');
+  f.context.envelope.args={mode:'commit',transferId:started.transferId};
+  f.context.envelope.operationId='commit-operation';
+  f.context.envelope.operationKey='k2.'+Date.now()+'.'+crypto.randomUUID();
+  await assert.rejects(executeDevelopment(f.context),
+    (error:unknown)=>error instanceof BrowserError&&error.code==='SCOPE_DENIED');
+  f.context.envelope.permissions=both;
+  const committed=await executeDevelopment(f.context) as {status:string};
+  assert.equal(committed.status,'SUCCEEDED');
+  assert.deepEqual(await (await f.vfs.localView()).read('scratch/empty-file'),new Uint8Array());
+  assert.deepEqual(f.permits,['source-publication']);
+
+  await denied('list_files',{directories:['scratch'],recursive:true},write);
+  const listing=await fixture('list_files',{directories:['scratch'],recursive:true});
+  listing.context.envelope.permissions=read;
+  const adapter=listing.vfs.adapter as unknown as Record<string,unknown>;
+  adapter.listSourceMetadata=async()=>[];
+  const metadata=await executeDevelopment(listing.context) as {files:{path:string;content?:unknown}[]};
+  assert.deepEqual(metadata.files.map(row=>row.path),['scratch/input']);
+  assert.ok(metadata.files.every(row=>!Object.hasOwn(row,'content')));
+  assert.deepEqual(listing.permits,[]);
+
+  await denied('execute_js',{js:'return await fs.readTextFile("scratch/input")',
+    access:{read:['scratch/input']}},['COMPUTE']);
+  await denied('execute_js',{js:'await fs.writeTextFile("scratch/new","x"); return true',
+    access:{write:['scratch/new']}},['COMPUTE']);
+  const computation=await fixture('execute_js',{js:'return await fs.readTextFile("scratch/input")',
+    access:{read:['scratch/input']}});
+  computation.context.envelope.permissions=['COMPUTE','READ_SOURCE'];
+  const result=await executeDevelopment(computation.context,{execute:executeCompute}) as {result:unknown};
+  assert.equal(result.result,'A');
+  assert.deepEqual(computation.permits,['read-view']);
+});
+
 test('100 QuickJS reads share a local read view and a denied publication leaves scratch unchanged', async () => {
   const input = {js:'let count=0; for(let i=0;i<100;i++) if(await fs.readTextFile("scratch/input")==="A") count++; return count;',
     access:{read:['scratch/input'],maxReads:100}};
