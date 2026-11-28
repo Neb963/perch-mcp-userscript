@@ -12,9 +12,7 @@ import { parseDevelopmentCall } from '../../packages/contracts/src/development-v
 import { issueSyntheticToken, type Harness } from '../fixtures/optimization-client.js';
 import { createCapacityHarness, type CapacityFixture } from '../integration/gateway-capacity-harness.js';
 
-// Remove the opt-in when the release-blocking baseline regressions pass.
-const skip = process.env.PERCH_REMEDIATION_EXECUTION !== '1';
-const offline = {skip, timeout: 30_000};
+const offline = {timeout: 30_000};
 const tuple = {workspaceId: 'fixture', installationId: 'inst', assignmentGeneration: 1,
   bindingGeneration: 1, epoch: 1, generatorId: '123', draftId: ''};
 const target = 'w2.fixture.1.1';
@@ -219,7 +217,7 @@ test('F04 the running browser controller ignores a mismatched cancellation and a
   assert.deepEqual(phases, ['RUNNING', 'CANCELLED']);
 });
 
-test('F02 stale destination before transfer publication leaves a safely abortable transfer', offline, async () => {
+test('F02 stale destination before transfer publication leaves a safely abortable transfer', async () => {
   const f = await nativeFixture();
   const start = await f.fs.run('write', {mode: 'start', path: 'src/asset', totalBytes: 0,
     sha256: await digest(new Uint8Array()), encoding: 'base64', ifAbsent: true}, f.scope) as {transferId: string};
@@ -240,13 +238,14 @@ test('F03 an earlier local-only Epoch Hold is discoverable from ordinary recover
     kind: 'SOURCE', paths: ['src/asset'], baseRevision: current.revision, createdAt: Date.now()});
   await assert.rejects(VirtualFileSystem.openBound(f.adapter, f.store, {...tuple, epoch: 2},
     {assertCurrent: () => {}}), errorCode('EFFECT_UNKNOWN'));
-  const transport = {request: async () => ({
-    id: tuple.workspaceId, contractVersion: 2, assignmentGeneration: 1, bindingGeneration: 1, epoch: 2,
-    binding: {generatorId: tuple.generatorId, draftId: '', slug: 'fixture', browserInstallationId: tuple.installationId},
-  })} as unknown as GatewayTransport;
+  const transport = {request: async () => { throw new Error('Gateway unavailable'); }} as unknown as GatewayTransport;
+  await f.store.set('perch:installation-id', tuple.installationId);
   const controller = new BrowserController(f.adapter, f.store, transport);
-  const recovery = await controller.localRecovery(tuple.workspaceId);
-  assert.deepEqual(recovery.holds.map(hold => hold.id), ['held']);
+  const scopes = await controller.localRecoveryScopes();
+  const scope = scopes.find(row => row.workspaceId === tuple.workspaceId && row.epoch === 1);
+  assert.ok(scope);
+  const recovery = await controller.inspectLocalRecovery(scope.id);
+  assert.deepEqual(recovery.records.map(hold => hold.id), ['journal-held']);
 });
 
 async function gatewayFixture() {
@@ -347,5 +346,76 @@ test('F05 an issued receipt survives lost admission and status responses through
     {admission: ['UNKNOWN', 'UNKNOWN', key], status: ['UNKNOWN', 'UNKNOWN', receipt.operationId]});
     const replay = await callMcp(h, f, token, 'write', {target, operationKey: key, files: [newFile('scratch/asset')]});
     assert.equal(replay.operationId, receipt.operationId);
+  } finally { await h.close(); }
+});
+
+test('F02 real SDK and workerd inspect a held transfer without a new permit or native setter', {timeout: 30_000}, async () => {
+  const {h, f, token, target} = await gatewayFixture();
+  const local = await nativeFixture();
+  let segmentCalls = 0;
+  try {
+    const execute = async (args: Record<string, unknown>, caller = token) => {
+      const operationKey = `k2.${Date.now()}.${crypto.randomUUID()}`;
+      const admitted = await callMcp(h, f, caller, 'write', {target, operationKey, ...args});
+      assert.equal(admitted.phase, 'ADMITTED', JSON.stringify(admitted));
+      const payload = await h.browser(f, 'poll', {waitMs: 0});
+      const envelope = (payload.operations as DevelopmentContext['envelope'][])[0]!;
+      assert.equal(envelope.operationId, admitted.operationId);
+      await h.browser(f, 'reply', {operationId: envelope.operationId, phase: 'RUNNING'});
+      if (envelope.transferRecoveryOnly) {
+        await assert.rejects(h.browser(f, 'segment', {operationId: envelope.operationId,
+          segment: {kind: 'source-publication', digest: await digest('fixture'), sequence: 0}}), /SCOPE_DENIED/);
+      }
+      const context: DevelopmentContext = {envelope, vfs: local.vfs, signal: new AbortController().signal,
+        assertCurrent: async () => {}, recordStep: async () => {}, additional: async () => { throw new Error('Unexpected native tool'); },
+        permit: async (kind, digestValue) => { await h.browser(f, 'segment', {operationId: envelope.operationId,
+          segment: {kind, digest: digestValue, sequence: 0}}); segmentCalls++; }};
+      let data: Record<string, unknown>;
+      try { data = await executeDevelopment(context) as Record<string, unknown>; }
+      catch (error) { const fault = error as BrowserError;
+        data = {status: 'REJECTED', effectState: 'NONE', errorCode: fault.code}; }
+      const phase = ['PARTIAL', 'UNKNOWN', 'REJECTED'].includes(String(data.status)) ? String(data.status) : 'SUCCEEDED';
+      const browserEffect = phase === 'UNKNOWN' ? 'POSSIBLE' : phase === 'PARTIAL' ? 'PARTIAL' :
+        data.effectState === 'NONE' ? 'NONE' : 'VERIFIED';
+      const result = {operationId: envelope.operationId, status: phase, effectState: browserEffect, data,
+        ...(phase === 'SUCCEEDED' ? {} : {error: {code: phase === 'UNKNOWN' ? 'EFFECT_UNKNOWN' : 'SCOPE_DENIED',
+          message: 'Synthetic transfer verification', recovery: 'Inspect the original transfer proof.', retryable: false}})};
+      await h.browser(f, 'reply', {operationId: envelope.operationId, phase, result});
+      return {envelope, data, terminal: await callMcp(h, f, caller, 'operation_status', {target, operationKey})};
+    };
+    const initial = async (path: string) => execute({mode: 'start', path, encoding: 'base64', ifAbsent: true,
+      totalBytes: 0, sha256: await digest(new Uint8Array())});
+    const first = await initial('src/asset');
+    const second = await initial('src/other');
+    const transferId = first.data.transferId;
+    local.signals.onWrite = () => { local.source.set('asset', Uint8Array.of(7)); };
+    const commit = await execute({mode: 'commit', transferId});
+    assert.equal(commit.terminal.phase, 'UNKNOWN');
+    assert.equal(commit.terminal.effectState, 'UNKNOWN');
+    assert.equal(commit.envelope.transferRecoveryOnly, undefined);
+    assert.deepEqual(local.nativeWrites, ['asset']);
+    assert.equal(segmentCalls, 1);
+    const forged = await callMcp(h, f, token, 'write', {target, operationKey: operationKey(), mode: 'abort',
+      transferId, transferRecoveryOnly: true});
+    assert.equal(forged.phase, 'REJECTED');
+    assert.equal(forged.operationId, null);
+    const readback = await execute({mode: 'abort', transferId});
+    assert.equal(readback.envelope.transferRecoveryOnly, true);
+    assert.equal(readback.terminal.phase, 'SUCCEEDED');
+    assert.equal(readback.terminal.effectState, 'NONE');
+    const retained = readback.data.transferOutcome as Record<string, unknown>;
+    assert.equal(retained.status, 'UNKNOWN');
+    assert.equal(retained.commitOperationId, commit.envelope.operationId);
+    assert.equal(retained.commitOperationKey, commit.envelope.operationKey);
+    const noNew = await execute({mode: 'commit', transferId: second.data.transferId});
+    assert.equal(noNew.envelope.transferRecoveryOnly, true);
+    assert.equal(noNew.terminal.phase, 'REJECTED');
+    assert.equal(noNew.data.errorCode, 'SCOPE_DENIED');
+    const other = await issueSyntheticToken(h, f);
+    const hidden = await execute({mode: 'abort', transferId}, other);
+    assert.equal(hidden.envelope.transferRecoveryOnly, true);
+    assert.equal(hidden.data.errorCode, 'NOT_FOUND');
+    assert.deepEqual(local.nativeWrites, ['asset']);
+    assert.equal(segmentCalls, 1);
   } finally { await h.close(); }
 });

@@ -44,14 +44,9 @@ export async function saveDevelopment(args: Record<string,unknown>, context: Dev
   if (holds.some(entry=>entry.kind==='SAVE' || entry.paths.some(path=>path==='main.pjs'||path==='index.html'||path.startsWith('src/'))))
     throw new BrowserError('EFFECT_UNKNOWN','Reconcile the previous native effect before Save.');
   const operationId = context.envelope.operationId;
-  const journalKey = context.vfs.prefix + ':journal:' + operationId;
-  if (await context.vfs.store.get(journalKey))
-    throw new BrowserError('EFFECT_UNKNOWN','This exact Save has retained local evidence.');
-  const checkpoint = await context.vfs.checkpoint('Before native Save',true);
-  const row = {id:operationId,gatewayOperationId:operationId,state:'INTENT',kind:'SAVE',
-    paths:Object.keys(intended.files),baseRevision:intended.revision,checkpointId:checkpoint.id,
-    createdAt:Date.now(),identity:intended.identity, plannedHash:intended.revision};
-  await context.vfs.store.set(journalKey,row);
+  const row = await context.vfs.prepareSaveCheckpoint({id:operationId,gatewayOperationId:operationId,
+    state:'INTENT',kind:'SAVE',paths:Object.keys(intended.files),baseRevision:intended.revision,
+    createdAt:Date.now(),identity:intended.identity,plannedHash:intended.revision});
   let dispatched = false;
   try {
     const result = await adapter.save(intended.revision,{
@@ -60,18 +55,22 @@ export async function saveDevelopment(args: Record<string,unknown>, context: Dev
         const inputDigest = await digest(JSON.stringify([context.envelope.target,intended.revision,previousSavedSnapshot.revision]));
         await context.permit('save',inputDigest);
         await context.assertCurrent();
-        await context.vfs.store.set(journalKey,{...row,state:'DISPATCHED'});
+        await context.vfs.persistSaveJournal({...row,state:'DISPATCHED'});
         dispatched = true;
       },
     });
-    await context.vfs.store.set(journalKey,{...row,state:result.status});
+    await context.vfs.persistSaveJournal({...row,state:result.status});
+    if (result.status === 'SUCCEEDED') await context.vfs.settleCheckpointRetention().catch(() => undefined);
     return {...result,sourceRevision:{value:intended.revision,verified:true},
       savedRevision:{value:result.status==='SUCCEEDED'?result.revision:null,verified:result.status==='SUCCEEDED'}};
   } catch (error) {
     const noNativeEffect = error instanceof NativeEffectNotInvoked || !dispatched;
-    const persisted = await context.vfs.store.set(journalKey,{...row,state:noNativeEffect?'REJECTED':'UNKNOWN'})
+    const persisted = await context.vfs.persistSaveJournal({...row,state:noNativeEffect?'REJECTED':'UNKNOWN'})
       .then(() => true, () => false);
-    if (noNativeEffect && persisted) throw error instanceof NativeEffectNotInvoked ? error.cause : error;
+    if (noNativeEffect && persisted) {
+      await context.vfs.settleCheckpointRetention().catch(() => undefined);
+      throw error instanceof NativeEffectNotInvoked ? error.cause : error;
+    }
     throw new BrowserError('EFFECT_UNKNOWN','Native Save could not persist a conclusive observation. Inspect independent saved source before retrying.');
   }
 }

@@ -43,6 +43,7 @@ export const browserEnvelopeV2 = z.strictObject({
   tabInstanceId: opaqueId,
   operationId: opaqueId,
   operationKey: operationKeySchema,
+  transferRecoveryOnly: z.literal(true).optional(),
   policyRevision: generation,
   permissionRevision: generation,
   deadlineMs: generation,

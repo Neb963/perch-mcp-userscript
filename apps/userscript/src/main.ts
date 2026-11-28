@@ -367,12 +367,25 @@ async function start(): Promise<void> {
       await transport.disconnect();
     },
     sourceBackup: () => controller.sourceBackup(),
+    previewSourceRestore: (archive, mode) => controller.previewSourceRestore(archive, mode),
+    listCheckpoints: scopeId => controller.listCheckpoints(scopeId),
+    exportCheckpoint: (scopeId, checkpointId) => controller.exportCheckpoint(scopeId, checkpointId),
+    setCheckpointPinned: (scopeId, checkpointId, pinned) => controller.setCheckpointPinned(scopeId, checkpointId, pinned),
+    stagePrivateFile: (path, bytes) => controller.stagePrivateFile(path, bytes),
+    listPrivateFiles: () => controller.listPrivateFiles(),
+    previewPrivateFileImport: id => controller.previewPrivateFileImport(id),
+    importPrivateFile: (id, revision) => controller.importPrivateFile(id, revision),
     reconcileOperation: (operation) => controller.reconcileOperation(operation),
     localRecovery: workspaceId => controller.localRecovery(workspaceId),
+    localRecoveryScopes: () => controller.localRecoveryScopes(),
+    inspectLocalRecovery: scopeId => controller.inspectLocalRecovery(scopeId),
+    exportLocalRecovery: scopeId => controller.exportLocalRecovery(scopeId),
+    resolveRetainedLocalHold: (scopeId, recordId, expectedInspection, evidence) =>
+      controller.resolveRetainedLocalHold(scopeId, recordId, expectedInspection, evidence),
     exportWorkspaceEvidence: workspaceId => exportWorkspaceEvidence(store,workspaceId),
     resolveLocalHold: (workspaceId,journalId,expectedRevision,evidence) =>
       controller.resolveLocalHold(workspaceId,journalId,expectedRevision,evidence),
-    restoreSourceBackup: (backup) => controller.restoreSourceBackup(backup),
+    restoreSourceBackup: (backup, intent) => controller.restoreSourceBackup(backup, intent),
     importSettings: async (settings) => {
       manualConnectionEpoch++;
       const origin = gatewayOrigin(settings.gatewayOrigin);

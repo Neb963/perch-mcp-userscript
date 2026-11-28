@@ -1,5 +1,6 @@
 import { v2Permissions, v2DefaultPermissions } from '../../../packages/contracts/src/target.js';
 import { managerStyles } from "./manager.css";
+import type { HistoricalRecoveryInspection, HistoricalRecoveryScope } from "./historical-recovery.js";
 import { validatePublicFetchUrl } from "./public-fetch.js";
 export interface ManagerIdentity {
   generatorId: string;
@@ -17,6 +18,25 @@ export interface WorkspaceTransitionReceipt {
   workspaceId: string;
   action: string;
   key: string;
+}
+interface RestoreIntent {
+  mode: "exact-binding" | "source-only";
+  expectedRevision: string;
+  archiveSha256: string;
+}
+interface LocalCheckpointSummary {
+  id: string;
+  label?: string;
+  revision: string;
+  createdAt: number;
+  pinned: boolean;
+}
+interface PrivateFileSummary {
+  id: string;
+  path: string;
+  bytes: number;
+  sha256: string;
+  state: string;
 }
 export interface ManagerClient {
   /** Adds management credential, JSON type and a fresh Idempotency-Key for writes. Never redirects credentials. */
@@ -49,6 +69,18 @@ export interface ManagerClient {
     revision:string;sourceError?:string;
     holds:Array<{id:string;kind:string;state:string;createdAt:number;paths:string[];baseRevision:string}>;
   }>;
+  localRecoveryScopes?(): Promise<HistoricalRecoveryScope[]>;
+  inspectLocalRecovery?(scopeId:string): Promise<HistoricalRecoveryInspection>;
+  exportLocalRecovery?(scopeId:string): Promise<string>;
+  resolveRetainedLocalHold?(scopeId:string,recordId:string,expectedInspection:string,evidence:string):Promise<void>;
+  listCheckpoints?(scopeId: string): Promise<LocalCheckpointSummary[]>;
+  exportCheckpoint?(scopeId: string, checkpointId: string): Promise<string>;
+  setCheckpointPinned?(scopeId: string, checkpointId: string, pinned: boolean): Promise<void>;
+  stagePrivateFile?(path: string, bytes: Uint8Array): Promise<{id:string;sha256:string;bytes:number}>;
+  listPrivateFiles?(): Promise<PrivateFileSummary[]>;
+  previewPrivateFileImport?(id: string): Promise<{expectedLocalRevision: string; path: string; bytes: number; sha256: string}>;
+  importPrivateFile?(id: string, expectedLocalRevision: string): Promise<{localRevision: string}>;
+  previewSourceRestore?(archive: unknown, mode: RestoreIntent["mode"]): Promise<RestoreIntent & {fileCount:number}>;
   resolveLocalHold?(workspaceId:string,journalId:string,expectedRevision:string,evidence:string):Promise<void>;
   localArtifacts?(): Promise<
     {
@@ -79,7 +111,7 @@ export interface ManagerClient {
   sourceBackup?(): Promise<unknown>;
   /** Separate unpublished Resource drafts from every retained document; controller excludes credentials. */
   localDrafts?(): Promise<unknown>;
-  restoreSourceBackup?(backup: unknown): Promise<void>;
+  restoreSourceBackup?(backup: unknown, intent?: RestoreIntent): Promise<void>;
   importPreview?(bytes: Uint8Array): Promise<unknown>;
   /** Supplied only when binary request handling is needed; normal JSON responses use request(). */
   exportResources?(): Promise<Uint8Array>;
@@ -495,6 +527,8 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     draftPending: Promise<void> = Promise.resolve(),
     editorDirty = false;
   let recoveryWorkspaceId = "";
+  let retainedScopeId = "";
+  let retainedPanel: { own: number; node: HTMLElement } | undefined;
   let sortField = "label",
     sortDirection = 1,
     filterValue = "";
@@ -845,6 +879,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     else {
       heading(tabLabel());
       p(message, body, "muted");
+      if (tab === "Recovery") mountRetainedRecovery(generation);
     }
   }
   async function refresh() {
@@ -2548,9 +2583,146 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   }
   /** Recovery surfaces one clear next action per state; technical evidence is
    * available under Details, never demanded as an unexplained input field. */
+  function mountRetainedRecovery(own: number) {
+    if (!client.localRecoveryScopes || !client.inspectLocalRecovery) return;
+    if (retainedPanel?.own === own) {
+      body.append(retainedPanel.node);
+      return;
+    }
+    const panel = el("section", undefined, "recovery-status");
+    retainedPanel = { own, node: panel };
+    body.append(panel);
+    const active = () => own === generation && tab === "Recovery" && opened && !destroyed;
+    async function load() {
+      panel.replaceChildren();
+      heading("Retained local evidence", panel);
+      const summary = el("p", "Reading local recovery records…", "muted");
+      panel.append(summary);
+      let scopes: HistoricalRecoveryScope[];
+      try {
+        scopes = await client.localRecoveryScopes!();
+      } catch (error) {
+        if (active()) summary.textContent = errorText(error);
+        return;
+      }
+      if (!active()) return;
+      if (!scopes.length) {
+        summary.textContent = "No retained local recovery scopes on this installation.";
+        return;
+      }
+      summary.remove();
+      const scopeSelector = select("Retained Binding and Epoch", scopes.map(scope => ({
+        value: scope.id,
+        label: `${scope.workspaceId} · Assignment ${scope.assignmentGeneration} · Binding ${scope.bindingGeneration} · Epoch ${scope.epoch}`,
+      })), scopes.some(scope => scope.id === retainedScopeId) ? retainedScopeId : scopes[0]!.id);
+      const evidence = el("div");
+      panel.append(scopeSelector.label, evidence);
+      let inspectionGeneration = 0;
+      async function inspect() {
+        const id = scopeSelector.input.value;
+        retainedScopeId = id;
+        const request = ++inspectionGeneration;
+        dismissConfirmation();
+        evidence.replaceChildren(el("p", "Reading the selected scope…"));
+        let result: HistoricalRecoveryInspection;
+        try {
+          result = await client.inspectLocalRecovery!(id);
+        } catch (error) {
+          if (active() && request === inspectionGeneration) evidence.replaceChildren(el("p", errorText(error)));
+          return;
+        }
+        if (!active() || request !== inspectionGeneration || result.scope.id !== id) return;
+        evidence.replaceChildren();
+        const {scope, revision} = result;
+        p(`Native identity digest ${scope.nativeIdentityDigest}`, evidence, "muted");
+        p(revision ? `Verified source revision ${revision}` : str(result.sourceError, "Verified source readback unavailable."), evidence, "muted");
+        if (client.exportLocalRecovery) evidence.append(button("Export selected local evidence", () =>
+          confirmAction(`Download private evidence for Workspace ${scope.workspaceId}, Assignment ${scope.assignmentGeneration}, Binding ${scope.bindingGeneration}, Epoch ${scope.epoch}?`, async () => {
+            const data = await client.exportLocalRecovery!(id);
+            if (active() && request === inspectionGeneration)
+              client.download("perch-local-recovery.json", data, "application/json");
+          })));
+        for (const row of result.records) {
+          const card = el("section", undefined, "recovery-item");
+          card.append(el("strong", `${row.kind} · ${row.state}`));
+          p(row.id, card, "muted");
+          if (row.reason) p(row.reason, card);
+          if (row.gatewayOperationId) p(`Gateway Operation ${row.gatewayOperationId}`, card, "muted");
+          const describeDigest = (value: string | null | undefined) =>
+            value === null ? "verified absent" : value ?? "unknown";
+          if (row.expectedDigest !== undefined || row.observedDigest !== undefined)
+            p(`Expected pointer digest ${describeDigest(row.expectedDigest)} · observed ${describeDigest(row.observedDigest)}`, card, "muted");
+          if (row.paths.length) {
+            const details = el("details");
+            details.append(el("summary", "File digest evidence"));
+            for (const path of row.paths) {
+              p(`${path.path} · expected ${describeDigest(path.expectedDigest)} · observed ${describeDigest(path.observedDigest)}`, details);
+            }
+            card.append(details);
+          }
+          const acknowledgement = row.acknowledgement;
+          if (acknowledgement && client.resolveRetainedLocalHold) card.append(button("Review local Hold", () =>
+            confirmAction(`Acknowledge Hold ${row.id} for Workspace ${scope.workspaceId}, Assignment ${scope.assignmentGeneration}, Binding ${scope.bindingGeneration}, Epoch ${scope.epoch} after reviewing the verified source evidence?`, async () => {
+              if (!active() || request !== inspectionGeneration) return;
+              await client.resolveRetainedLocalHold!(id, row.id, acknowledgement,
+                "Operator reviewed the exact retained local Hold and current readback.");
+              if (active() && request === inspectionGeneration) await inspect();
+            })));
+          evidence.append(card);
+        }
+        if (!result.records.length) p("No pending local Hold or staged publication in this scope.", evidence, "muted");
+        if (client.listCheckpoints) {
+          const checkpoints = el("section");
+          evidence.append(checkpoints);
+          heading("Checkpoints", checkpoints);
+          try {
+            const entries = await client.listCheckpoints(id);
+            if (!active() || request !== inspectionGeneration) return;
+            if (!entries.length) p("No checkpoints in this Epoch.", checkpoints, "muted");
+            for (const entry of entries) {
+              const checkpoint = el("section", undefined, "recovery-item");
+              checkpoint.append(el("strong", entry.label || entry.id));
+              p(`${new Date(entry.createdAt).toLocaleString()} · revision ${entry.revision} · ${entry.pinned ? "Pinned" : "Rotating retention"}`, checkpoint, "muted");
+              if (client.exportCheckpoint) checkpoint.append(button("Export checkpoint", async () => {
+                const data = await client.exportCheckpoint!(id, entry.id);
+                if (active() && request === inspectionGeneration)
+                  client.download("perch-checkpoint.json", data, "application/json");
+              }));
+              if (client.setCheckpointPinned) checkpoint.append(button(entry.pinned ? "Unpin checkpoint" : "Pin checkpoint", async () => {
+                await client.setCheckpointPinned!(id, entry.id, !entry.pinned);
+                if (active() && request === inspectionGeneration) await inspect();
+              }));
+              if (client.previewSourceRestore && client.exportCheckpoint && client.restoreSourceBackup) {
+                checkpoint.append(remoteButton("Inspect checkpoint restore", own, async () => {
+                  const archive = JSON.parse(await client.exportCheckpoint!(id, entry.id));
+                  const intent = await client.previewSourceRestore!(archive, "exact-binding");
+                  if (!active() || request !== inspectionGeneration) return;
+                  requireAuthority(own);
+                  confirmAction(`Restore ${intent.fileCount} checkpoint files in Workspace ${scope.workspaceId} at revision ${intent.expectedRevision}?`, async () => {
+                    if (!active() || request !== inspectionGeneration) return;
+                    await client.restoreSourceBackup!(archive, intent);
+                    if (active() && request === inspectionGeneration) await inspect();
+                  }, true);
+                }));
+              }
+              checkpoints.append(checkpoint);
+            }
+          } catch (error) {
+            if (active() && request === inspectionGeneration) p(errorText(error), checkpoints);
+          }
+        }
+      }
+      on(scopeSelector.input, "change", () => { void inspect(); });
+      await inspect();
+    }
+    void load().catch(error => {
+      if (active()) p(errorText(error), panel);
+    });
+  }
   async function renderRecovery(own:number){
     heading('Connection recovery');
     p('This screen checks what stopped the agent. It never repeats a Save or source edit.',body,'muted');
+    mountRetainedRecovery(own);
     if(!workspaces.items.length){p('No Workspaces are configured.',body);return;}
     if(!workspaces.items.some(w=>w.id===recoveryWorkspaceId)){
       try{
@@ -2862,6 +3034,66 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       );
     }
   }
+  function renderPrivateFiles(parent: HTMLElement) {
+    if (!client.stagePrivateFile || !client.listPrivateFiles) return;
+    const own = generation;
+    const section = el("section");
+    const inventory = el("div");
+    const file = field("Private file", "", "file");
+    const destination = field("Scratch path", "scratch/");
+    const current = () => own === generation && section.isConnected;
+    heading("Private files", section);
+    on(file.input, "change", () => {
+      const name = file.input.files?.[0]?.name;
+      if (name && destination.input.value === "scratch/") destination.input.value = "scratch/" + name;
+    });
+    async function refreshInventory() {
+      const entries = await client.listPrivateFiles!();
+      if (!current()) return;
+      inventory.replaceChildren();
+      for (const entry of entries) {
+        const row = el("div", undefined, "row");
+        const digest = el("span", `${entry.path} · ${entry.bytes} bytes · ${entry.state}`);
+        digest.title = entry.sha256;
+        row.append(digest);
+        if (client.previewPrivateFileImport && client.importPrivateFile) {
+          row.append(remoteButton("Review private import", own, async () => {
+            const intent = await client.previewPrivateFileImport!(entry.id);
+            if (!current()) return;
+            requireAuthority(own);
+            confirmAction(`Import ${intent.bytes} verified bytes to ${intent.path} in the current Binding?`, async () => {
+              const imported = await client.importPrivateFile!(entry.id, intent.expectedLocalRevision);
+              if (current()) {
+                await refreshInventory();
+                announce(`Private file imported at LocalRevision ${imported.localRevision}.`);
+              }
+            }, true);
+          }));
+        }
+        inventory.append(row);
+      }
+      if (!entries.length) p("No staged private files.", inventory, "muted");
+    }
+    actions(section, file.label, destination.label, button("Stage private file", async () => {
+      const selected = file.input.files?.[0];
+      if (!selected) throw new Error("Choose a file to stage.");
+      if (selected.size > 16 * 1024 * 1024) throw new Error("Private file exceeds the 16 MiB file limit.");
+      const path = destination.input.value;
+      const bytes = new Uint8Array(await selected.arrayBuffer());
+      if (!current()) return;
+      const staged = await client.stagePrivateFile!(path, bytes);
+      if (current()) {
+        file.input.value = "";
+        await refreshInventory();
+        announce(`Staged ${staged.bytes} bytes · SHA-256 ${staged.sha256}.`);
+      }
+    }));
+    section.append(inventory);
+    parent.append(section);
+    void refreshInventory().catch(error => {
+      if (current()) p(errorText(error), inventory);
+    });
+  }
   function renderSettings() {
     heading("Setup and Settings");
     const config = client.configuration();
@@ -3088,7 +3320,12 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       );
     }
     if (client.restoreSourceBackup) {
+      const own = generation;
       const backupInput = el("input");
+      const restoreMode = select("Restore scope", [
+        {value: "exact-binding", label: "Exact Binding with verified private files"},
+        {value: "source-only", label: "Native source only"},
+      ], "exact-binding");
       backupInput.type = "file";
       backupInput.accept = ".json";
       backupInput.hidden = true;
@@ -3102,6 +3339,21 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
               "Source backup exceeds the local 64 MiB input budget.",
             );
           const backup: unknown = JSON.parse(await file.text());
+          if (own !== generation || !backupInput.isConnected) return;
+          if (client.previewSourceRestore) {
+            requireAuthority(own);
+            const mode = restoreMode.input.value === "source-only" ? "source-only" : "exact-binding";
+            const intent = await client.previewSourceRestore(backup, mode);
+            if (own !== generation || !backupInput.isConnected) return;
+            requireAuthority(own);
+            confirmAction(
+              `Restore ${intent.fileCount} ${mode === "source-only" ? "native source" : "verified Binding"} files at revision ${intent.expectedRevision}?`,
+              async () => {
+                await client.restoreSourceBackup!(backup, intent);
+                announce("Source backup restore verified.");
+              }, true);
+            return;
+          }
           confirmAction(
             "Restore this source backup to the current native draft? The adapter must verify identity and current revision. This does not Save.",
             async () => {
@@ -3113,9 +3365,12 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       });
       body.append(
         backupInput,
-        button("Restore source backup…", () => backupInput.click()),
+        ...(client.previewSourceRestore ? [restoreMode.label,
+          markRemote(button("Restore source backup…", () => backupInput.click()))] :
+          [button("Restore source backup…", () => backupInput.click())]),
       );
     }
+    renderPrivateFiles(body);
     const settingsInput = el("input");
     settingsInput.type = "file";
     settingsInput.accept = ".json";

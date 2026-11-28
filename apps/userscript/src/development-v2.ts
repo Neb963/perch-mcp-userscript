@@ -196,6 +196,8 @@ export async function executeDevelopment(context: DevelopmentContext, engine?: C
   const validated = developmentToolArgs[tool].safeParse(operation.args);
   if (!validated.success) throw new BrowserError('INVALID_INPUT','Invalid v2 browser tool arguments.');
   const args = validated.data as Record<string,unknown>;
+  if (operation.transferRecoveryOnly && (tool !== 'write' || (args.mode !== 'commit' && args.mode !== 'abort')))
+    throw new BrowserError('SCOPE_DENIED', 'Transfer recovery may only inspect a scoped commit or abort handle.');
   if (!requiredPermissionsV2(tool,args).every(permission=>operation.permissions.some(grant=>grant===permission)))
     throw new BrowserError('SCOPE_DENIED','Operation exceeds its immutable permission ceiling.');
   if (tool === 'batch') {
@@ -213,6 +215,8 @@ export async function executeDevelopment(context: DevelopmentContext, engine?: C
   const fs = new FilesystemV2(context.vfs);
   const scope: FilesystemCallScope = {
     target:operation.target,grantId:operation.grantId,operationId:operation.operationId,
+    operationKey:operation.operationKey,
+    transferRecoveryOnly: operation.transferRecoveryOnly,
     assertCurrent:context.assertCurrent,
     authorizePublication: input=>context.permit('source-publication',input.digest),
   };

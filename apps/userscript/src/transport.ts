@@ -236,7 +236,7 @@ export class GatewayTransport {
     options?: { timeoutMs?: number; signal?: AbortSignal; idempotencyKey?: string },
   ): Promise<unknown> {
     if (
-      !/^\/api\/v1\/tab\/(claim|rebind-proof|poll|reply|release|heartbeat|ticket|permit|segment|music|music-result|image)$/.test(
+      !/^\/api\/v1\/tab\/(claim|rebind-proof|poll|reply|release|heartbeat|ticket|permit|segment|operator-restore|music|music-result|image)$/.test(
         path,
       )
     )

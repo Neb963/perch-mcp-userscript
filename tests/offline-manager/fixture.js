@@ -20,5 +20,38 @@ const client={transitionReceipts:{list:async()=>[...receipts.values()],retain:as
  if(p.endsWith('/revoke')){const x=g.find(x=>x.id===p.split('/').at(-2));x.state='revoked';return x;}
  return {ok:true};
 }};
+if (window.__fixtureLocalRecovery) {
+  const scope = {id:'fixture-historical-scope', installationId:'fixture-install', workspaceId:'w-local',
+    assignmentGeneration:4, bindingGeneration:9, epoch:2, nativeIdentityDigest:'c'.repeat(64),
+    journalCount:1, stageCount:0, checkpointCount:1};
+  const privateFiles = [];
+  fixture.downloads = [];
+  fixture.localActions = [];
+  client.localRecoveryScopes = async () => [scope];
+  client.inspectLocalRecovery = async id => {
+    fixture.localActions.push(['inspect', id]);
+    return {scope, revision:'1:historical-byte-proof',
+      records:[{id:'fixture-hold', kind:'JOURNAL', state:'UNKNOWN', paths:[
+        {path:'src/retained.js',expectedDigest:'a'.repeat(64),observedDigest:null}],
+        acknowledgement:null, reason:'Historical source matches a different retained revision.'}]};
+  };
+  client.exportLocalRecovery = async id => {
+    fixture.localActions.push(['export', id]);
+    return JSON.stringify({scope: id});
+  };
+  client.listCheckpoints = async id => {
+    if(id!==scope.id) throw new Error('Wrong checkpoint scope');
+    return [{id:'fixture-checkpoint', label:'Retained before reconnect', revision:'1:retained', createdAt:now, pinned:true}];
+  };
+  client.exportCheckpoint = async (id, checkpoint) => JSON.stringify({scope:id, checkpoint});
+  client.previewSourceRestore = async () => {throw new Error('No fresh Gateway authority');};
+  client.stagePrivateFile = async (path, bytes) => {
+    const row = {id:'fixture-staged-file', path, bytes:bytes.length, sha256:'b'.repeat(64), state:'QUARANTINED'};
+    privateFiles.push(row);
+    return row;
+  };
+  client.listPrivateFiles = async () => privateFiles.slice();
+  client.download = (name, data) => fixture.downloads.push({name, data});
+}
 fixture.mount=()=>{window.auditManager=window.__auditMountManager({synthetic:true,version:'0.3.0',client,onError:e=>console.error('fixture-manager',e)});auditManager.setStatus({connection:mode==='outage'?'degraded':'connected',workspace:'w-1',agent:'c-1',dirty:false,revision:'1:fixture'});return auditManager.open();};
 void fixture.mount();

@@ -12,11 +12,11 @@ CONTEXT = """<!doctype html><html lang="en"><title>Offline native editor</title>
 <main><h1>Synthetic native editor</h1><textarea>Untouched draft</textarea></main>"""
 
 
-def run(browser, bundle, output, verify_races):
+def run(browser, bundle, output, verify_races, verify_local_recovery):
     report = {}
     external = []
 
-    def mount(mode):
+    def mount(mode, local_recovery=False):
         page = browser.new_page(viewport={"width": 1440, "height": 900})
         page.route("**/*", lambda route: (external.append(route.request.url), route.abort()))
         page.set_content(CONTEXT)
@@ -26,6 +26,7 @@ def run(browser, bundle, output, verify_races):
             '10000000-1000-4000-8000-100000000000'.replace(/[018]/g,
               c => (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16));
         }""", mode)
+        page.evaluate("enabled => window.__fixtureLocalRecovery = enabled", local_recovery)
         page.add_script_tag(content=bundle)
         page.add_script_tag(path=FIXTURE)
         page.get_by_role("dialog").wait_for()
@@ -132,6 +133,32 @@ def run(browser, bundle, output, verify_races):
         report["lostTransitionWritesAcrossRemount"] = len(writes)
         page.close()
 
+    if verify_local_recovery:
+        page = mount("outage", local_recovery=True)
+        page.get_by_role("tab", name="Recovery", exact=True).click()
+        page.get_by_role("combobox", name="Retained Binding and Epoch").wait_for()
+        page.get_by_text("Retained before reconnect", exact=True).wait_for()
+        observed_reads = page.evaluate("fixture.requests.length")
+        page.get_by_role("button", name="Export selected local evidence").click()
+        page.get_by_role("button", name="Confirm", exact=True).click()
+        page.wait_for_function("fixture.downloads.length === 1")
+        page.get_by_role("button", name="Export checkpoint").click()
+        page.wait_for_function("fixture.downloads.length === 2")
+        assert page.get_by_role("button", name="Inspect checkpoint restore").is_disabled()
+        assert page.evaluate("fixture.requests.length") == observed_reads
+        assert page.evaluate("""fixture.downloads.every(row =>
+          JSON.parse(row.data).scope === 'fixture-historical-scope')""")
+        report["localRecoveryExportGatewayRequests"] = 0
+        page.screenshot(path=output / "offline-local-recovery.png")
+        page.get_by_role("tab", name="Settings", exact=True).click()
+        page.get_by_label("Private file", exact=True).set_input_files({
+            "name": "staged.txt", "mimeType": "text/plain", "buffer": b"synthetic source",
+        })
+        page.get_by_role("button", name="Stage private file", exact=True).click()
+        page.get_by_text("scratch/staged.txt · 16 bytes · QUARANTINED", exact=True).wait_for()
+        report["offlinePrivateFileStaged"] = True
+        page.screenshot(path=output / "offline-private-stage.png")
+        page.close()
     assert external == [], external
     report["externalRequests"] = len(external)
     return report
@@ -143,6 +170,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--chromium", default="/usr/bin/chromium")
     parser.add_argument("--expect-baseline", action="store_true")
+    parser.add_argument("--check-local-recovery", action="store_true")
     parser.add_argument("--finding", action="append", choices=("F17", "F21", "F25", "F26", "F27"))
     args = parser.parse_args()
     source = args.bundle.read_text()
@@ -154,7 +182,7 @@ def main():
         browser = playwright.chromium.launch(executable_path=args.chromium, args=[
             "--no-sandbox", "--disable-background-networking", "--disable-dev-shm-usage",
         ])
-        report = run(browser, mounted, args.output, not args.expect_baseline)
+        report = run(browser, mounted, args.output, not args.expect_baseline, args.check_local_recovery)
         browser.close()
     (args.output / "manager-report.json").write_text(json.dumps(report, indent=2) + "\n")
     stale_views = [report[name] for name in ("warm-outage-connectors", "warm-outage-recovery")]

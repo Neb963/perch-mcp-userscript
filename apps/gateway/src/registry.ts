@@ -813,6 +813,29 @@ export class Registry {
         return { proof, expiresAt: row.expiresAt };
       }));
     }
+    if (path === '/internal/operator-restore-fence') {
+      const b = await parseBody(request, 4096);
+      return json(this.db.transaction(() => {
+        const core = this.core(), w = requireAssignment(this.getWorkspace(id(b.workspaceId)));
+        this.requireDevelopmentContract(core);
+        if (!w.binding || w.transition || core.paused || w.paused || w.epoch !== b.epoch ||
+            w.bindingRevision !== b.bindingRevision || core.credentialEpoch !== b.credentialEpoch ||
+            !w.permissions.includes('WRITE_SOURCE'))
+          throw new ApiError('SCOPE_DENIED', 'Exact Operator restore authority changed.', 403);
+        const operationId = id(b.operationId);
+        if (this.db.get('terminal-notice/' + w.id + '/' + operationId) ||
+            this.db.get('resolution/' + w.id + '/' + operationId))
+          throw new ApiError('CONFLICT', 'The exact Operator restore is already terminal.', 409);
+        const key = 'reservation/' + w.binding.generatorId;
+        const current = this.db.get<{operationId: string; workspaceId: string; epoch?: number; operatorRestore?: boolean}>(key);
+        if (current?.operatorRestore && current.operationId === operationId &&
+            current.workspaceId === w.id && current.epoch === w.epoch) return {operationId};
+        if (current || b.action !== 'acquire')
+          throw new ApiError('TRANSITION_BLOCKED', 'An exact Operator restore writer reservation is unavailable.', 409);
+        this.db.put(key, {operationId, workspaceId: w.id, epoch: w.epoch, operatorRestore: true});
+        return {operationId};
+      }));
+    }
     if (path === "/internal/lease-check") {
       const b = await parseBody(request),
         c = this.core(),
@@ -906,11 +929,13 @@ export class Registry {
         const operationId = id(b.operationId);
         const key = 'permit/' + operationId;
         const parent = this.db.get<{workspaceId: string; epoch: number; state: string; target?: string;
-          grantId?: string; segments?: SegmentRequest[]} | undefined>(key);
+          grantId?: string; segments?: SegmentRequest[]; transferRecoveryOnly?: true} | undefined>(key);
         if (!parent || parent.state !== 'consumed' || parent.workspaceId !== w.id || parent.grantId !== grant.id ||
             parent.target !== b.target || parent.epoch !== w.epoch || b.epoch !== w.epoch ||
             b.bindingRevision !== w.bindingRevision)
           throw new ApiError('STALE_EPOCH', 'Segment has no current consumed parent authority.', 409);
+        if (parent.transferRecoveryOnly)
+          throw new ApiError('SCOPE_DENIED', 'Transfer recovery has no effect-capable segment authority.', 403);
         const previous = parent.segments ?? [];
         if (segment.sequence !== previous.length || previous.length >= 128)
           throw new ApiError('CONFLICT', 'Segment permit is already consumed or out of sequence.', 409);
@@ -950,14 +975,16 @@ export class Registry {
               );
             return result;
           }
+          const transferRecoveryOnly = b.transferRecoveryOnly === true && w.contractVersion === 2 && b.tool === 'write';
           this.db.put("permit/" + operationId, {
             workspaceId: w.id,
             epoch: w.epoch,
             createdAt: Date.now(),
             state: "consumed",
             ...(result.grant.contractVersion === 2 ? {target: b.target, grantId: result.grant.id} : {}),
+            ...(transferRecoveryOnly ? {transferRecoveryOnly: true} : {}),
           });
-          if (requiresGeneratorReservation(String(b.tool ?? ''), b.mutating === true) && w.binding) {
+          if (!transferRecoveryOnly && requiresGeneratorReservation(String(b.tool ?? ''), b.mutating === true) && w.binding) {
             const key = "reservation/" + w.binding.generatorId,
               existing = this.db.get<{
                 workspaceId: string;
@@ -1367,6 +1394,9 @@ export class Registry {
         return { current } as const;
       }
       this.validateTransition(current, action, input, core);
+      if (current.binding && this.db.get<{operatorRestore?: boolean}>(
+          'reservation/' + current.binding.generatorId)?.operatorRestore)
+        throw new ApiError('TRANSITION_BLOCKED', 'The exact Operator restore must settle before the Binding changes.', 409);
       if (current.binding && !input.acknowledgeDirty &&
           !(current.observation?.epoch === current.epoch && current.observation.dirty === false &&
             current.observation.observedAt + 60_000 > Date.now()))
