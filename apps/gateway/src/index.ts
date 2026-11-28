@@ -269,6 +269,31 @@ function capabilityAvailable(name: string, env: Env): boolean {
     "generate_image",
   ].includes(name);
 }
+/** A v2 tool call is authorized exactly once at the most specific Target
+ * or discovery boundary inside mcpDevelopment. All other MCP messages,
+ * including malformed calls and tools/list, require the initial Grant check.
+ * Parse only a bounded clone. An unrecognized request can never bypass the
+ * outer authority check; the inner handler still checks the current Grant,
+ * revocation, audience, permissions, and Target before accessing any data.
+ * SDK token validation is independent and always required.
+ */
+export async function isScopedDevelopmentCall(request: Request): Promise<boolean> {
+  if (request.method !== 'POST') return false;
+  if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) return false;
+  try {
+    const body = await parseBody(request.clone(), MAX_BODY);
+    if (body.jsonrpc !== '2.0' || body.method !== 'tools/call') return false;
+    const params = body.params;
+    if (!params || typeof params !== 'object' || Array.isArray(params)) return false;
+    const values = params as Record<string, unknown>;
+    if (typeof values.name !== 'string') return false;
+    parseDevelopmentCall(values.name, values.arguments ?? {});
+    return true;
+  } catch {
+    // Invalid and oversized messages retain the older, stricter precheck.
+    return false;
+  }
+}
 async function mcp(
   request: Request,
   env: Env,
@@ -276,9 +301,17 @@ async function mcp(
   agentId: string,
 ): Promise<Response> {
   if (props.contractVersion === 2) {
-    await rpc(registry(env), '/internal/authorize', {
-      props, agentId, resource: new URL('/mcp/' + agentId, request.url).href,
-    });
+    // A well-formed, validated tools/call will perform the fresh authoritative
+    // Registry check *inside* mcpDevelopment with its exact Target and needed
+    // permissions. Do not issue a redundant generic check on the same request.
+    // Unknown protocol messages, invalid calls and tools/list still fail closed
+    // under the original generic Grant check before reaching the MCP handler.
+    if (env.DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED !== 'true' ||
+        !(await isScopedDevelopmentCall(request))) {
+      await rpc(registry(env), '/internal/authorize', {
+        props, agentId, resource: new URL('/mcp/' + agentId, request.url).href,
+      });
+    }
     if (env.DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED !== 'true')
       throw new ApiError('UPGRADE_REQUIRED', 'The v2 tool catalog is disabled during rollout.', 409);
     return mcpDevelopment(request,env,props,agentId);
