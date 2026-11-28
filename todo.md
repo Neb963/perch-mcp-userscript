@@ -3,6 +3,12 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### R03 F14/F25 Resource clean-install storage short circuit
+
+- New v2 workspaces and a fresh native-mode Registry do **not** imply a legacy Resource library exists. `resourceStorageMaintenance` now checks for a legacy library before installing Resource SQL schema/triggers. Legacy/native authority markers stay mandatory if migration was previously started; existing native installations still use their original migration readers.
+- The bounded no-resource test verifies `legacy`, `prepare` and `native` initialize zero Resource tables and write no Resource SQL data when no legacy library is present. A legacy library subsequently appearing is migrated to native with exact snapshot verification. A trailing orphan part causes `RESOURCE_SNAPSHOT_CHUNK_GAP`, never silent omission.
+- Combined with existing v2 retired resource-tool denial and exact bundled no-Library UI tests, this aims to close S09-003 after exact CI. No cloud migration, deployment, or account access.
+
 ### Exact-head CI closure F12/A10/A15/S10-021
 
 - `b7daa00` [offline 46141689975](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46141689975): 703 passed, 0 failed, one historical skip; typecheck, native/legacy benchmarks, package hash, Wrangler dry-run PASS.

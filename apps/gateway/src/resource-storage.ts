@@ -312,9 +312,9 @@ function cleanupNativeContent(db: SqlRecords, generation: number): void {
 }
 /** The Registry schedules this only after authenticated writes, startup adoption or an existing migration alarm. */
 export function resourceStorageNeedsMaintenance(db: SqlRecords, mode: ResourceStorageMode): boolean {
-  if (!installed(db)) return mode !== 'legacy' && db.query("SELECT part FROM records WHERE key='library' AND part=0").length !== 0;
+  if (!installed(db)) return mode !== 'legacy' && db.query("SELECT part FROM records WHERE key='library' LIMIT 1").length !== 0;
   const s = state(db);
-  if (!s) return mode !== 'legacy' && db.query("SELECT part FROM records WHERE key='library' AND part=0").length !== 0;
+  if (!s) return mode !== 'legacy' && db.query("SELECT part FROM records WHERE key='library' LIMIT 1").length !== 0;
   if (s.phase === 'NATIVE') {
     if (legacyGeneration(db) !== s.legacyGeneration) return corrupt('LEGACY_WRITE_AFTER_RESOURCE_CUTOVER');
     return db.query('SELECT content_id FROM resource_content_gc_v2 WHERE generation=? LIMIT 1',s.generation).length !== 0;
@@ -327,7 +327,16 @@ export function resourceStorageNeedsMaintenance(db: SqlRecords, mode: ResourceSt
 /** Operator flag gates both adoption and cutover; native authority is sticky if the flag later changes. */
 export function resourceStorageMaintenance(db: SqlRecords, mode: ResourceStorageMode, maxParts = 4): ReturnType<typeof resourceStorageStatus> {
   if (!['legacy','prepare','native'].includes(mode) || !Number.isSafeInteger(maxParts) || maxParts < 1 || maxParts > 4) return corrupt('RESOURCE_STORAGE_CONFIGURATION_INVALID');
-  if (!installed(db)) { if (mode === 'legacy') return resourceStorageStatus(db); install(db); }
+  if (!installed(db)) {
+    if (mode === 'legacy') return resourceStorageStatus(db);
+    // On a fresh development-only installation no Resource library exists.
+    // Do not create obsolete migration tables and write triggers merely
+    // because another canonical storage domain uses native mode.
+    const parts = db.query<{part:number}>("SELECT part FROM records WHERE key='library' ORDER BY part LIMIT 1");
+    if (!parts.length) return resourceStorageStatus(db);
+    if (parts[0]?.part !== 0) return corrupt('RESOURCE_SNAPSHOT_CHUNK_GAP');
+    install(db);
+  }
   let attempted: Migration | undefined;
   try { db.transaction(() => {
     const currentGeneration = legacyGeneration(db);
