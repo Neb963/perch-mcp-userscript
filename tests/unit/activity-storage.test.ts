@@ -351,3 +351,34 @@ test('missing native Activity metadata cannot select the retained legacy snapsho
     } finally {f.close();}
   }
 });
+
+test("R04 canonical Activity keeps combined Workspace+phase ordering without redundant new-only index",()=>{
+ const f=fixture();
+ try {
+  const store=new CanonicalActivity(f.db);
+  const indexes=f.sqlite.prepare(
+    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='canonical_activity_v2'").all()
+    .map(row=>row.name);
+  assert.ok(!indexes.includes('canonical_activity_both_v2'));
+  assert.ok(indexes.includes('canonical_activity_workspace_v2'));
+  assert.ok(indexes.includes('canonical_activity_phase_v2'));
+  assert.ok(indexes.includes('canonical_activity_order_v2'));
+  assert.ok(indexes.includes('canonical_activity_serial_v2'));
+  const plan=f.sqlite.prepare("EXPLAIN QUERY PLAN SELECT key,base,notice,rank,sort_time FROM canonical_activity_v2 WHERE workspace=? AND phase=? ORDER BY rank,sort_time,key LIMIT 101")
+    .all('workspace-a','UNKNOWN');
+  assert.ok(plan.some(row=>String(row.detail).includes('INDEX canonical_activity_')),
+    'Combined filter must retain an indexed bounded read');
+  // This fixture tests only the physical Activity query/index shape. Real
+  // migration and operator cutover remain independently verified elsewhere.
+  f.db.query("UPDATE canonical_activity_meta_v2 SET stage='NATIVE' WHERE singleton=1");
+  for(let n=0;n<200;n++)store.append(event(n,{phase:n%5===0?'UNKNOWN':'SUCCEEDED'}));
+  const scoped=all(store,1,'UNKNOWN','workspace-a');
+  assert.equal(scoped.length,20);
+  assert.deepEqual(scoped.map(row=>row.operationId),
+    Array.from({length:20},(_,i)=>200-5-10*i).map(n=>'operation-'+String(n).padStart(6,'0')));
+  assert.equal(all(store).length,200);
+  // Existing physical indexes are compatible across a code refresh.
+  f.sqlite.exec("CREATE INDEX canonical_activity_both_v2 ON canonical_activity_v2(workspace,phase,rank,sort_time,key)");
+  assert.deepEqual(all(new CanonicalActivity(f.db),1,'UNKNOWN','workspace-a'),scoped);
+ } finally {f.close();}
+});

@@ -30,6 +30,11 @@ The 3fac671 manager release passed strict typecheck and 667/670 tests in offline
 
 F10 status semantics: stale heartbeat is not verified source. Registry detail must explicitly report unverified SourceRevision/LocalRevision/PreviewRevision/SavedRevision, effective tool permissions, unsupported pixel capture and scoped blockers without reading source. Native generator_info must return reasoned revision objects without implicit verification. A focused local-workerd test exercises a READ_SOURCE-only Connector, unbound discovery, bound Target detail, unauthorized write capability and explicit unavailable verified-source path. Verification pending exact-head CI.
 
+### R04 measured count savings and native Activity index (2026-11-28)
+
+- Exact-head 9de5803 CI 46110662684 PASS: native 194 reads/50 writes; legacy249/76, versus prior native 194/52; verifies fresh selective Registry counts and retained UNKNOWN binding hold.
+- New-only canonical_activity_v2 removes the combined `(workspace,phase,rank,sort_time,key)` index; the already-present `canonical_activity_workspace_v2` covers Workspace+phase queries within 1000-entry canonical visibility window. Preserve global order, workspace-only, phase-only, serial/expiry indexes and keyset cursor revision checks. Existing databases keep the prior index.
+- Focused unit asserts index set, SQL query plan, 200 mixed workspace/phase events and exact sorted combined filters with/without historical index. Run exact-head CI and compare actual native and legacy write rows before deciding to retain.
 ### R04 selective derived count maintenance (2026-11-28)
 
 - Exact ad6d01a CI 46110343560 PASSED and measured native 194 reads / 52 writes, legacy 249 / 78. The omitted new-only `registry_kind_v1` index reduced two writes per complete lifecycle and preserved 100-row ordered paging, 213 Grant entries, expiry and corruption rejection.
