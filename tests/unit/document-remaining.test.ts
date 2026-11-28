@@ -27,7 +27,7 @@ test('S00-010 historical authority remains labeled and readable',()=>{
     ['docs/TOOLS.md','## Historical v1 tool catalog'],
     ['docs/SETUP.md','## Historical installation and operator setup for v0.1–v0.2.0'],
     ['docs/HANDOFF.md','## Historical v0.1 handoff'],
-  ]) includes(file,[heading]);
+  ] as const) includes(file,[heading]);
   includes('docs/v0.3/REMEDIATION-AUTHORITY.md',['Preserve unaffected requirements.','The original specification remains available with its original hash.']);
 });
 
