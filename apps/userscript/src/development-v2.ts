@@ -368,7 +368,7 @@ export async function executeDevelopment(context: DevelopmentContext, engine?: C
   if (!requiredPermissionsV2(tool,args).every(permission=>operation.permissions.some(grant=>grant===permission)))
     throw new BrowserError('SCOPE_DENIED','Operation exceeds its immutable permission ceiling.');
   if (tool === 'batch') {
-    const batch = validated.data as BatchArgumentsV2;
+    const batch = args as BatchArgumentsV2;
     const approvedHosts = batch.actions.some(step => step.tool === 'fetch_url')
       ? await context.vfs.store.get<string[]>('perch:fetch-approved-hosts') ?? []
       : undefined;
