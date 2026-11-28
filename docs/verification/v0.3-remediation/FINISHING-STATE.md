@@ -40,6 +40,8 @@ This is an *operational index*, not a second requirement database. Normative aut
 
 ## C. Active work and immediately executable queue
 
+**R16 active, CI pending:** Added real Workerd/OAuth original-operation selector tests `S03-056/057`, including operationKey scope, negative malformed selectors, cancellation-before-dispatch proof and dispatched RUNNING mutation UNKNOWN effect handling. Do not qualify before exact-head CI. No change to 180/44 SQL or screenshot status.
+
 **R15 completed direct qualification:** `S03-031/033/035/037/049` passed actual browser effect-boundary permission tests with matching positive/negative results, guarded transfer stage/commit, delete, rename, metadata list and QuickJS. Exact code [`1a859abc`](https://github.com/Neb963/perch-mcp-userscript/commit/1a859abcaf0787e3f35d3b29c9b0850207dab29a) passed [CI 46161586058](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46161586058), **737 PASS, 0 FAIL, 1 historical SKIP**. [R15 direct evidence](r15/DIRECT-QUALIFICATION.md). Exactly five atomic rows promoted. Native SQL 180/44 and owner screenshot remain failed.
 
 **R14 completed direct qualification:** `S03-010`, `S03-020`, `S03-028`, `S03-029` passed typed image rejection/redaction, common wait-bound enforcement, selected 64-file browser reads/line/byte ranges and wrong READ_SOURCE denial at [`324fd2f`](https://github.com/Neb963/perch-mcp-userscript/commit/324fd2f348232b90830f8debbd1cf698e1d56fd0) / [CI 46160911551](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46160911551), **736 PASS/0 FAIL/1 historical SKIP**. [R14 evidence](r14/DIRECT-QUALIFICATION.md). Exactly four NOT_STARTED rows promoted. No screenshot, SQL or owner gate waived.

@@ -7,6 +7,12 @@
 - **S03-028/029**: real browser executor reads exactly 64 existing selected private files, byte and line ranges, rejects 65 items, fails wrong READ_SOURCE before revealing bytes and refuses stale revision.
 - [Exact-head CI 46160911551](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46160911551) succeeded on `324fd2f`: **736 PASS, 0 FAIL, 1 historical SKIP**. Promoted exactly four directly observed clauses (S03-010, S03-020, S03-028, S03-029), [R14 direct evidence](docs/verification/v0.3-remediation/r14/DIRECT-QUALIFICATION.md). Native SQL 180/44, screenshot pixels and all owner gates unchanged.
 
+## R16 — original-operation selectors and cancellation uncertainty (CI PENDING)
+
+- `S03-056/057`: extend real Workerd synthetic OAuth MCP integration with operationKey and operationId selectors; reject missing/both selectors for status/cancel; enforce original Grant/Target (cross-Grant and wrong-target 404); prove status does not replay or mutate admission.
+- Demonstrate cooperative cancellation's two distinct branches: undispatched operation cancels with proven `effectState=NONE`, but an already RUNNING write reports `cancelRequested=true` and `effectState=UNKNOWN` pending a real terminal receipt. Then record a terminal UNKNOWN receipt without unsafe replay.
+- Qualify only after exact-head offline CI succeeds; no live provider or browser use. Native 180/44 budget remains a separate failed requirement.
+
 ## R15 — direct capability-ceiling qualification (VERIFIED OFFLINE)
 
 - Test actual userscript executor `executeDevelopment` for `S03-031/033/035/037/049`: zero-byte transfer start with WRITE_SOURCE only, commit with WRITE+READ, and matching delete/rename source-digest preconditions; all denied variants must leave file revision and publication permits unchanged.
