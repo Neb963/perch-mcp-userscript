@@ -1121,10 +1121,20 @@ export class Registry {
       throw new ApiError("NOT_FOUND", "Route not found.", 404);
     const hash = await digest(bearer(request));
     this.auth(hash);
-    if (path.startsWith("/api/v1/admin/resources"))
+    if (path.startsWith("/api/v1/admin/resources")) {
+      // v2 retires active Resource authoring and prevents lazy seed on fresh
+      // installations. Historical bytes remain accessible through explicit
+      // read-only export; no automatic migration, mutation or deletion.
+      if (this.core().assignmentContractVersion === 2) {
+        if (path !== "/api/v1/admin/resources/export" || request.method !== "GET")
+          throw new ApiError("UPGRADE_REQUIRED", "The legacy Resource interface is retired for v2.", 410);
+        if (this.db.get("library") === undefined && !resourceLibraryIsNative(this.db))
+          throw new ApiError("NOT_FOUND", "No historical Resource archive is stored.", 404);
+      }
       return resourceAdmin(request, this.db, () => {
         this.auth(hash);
       });
+    }
     if (request.method === "GET") return this.readAdmin(path, url);
     const expectedMethod =
       /^\/api\/v1\/admin\/(workspaces|agents|connectors)\/[^/]+$/.test(path)

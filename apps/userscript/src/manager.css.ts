@@ -19,4 +19,22 @@ export const managerStyles = `
 /* Render dense data tables as labelled, full-width rows on narrow screens.
    Avoid three 90px columns and nested horizontal scrolling. */
 @media(max-width:620px){.body table{display:block;width:100%}.body table thead{display:none}.body table tbody{display:grid;gap:9px}.body table tbody tr{display:block;min-width:0;border:1px solid #cbd5df;border-radius:4px;padding:4px 8px;background:#fff}.body table tbody td{display:grid;grid-template-columns:minmax(84px,98px) minmax(0,1fr);gap:8px;align-items:start;padding:7px 2px;min-width:0;border:0;border-bottom:1px solid #edf0f3}.body table tbody td:last-child{border-bottom:0}.body table tbody td::before{content:attr(data-label);font-size:11px;font-weight:700;color:#536273;overflow-wrap:break-word}.body table tbody td .cell-value{min-width:0;overflow-wrap:anywhere}.body table tbody td .actions{align-items:start}.body table tbody td .actions button{min-width:0}.body table tbody td details{min-width:0}.body table tbody td pre{overflow-wrap:anywhere}}
+/* v0.3 approved compact controls: one primary action and explicitly disclosed alternatives. */
+.compact-workspaces td{padding:3px 7px;vertical-align:middle}
+.compact-workspaces td p{margin:2px 0}
+.compact-workspaces td strong{font-size:12px}
+.compact-workspaces .secondary-actions{padding:2px 0;border:0;margin-top:2px}
+.compact-workspaces .secondary-actions summary{display:inline-block;font-size:11px;font-weight:600;color:var(--accent);line-height:1.25}
+.compact-workspaces .secondary-actions[open]{border-top:1px solid #d7dfe6}
+.secondary-actions{border:0;padding:2px 0}
+.secondary-actions summary{font-size:11px;font-weight:600;color:var(--accent)}
+.compact-connector{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.compact-connector p{margin:0;font-size:11px}
+.compact-connector button{white-space:nowrap}
+@media(max-width:620px){
+ .compact-workspaces tbody tr{padding:2px 8px}
+ .compact-workspaces tbody td{padding:4px 2px;grid-template-columns:minmax(70px,82px) minmax(0,1fr)}
+ .compact-workspaces .secondary-actions .row{align-items:stretch}
+ .compact-connector{align-items:start}
+}
 `;

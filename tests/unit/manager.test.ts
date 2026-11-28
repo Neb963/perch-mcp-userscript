@@ -92,44 +92,39 @@ test('setup validates origin before isolated credential prompt and never renders
     click(f.root, 'Pair installation'); await until(() => attempted === 1);
     assert.equal(prompts, 1); assert.doesNotMatch(f.root.innerHTML, /x{44}/);
 });
-test('failed Resource publish preserves edited text and durable local draft', async () => {
-    const f = fixture();
-    const delegate = f.client.request;
-    f.client.request = async (method, path, body) => { if (method === 'PUT')
-        throw new Error('Stale Resource revision'); return delegate(method, path, body); };
-    await f.handle.open('Library');
-    click(f.root, 'Test skill');
-    await until(() => !!f.root.querySelector('textarea'));
-    const area = f.root.querySelector('textarea')!;
-    area.value = '# Pending\nOperator draft';
-    area.dispatchEvent(new f.dom.window.Event('input', { bubbles: true }));
-    await tick();
-    click(f.root, 'Publish revision');
-    await until(() => /Stale Resource/.test(f.root.textContent ?? ''));
-    assert.equal(f.root.querySelector('textarea')!.value, '# Pending\nOperator draft');
-    assert.match(f.drafts.get('resource:test-skill') ?? '', /Operator draft/);
-    assert.doesNotMatch(f.root.innerHTML, /Authorization|adminCredential/);
+test('UI-LIB-01: Library authoring is absent under legacy, current and outage manager states', async () => {
+  const f=fixture();
+  await f.handle.open('Workspaces');
+  const labels=()=>[...f.root.querySelectorAll('[role=tab]')].map(n=>n.textContent);
+  assert.equal(labels().includes('Library'),false);
+  for(const target of ['Agents','Recovery','Settings'] as const) {
+    await f.handle.open(target);
+    assert.equal(labels().includes('Library'),false);
+    assert.equal([...f.root.querySelectorAll('button')].some(n=>n.textContent==='Publish revision'),false);
+  }
+  assert.equal(f.requests.some(x=>x.path.startsWith('/api/v1/admin/resources')),false);
+  await assert.rejects(f.handle.open('Library' as never),/Unknown manager tab/);
+  assert.equal(f.dom.window.document.querySelector<HTMLInputElement>('#native-editor')?.value,'untouched');
+  f.handle.destroy();
 });
-test('Resource history uses canonical restore contract and preserves metadata on publish', async () => {
-    const f = fixture();
-    await f.handle.open('Library');
-    click(f.root, 'Test skill');
-    await until(() => !!f.root.querySelector('textarea'));
-    click(f.root, 'Publish revision');
-    await until(() => f.requests.some(r => r.method === 'PUT'));
-    const request = f.requests.find(r => r.method === 'PUT')!;
-    assert.equal(request.body.expectedRevision, 1);
-    assert.equal(request.body.resource.provenance, 'Synthetic');
-    assert.equal(request.body.resource.license, 'MIT');
-    assert.deepEqual(request.body.resource.dependencies, []);
-    await until(() => !!f.root.querySelector('textarea'));
-    click(f.root, 'Revision history');
-    await until(() => f.requests.some(r => r.path.endsWith('/history')));
-    await until(() => [...f.root.querySelectorAll('button')].some(b => b.textContent === 'Restore as new revision'));
-    click(f.root, 'Restore as new revision');
-    click(f.root, 'Confirm');
-    await until(() => f.requests.some(r => r.path.endsWith('/restore')));
-    assert.deepEqual(f.requests.find(r => r.path.endsWith('/restore'))!.body, { expectedRevision: 1, historicalRevision: 1 });
+test('UI-LIB-01: historical resource archive can be exported without restoring Resource UI', async()=>{
+  const downloads: Array<{name:string,data:string|Uint8Array,mime:string}>=[];
+  const f=fixture({exportResources:async()=>new Uint8Array([80,75,3,4]),download:(name,data,mime)=>{downloads.push({name,data,mime});}});
+  const original=f.client.request;
+  f.client.request=async(method,path,body,opts)=>{
+    if(path.endsWith('/state'))return {revision:1,policyRevision:1,version:'0.3.0',assignmentContractVersion:2,libraryRevision:3};
+    if(path.endsWith('/connectors'))return {items:[],revision:1};
+    return original(method,path,body,opts);
+  };
+  await f.handle.open('Settings');
+  await until(()=>[...f.root.querySelectorAll('button')].some(x=>x.textContent==='Export legacy Resource archive'));
+  click(f.root,'Export legacy Resource archive');
+  await until(()=>downloads.length===1);
+  assert.equal(downloads[0]!.name,'perch-resource-archive.zip');
+  assert.deepEqual(Array.from(downloads[0]!.data as Uint8Array),[80,75,3,4]);
+  assert.equal([...f.root.querySelectorAll('[role=tab]')].some(x=>x.textContent==='Library'),false);
+  assert.equal(f.requests.some(x=>x.path.startsWith('/api/v1/admin/resources')),false);
+  f.handle.destroy();
 });
 test('Settings remains available offline and local stop never claims dispatched effects cancelled', async () => {
     let stopped = 0;
@@ -169,22 +164,26 @@ test('Workspace pagination loads later pages and rejects inconsistent snapshots'
     await f.handle.refresh();
     assert.match(f.root.textContent ?? '', /Registry changed while paging/);
 });
-test('late Resource loads cannot replace the newer selected Resource', async () => {
-    const f = fixture();
-    const delegate = f.client.request;
-    let finishOld: ((value: unknown) => void) | undefined;
-    f.client.request = async (method, path, body) => { if (path.endsWith('/resources'))
-        return { items: [f.resource, { ...f.resource, id: 'new-skill', title: 'New skill' }], revision: 1 }; if (path.endsWith('/resources/test-skill'))
-        return new Promise(resolve => { finishOld = resolve; }); if (path.endsWith('/resources/new-skill'))
-        return { ...f.resource, id: 'new-skill', title: 'New skill', body: 'newest content' }; return delegate(method, path, body); };
-    await f.handle.open('Library');
-    click(f.root, 'Test skill');
-    await until(() => !!finishOld);
-    click(f.root, 'New skill');
-    await until(() => f.root.querySelector('textarea')?.value === 'newest content');
-    finishOld!(f.resource);
-    await tick();
-    assert.equal(f.root.querySelector('textarea')!.value, 'newest content');
+test('UI-STATE-01: late stale Gateway response never replaces the currently selected manager view',async()=>{
+  const f=fixture();
+  const original=f.client.request;
+  let resolveOld:((value:unknown)=>void)|undefined;
+  let reads=0;
+  f.client.request=async(method,path,body,opts)=>{
+    if(path==='/api/v1/admin/workspaces' && reads++===0)
+      return new Promise(resolve=>{resolveOld=resolve;});
+    return original(method,path,body,opts);
+  };
+  const previous=f.handle.open('Workspaces');
+  await until(()=>resolveOld!==undefined);
+  await f.handle.open('Agents');
+  resolveOld!({items:[{id:'stale',label:'Stale Workspace',revision:1}],revision:1});
+  await previous;
+  await tick();
+  assert.equal(f.root.querySelector('[role=tab][aria-selected=true]')?.textContent,'Connectors');
+  assert.match(f.root.querySelector('[role=tabpanel]')?.textContent??'',/Connectors and OAuth/);
+  assert.doesNotMatch(f.root.querySelector('[role=tabpanel]')?.textContent??'',/Stale Workspace/);
+  f.handle.destroy();
 });
 test('uncertain-operation recovery requires evidence and explicit acknowledgement without replay', async () => {
     const resolutions: Record<string, unknown>[] = [];
@@ -440,4 +439,48 @@ test('matching native Generator with changed installation ID offers explicit Reb
  assert.match(f.root.textContent??'',/saved browser installation differs/);
  assert.ok([...f.root.querySelectorAll('button')].some(b=>b.textContent==='Rebind this editor'));
  assert.equal(attachCount,0);
+});
+
+
+test('UI-OFFLINE-04: local filtering and sorting never issue additional Gateway requests', async()=>{
+  const f=fixture();
+  const old=f.client.request;
+  f.client.request=async(method,path,body,opts)=>{
+    if(path==='/api/v1/admin/workspaces')
+      return {items:[{id:'w1',label:'Alpha',revision:1,permissions:[],paused:false,binding:null},
+                     {id:'w2',label:'Bravo',revision:1,permissions:[],paused:false,binding:null}],revision:1};
+    return old(method,path,body,opts);
+  };
+  await f.handle.open('Workspaces');
+  const baseline=f.requests.length;
+  const filter=f.root.querySelector<HTMLInputElement>('[aria-label="Filter"]')!;
+  assert.ok(filter);
+  filter.value='Bravo';
+  filter.dispatchEvent(new f.dom.window.Event('input',{bubbles:true}));
+  assert.equal(f.root.querySelectorAll('tbody tr').length,1);
+  assert.match(f.root.querySelector('tbody')?.textContent??'',/Bravo/);
+  assert.equal(f.requests.length,baseline);
+  const sort=[...f.root.querySelectorAll<HTMLButtonElement>('th button')].find(x=>x.textContent==='Workspace');
+  assert.ok(sort);
+  sort.click();
+  assert.equal(f.requests.length,baseline);
+  assert.equal(f.dom.window.document.querySelector<HTMLInputElement>('#native-editor')?.value,'untouched');
+  f.handle.destroy();
+});
+test('UI-OFFLINE-02: outage preserves local stop, local diagnostics and identity without resource initialization', async()=>{
+  let localStop=0;
+  const f=fixture({pauseLocal:async()=>{localStop++;},diagnostics:()=>({events:[]}),
+    request:async()=>{throw Object.assign(new Error('Daily quota exhausted'),{code:'GATEWAY_DEGRADED',status:503});}});
+  await f.handle.open('Workspaces');
+  assert.match(f.root.textContent??'',/Gateway unavailable/);
+  await until(()=>/Current editor: synthetic/.test(f.root.textContent??''));
+  assert.equal(f.root.querySelectorAll('[role=tab]').length,5);
+  click(f.root,'Stop this document immediately');
+  await until(()=>localStop===1);
+  assert.match(f.root.textContent??'',/Local admissions stopped/);
+  await f.handle.open('Recovery');
+  assert.equal(f.root.querySelector('[role=tab][aria-selected=true]')?.textContent,'Recovery');
+  assert.equal([...f.root.querySelectorAll('button')].some(x=>x.textContent==='Publish revision'),false);
+  assert.equal([...f.root.querySelectorAll('button')].some(x=>x.textContent==='Export local diagnostics'),true);
+  f.handle.destroy();
 });

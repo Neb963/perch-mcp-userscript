@@ -140,26 +140,12 @@ export interface ManagerHandle {
   refresh(): Promise<void>;
   setStatus(status: ManagerStatus): void;
 }
-type Tab = "Workspaces" | "Agents" | "Library" | "Activity" | "Recovery" | "Settings";
+type Tab = "Workspaces" | "Agents" | "Activity" | "Recovery" | "Settings";
 type Row = Record<string, unknown>;
 interface List {
   items: Row[];
   revision: number;
   cursor?: string | null;
-}
-interface ResourceDraft {
-  id: string;
-  title: string;
-  description: string;
-  kind: string;
-  enabled: boolean;
-  body: string;
-  files: Record<string, string>;
-  revision: number;
-  dependencies: string[];
-  provenance: string;
-  license: string;
-  upstreamVersion?: string;
 }
 const ADMIN = "/api/v1/admin";
 const PERMISSIONS = [
@@ -301,6 +287,7 @@ export async function buildDiagnosticReport(
   client: ManagerClient,
   version: string,
   current?: ManagerStatus,
+  localOnly = false,
 ): Promise<Record<string, unknown>> {
   const config = client.configuration();
   const get = async (task: () => Promise<unknown>) => {
@@ -315,7 +302,8 @@ export async function buildDiagnosticReport(
       };
     }
   };
-  const [health, stateResult, remote] = await Promise.all([
+  const omitted = {ok:false,code:"LOCAL_ONLY",status:0,traceId:undefined};
+  const [health, stateResult, remote] = localOnly ? [omitted,omitted,omitted] : await Promise.all([
     get(() => client.health()),
     get(() => client.request("GET", `${ADMIN}/state`)),
     get(() => client.request("GET", `${ADMIN}/diagnostics`)),
@@ -501,7 +489,6 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       connection: client.configuration().paired ? "offline" : "unpaired",
     },
     tab: Tab = client.configuration().paired ? "Workspaces" : "Settings";
-  let resourceLoad = 0;
   let viewAbort: AbortController | undefined;
   const v2Requests = new Map<string, WorkspaceTransitionReceipt>();
   let receiptInstallation = "";
@@ -520,18 +507,14 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     state: Row = {},
     workspaces: List = { items: [], revision: 0 },
     agents: List = { items: [], revision: 0 };
-  let draft: ResourceDraft | undefined,
-    draftBaseline: ResourceDraft | undefined,
-    draftBase = "",
-    draftFile = "",
-    draftPending: Promise<void> = Promise.resolve(),
-    editorDirty = false;
   let recoveryWorkspaceId = "";
   let retainedScopeId = "";
   let retainedPanel: { own: number; node: HTMLElement } | undefined;
-  let sortField = "label",
-    sortDirection = 1,
-    filterValue = "";
+  let filterValue = "";
+  const localTables = new Map<HTMLElement, () => void>();
+  // Session-local, redacted cache; never used as mutation authority.
+  let lastKnown: {installation:string; observedAt:number; workspaces:Row[]; connectors:Row[]; activity:Row[]} | undefined;
+  let snapshotInstallation = "";
   let confirmation: { box: HTMLElement; trigger: HTMLElement | null } | undefined;
   const buttons = new Map<Tab, HTMLButtonElement>();
   function fitTextarea(area: HTMLTextAreaElement, minimum = 100) {
@@ -683,6 +666,14 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     refreshRemoteButtons();
     try {
       await action();
+    } catch(error) {
+      const detail=record(error);
+      if(current.generation===generation && (num(detail.status)===429 || num(detail.status)>=500 || ["NETWORK_ERROR","TIMEOUT","GATEWAY_DEGRADED","AUTH_REQUIRED","UNAUTHORIZED","HTTP_ERROR"].includes(str(detail.code)))) {
+        authority=undefined;
+        dismissConfirmation();
+        renderViewShell("Gateway action outcome is unverified. Inspect the original receipt before another action.");
+      }
+      throw error;
     } finally {
       if (remoteAction === current) remoteAction = undefined;
       refreshRemoteButtons();
@@ -771,16 +762,6 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       .join(" · ");
     launcher.textContent = `Perch MCP · ${next.connection}`;
   }
-  function sorted(items: Row[]) {
-    return items
-      .filter((r) =>
-        json(r).toLocaleLowerCase().includes(filterValue.toLocaleLowerCase()),
-      )
-      .sort(
-        (a, b) =>
-          str(a[sortField]).localeCompare(str(b[sortField])) * sortDirection,
-      );
-  }
   function table(
     columns: {
       key: string;
@@ -791,17 +772,42 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     parent: HTMLElement = body,
     useFilter = true,
   ) {
-    const t = el("table"),
-      thead = el("thead"),
-      tr = el("tr"),
-      tbody = el("tbody");
+    const t = el("table"), thead = el("thead"), tr = el("tr"), tbody = el("tbody");
+    let sortField = "label", sortDirection = 1;
+    const empty = el("p", "No entries.", "empty");
+    const renderRows = () => {
+      if (confirmation && t.contains(confirmation.box)) dismissConfirmation();
+      tbody.replaceChildren();
+      const needle = filterValue.toLocaleLowerCase();
+      const selected = rows.filter(r => !useFilter || json(r).toLocaleLowerCase().includes(needle));
+      selected.sort((a,b) => str(a[sortField]).localeCompare(str(b[sortField])) * sortDirection);
+      for (const row of selected) {
+        const r = el("tr");
+        for (const c of columns) {
+          const td = el("td");
+          td.dataset.label=c.label;
+          if (c.render) c.render(row, td);
+          else td.textContent = str(row[c.key], "—");
+          const value=el('div',undefined,'cell-value');
+          value.append(...Array.from(td.childNodes));
+          td.append(value);
+          r.append(td);
+        }
+        tbody.append(r);
+      }
+      empty.hidden=selected.length!==0;
+      refreshRemoteButtons();
+    };
     for (const c of columns) {
       const th = el("th");
       th.scope = "col";
-      const b = button(c.label, async () => {
+      const b = button(c.label, () => {
+        if(confirmation) dismissConfirmation();
         sortDirection = sortField === c.key ? -sortDirection : 1;
         sortField = c.key;
-        await refresh();
+        renderRows();
+        for (const header of tr.querySelectorAll("th")) header.removeAttribute("aria-sort");
+        th.setAttribute("aria-sort",sortDirection===1?"ascending":"descending");
       });
       b.setAttribute("aria-label", `Sort by ${c.label}`);
       th.append(b);
@@ -809,29 +815,22 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     }
     thead.append(tr);
     t.append(thead, tbody);
-    for (const row of useFilter ? sorted(rows) : rows) {
-      const r = el("tr");
-      for (const c of columns) {
-        const td = el("td");
-        td.dataset.label=c.label;
-        if (c.render) c.render(row, td);
-        else td.textContent = str(row[c.key], "—");
-        const value=el('div',undefined,'cell-value');
-        value.append(...Array.from(td.childNodes));
-        td.append(value);
-        r.append(td);
-      }
-      tbody.append(r);
-    }
-    parent.append(t);
-    if (!rows.length) p("No entries.", parent, "empty");
+    parent.append(t,empty);
+    if (useFilter) localTables.set(t,renderRows);
+    renderRows();
   }
   function search(parent = body) {
     const f = field("Filter", filterValue, "search");
-    on(f.input, "change", () => {
+    const apply = () => {
+      if(confirmation) dismissConfirmation();
       filterValue = f.input.value;
-      void refresh();
-    });
+      for (const [table,render] of localTables) {
+        if (table.isConnected) render();
+        else localTables.delete(table);
+      }
+    };
+    on(f.input, "input", apply);
+    on(f.input, "change", apply);
     const row = el("div", undefined, "row");
     row.append(f.label, button("Refresh", refresh));
     parent.append(row);
@@ -871,15 +870,71 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     return {s,w,a};
   }
   function tabLabel() {
-    return tab === "Agents" && state.assignmentContractVersion === 2 ? "Connectors" : tab;
+    return tab === "Agents" ? "Connectors" : tab;
+  }
+  function cachedRows(view: Tab): Row[] {
+    if (!lastKnown || lastKnown.installation!==installation() || Date.now()-lastKnown.observedAt>86400000)
+      return [];
+    return view==="Workspaces"?lastKnown.workspaces:view==="Agents"?lastKnown.connectors:view==="Activity"?lastKnown.activity:[];
+  }
+  function rememberBase(scope:string, w:List, a:List) {
+    const previous=lastKnown?.installation===scope?lastKnown:undefined;
+    lastKnown={installation:scope,observedAt:Date.now(),
+      workspaces:w.items.slice(0,100).map(row=>({label:str(row.label).slice(0,120),id:str(row.id).slice(0,128),
+        connector:str(a.items.find(c=>c.id===row.connectorId||c.workspaceId===row.id)?.label,"Unassigned").slice(0,120),
+        binding:str(record(row.binding).slug,"Unbound").slice(0,120),paused:row.paused===true})),
+      connectors:a.items.slice(0,100).map(row=>({label:str(row.label).slice(0,120),id:str(row.id).slice(0,128),
+        assignments:num(row.assignmentCount),suspended:row.suspended===true})),
+      activity:previous?.activity??[]};
+  }
+  async function stopLocal() {
+    const pending=client.pauseLocal?.();
+    setStatus({...status,connection:"paused",reason:"Local stop requested; remote effects may still complete."});
+    await pending;
+    announce("Local admissions stopped. Previously dispatched effects may still complete.");
+  }
+  async function exportLocalDiagnostics() {
+    const report=await buildDiagnosticReport(client,options.version,status,true);
+    client.download("perch-mcp-local-diagnostics.json",json(report),"application/json");
+    announce("Local diagnostic report exported. No Gateway request was made.");
   }
   function renderViewShell(message: string) {
     body.replaceChildren();
+    localTables.clear();
     if (tab === "Settings") renderSettings();
     else {
       heading(tabLabel());
       p(message, body, "muted");
+      actions(body,button("Refresh",refresh),button("Export local diagnostics",exportLocalDiagnostics),
+        ...(client.pauseLocal?[button("Stop this document immediately",stopLocal,"danger")]:[]));
+      if (tab==="Workspaces") {
+        const editor=el("p","Current editor: checking local identity…","muted");
+        body.append(editor);
+        const own=generation, scope=installation();
+        void client.currentIdentity().then(identity=>{
+          if(own===generation&&scope===installation()&&editor.isConnected)
+            editor.textContent="Current editor: "+identity.slug+" · "+identity.generatorId+" · draft "+(identity.draftId||"(default)");
+        }).catch(()=>{if(editor.isConnected)editor.textContent="Current editor identity unavailable.";});
+        p("Local connection: "+status.connection+". Native manual editing remains available.",body);
+      }
+      if (tab==="Agents") {
+        const config=client.configuration();
+        p("Gateway: "+(config.origin||"not configured")+". Remote authorization status unknown; no revocation inferred.",body);
+      }
+      if (tab==="Activity") {
+        p("Local observations remain available through the diagnostic export and Recovery. Remote operation outcomes are not inferred.",body);
+      }
       if (tab === "Recovery") mountRetainedRecovery(generation);
+      const rows=cachedRows(tab);
+      if(rows.length&&lastKnown){
+        heading("Last-known remote snapshot — stale");
+        p("Observed "+new Date(lastKnown.observedAt).toISOString()+". Read-only; cannot authorize any action.",body,"muted");
+        search();
+        const columns=tab==="Workspaces"?[{key:"label",label:"Workspace"},{key:"connector",label:"Connector"},{key:"binding",label:"Last-known Binding"}]:
+          tab==="Agents"?[{key:"label",label:"Connector"},{key:"assignments",label:"Assignments"},{key:"suspended",label:"Last-known suspension"}]:
+            [{key:"operationId",label:"Operation"},{key:"tool",label:"Tool"},{key:"phase",label:"Last-known outcome"}];
+        table(columns,rows);
+      } else p("No valid cached remote summary; state is unknown.",body,"muted");
     }
   }
   async function refresh() {
@@ -891,6 +946,9 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     viewAbort = new AbortController();
     if (!opened || destroyed) return;
     const scope = installation();
+    if(snapshotInstallation!==scope){
+      snapshotInstallation=scope;lastKnown=undefined;state={};workspaces={items:[],revision:0};agents={items:[],revision:0};
+    }
     updateTabs();
     renderViewShell("Loading management state…");
     announce("Loading…");
@@ -912,21 +970,21 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       state = base.s;
       workspaces = base.w;
       agents = base.a;
+      rememberBase(scope,workspaces,agents);
       authority = { generation: own, installation: scope };
       body.replaceChildren();
-      if (state.assignmentContractVersion===2 && tab==='Library') tab='Settings';
+      localTables.clear();
       updateTabs();
       if (tab === "Workspaces") {
         if (state.assignmentContractVersion===2) await renderDevelopmentWorkspaces(own);
         else await renderWorkspaces(own);
       }
       if (tab === "Agents") await renderAgents(own);
-      if (tab === "Library") await renderLibrary(own);
       if (tab === "Activity") await renderActivity(own);
       if (tab === "Recovery") await renderRecovery(own);
       if (tab === "Settings") {
         renderSettings();
-        if (state.assignmentContractVersion===2 && client.exportResources)
+        if (num(state.libraryRevision)>0 && client.exportResources)
           body.append(button('Export legacy Resource archive',async()=>{
             const bytes=await client.exportResources!();
             client.download('perch-resource-archive.zip',bytes,'application/zip');
@@ -949,8 +1007,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     body.setAttribute("aria-label", tabLabel());
     for (const [name, b] of buttons) {
       b.setAttribute("aria-selected", String(name === tab));
-      if (name==='Agents') b.textContent=state.assignmentContractVersion===2?'Connectors':'Agents';
-      if (name==='Library') b.hidden=state.assignmentContractVersion===2;
+      if (name==='Agents') b.textContent='Connectors';
     }
   }
   function permissionEditor(parent: HTMLElement, values: readonly string[], allowed: readonly string[] = PERMISSIONS) {
@@ -1122,6 +1179,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     }
     for (const receipt of pending) v2Requests.set(receipt.workspaceId, receipt);
     const choices = agents.items.filter(item=>item.contractVersion===2 && item.suspended!==true);
+    p(nextIdentity ? `Current editor: ${nextIdentity.slug} · ${nextIdentity.generatorId} · draft ${nextIdentity.draftId || "(default)"}` : "Current editor identity unavailable.",body,"muted");
     search();
     table([
       {key:'label',label:'Workspace',render(w,td){
@@ -1163,7 +1221,6 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           num(observation.observedAt)+60000>Date.now());
         if (nextIdentity && client.bindingProof) {
           const destination = {...nextIdentity};
-          p(`This tab · ${destination.slug} · ${destination.generatorId} · draft ${destination.draftId||'(default)'}`,td,'muted');
           td.append(markRemote(button(wd?'Reassign to this tab':'Assign this tab',async()=>{
             const rebind=async()=>{
               const cached=v2Requests.get(id);
@@ -1188,12 +1245,15 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             else await runRemoteAction(own, rebind);
           })));
         }
+        const secondary=el("details",undefined,"secondary-actions");
+        secondary.append(el("summary","More actions"));
+        td.append(secondary);
         if (wd) {
-          td.append(remoteButton('Reconnect',own,async()=>connectWorkspace(intent)),
+          secondary.append(remoteButton('Reconnect',own,async()=>connectWorkspace(intent)),
             markRemote(button('Detach',()=>confirmAction(`Detach ${scope} from ${oldDraft} and preserve the native draft?`,async()=>
               transitionWorkspace(intent,'detach',{acknowledgeDirty:true},own),true))));
         }
-        td.append(remoteButton(intent.paused?'Resume':'Pause',own,async()=>{
+        secondary.append(remoteButton(intent.paused?'Resume':'Pause',own,async()=>{
           await client.request('PATCH',`${ADMIN}/workspaces/${encodeURIComponent(id)}`,
             {expectedRevision:intent.revision,paused:!intent.paused});
           if (own===generation) await refresh();
@@ -1207,11 +1267,11 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           });
           if (own===generation) await refresh();
         }));
-        td.append(policies);
+        secondary.append(policies);
         const other=choices.filter(item=>item.id!==w.connectorId);
         if (other.length) {
           const chosen=select('Destination Connector',other.map(item=>({value:str(item.id),label:str(item.label)})));
-          td.append(chosen.label,markRemote(button(intent.connectorId?'Transfer':'Assign Connector',async()=>{
+          secondary.append(chosen.label,markRemote(button(intent.connectorId?'Transfer':'Assign Connector',async()=>{
             const selected=other.find(item=>item.id===chosen.input.value);
             if (!selected) throw new Error('Choose a Connector.');
             const args={connectorId:selected.id,expectedDestinationConnectorRevision:selected.revision,acknowledgeDirty:dirty};
@@ -1221,9 +1281,9 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             else await runRemoteAction(own, () => transitionWorkspace(intent,'assign',args,own));
           })));
         }
-        if (intent.connectorId) td.append(markRemote(button('Unassign',()=>confirmAction(`Unassign ${scope} and preserve ${oldDraft}?`,async()=>
+        if (intent.connectorId) secondary.append(markRemote(button('Unassign',()=>confirmAction(`Unassign ${scope} and preserve ${oldDraft}?`,async()=>
           transitionWorkspace(intent,'unassign',{acknowledgeDirty:true},own),true))));
-        if (intent.transition && !mutationPending.has(id)) td.append(markRemote(button('Cancel pending transition',()=>
+        if (intent.transition && !mutationPending.has(id)) secondary.append(markRemote(button('Cancel pending transition',()=>
           confirmAction(`Cancel the pending transition for ${scope} after pending effects settle?`,async()=>{
             await client.request('POST',`${ADMIN}/workspaces/${encodeURIComponent(id)}/abort-transition`,
               {expectedRevision:intent.revision,transitionId:record(intent.transition).id},{idempotencyKey:crypto.randomUUID()});
@@ -1232,6 +1292,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           },true))));
       }},
     ],workspaces.items);
+    body.querySelectorAll("table").forEach(t=>t.classList.add("compact-workspaces"));
   }
   async function renderWorkspaces(own:number) {
     heading("Workspaces");
@@ -1486,10 +1547,10 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   }
   async function renderAgents(own: number) {
     const v2=state.assignmentContractVersion===2;
-    heading(v2?"Connectors":"Agents and OAuth");
+    heading("Connectors and OAuth");
     p(
       v2 ? "A Connector can reach multiple assigned Workspaces. Chats using the same Connector share its Grant." :
-        "One Agent targets one Workspace. Connector reuse across conversations shares its Grant and queue.",
+        "Legacy Connector: fixed Workspace scope. Fresh installations use Connector-level authorization.",
       body,
       "muted",
     );
@@ -1502,7 +1563,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         "muted",
       );
     const row = el("div", undefined, "row"),
-      name = field(v2?"Connector name":"Agent name"),
+      name = field("Connector name"),
       target = select(
         "Workspace",
         workspaces.items
@@ -1527,12 +1588,16 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       }),
     );
     body.append(row);
+    // Time-limited consent must appear before the potentially long Connector list.
+    const approvalPanel = el("section");
+    const grantsPanel = el("section");
+    body.append(approvalPanel);
     search();
     table(
       [
         {
           key: "label",
-          label: "Agent",
+          label: "Connector",
           render(a, td) {
             p(str(a.label), td);
             p(str(a.id), td, "muted");
@@ -1561,36 +1626,33 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         },
         {
           key: "workspaceId",
-          label: "Connector",
+          label: "Access",
           render(a, td) {
-            const url = endpoint(client.configuration().origin, a),
-              input = field("MCP connector URL", url);
-            input.input.readOnly = true;
-            td.append(input.label);
-            actions(
-              td,
-              copy("Copy URL", url),
-              copy(
-                "Copy setup instructions",
-                `Create a custom remote MCP connector with URL ${url}. Complete OAuth, then approve the matching code in Perch MCP → Agents. Verify workspace_status before editing. Tokens remain in the client.`,
-              ),
-            );
-            p(
-              a.contractVersion===2 ? `${num(a.assignmentCount)} assigned Workspaces · v2` :
-                `Workspace: ${str(workspaces.items.find((w) => w.id === a.workspaceId)?.label, str(a.workspaceId))}`,
-              td,
-              "muted",
-            );
+            const url = endpoint(client.configuration().origin, a);
+            const first = el("div", undefined, "compact-connector");
+            first.append(copy("Copy URL", url));
+            p(a.contractVersion===2 ? `${num(a.assignmentCount)} Workspaces · ${a.suspended?"suspended":"enabled"}` :
+              `Legacy Workspace: ${str(workspaces.items.find(w=>w.id===a.workspaceId)?.label,str(a.workspaceId))}`, first, "muted");
+            const setup=el("details",undefined,"secondary-actions");
+            setup.append(el("summary","Connector URL and setup"));
+            const input=field("MCP connector URL",url);
+            input.input.readOnly=true;
+            setup.append(input.label,copy("Copy setup instructions",
+              `Create a custom remote MCP connector with URL ${url}. Complete OAuth, approve the exact request in Perch MCP → Connectors, then call workspace_status. Tokens remain in the client.`));
+            td.append(first,setup);
           },
         },
         {
           key: "suspended",
           label: "Actions",
           render(a, td) {
-            const label = field("Agent label", str(a.label));
-            td.append(label.label);
+            const settings=el("details",undefined,"secondary-actions");
+            settings.append(el("summary","Manage Connector"));
+            td.append(settings);
+            const label = field("Connector label", str(a.label));
+            settings.append(label.label);
             actions(
-              td,
+              settings,
               remoteButton("Rename", own, async () => {
                 await client.request(
                   "PATCH",
@@ -1603,7 +1665,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
                 await refresh();
               }),
               remoteButton(
-                a.suspended ? "Resume Agent" : "Suspend Agent",
+                a.suspended ? "Resume Connector" : "Suspend Connector",
                 own,
                 async () => {
                   await client.request(
@@ -1625,9 +1687,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     );
     // The time-limited OAuth request must be visible without waiting for
     // unrelated Grant data. A failure in either list does not hide the other.
-    const approvalPanel = el("section");
-    const grantsPanel = el("section");
-    body.append(approvalPanel, grantsPanel);
+    body.append(grantsPanel);
     let lastApprovalState = "";
     let pendingApprovalCount = 0;
     const loadApprovals = async () => {
@@ -1748,6 +1808,9 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     };
     const showApprovalsFailure = (error: unknown) => {
       if (own !== generation || !opened || destroyed || tab !== "Agents") return;
+      authority=undefined;
+      dismissConfirmation();
+      refreshRemoteButtons();
       if (!approvalPanel.textContent?.includes("Pending approvals")) {
         approvalPanel.replaceChildren();
         heading("Pending approvals", approvalPanel);
@@ -1765,6 +1828,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       approvalRefreshTimer = undefined;
       try {
         await loadApprovals();
+        // A failed poll invalidates prior mutation authority. Reacquire through explicit Refresh, not by assuming this list repairs all revisions.
         approvalFailures = 0;
         quotaDelay=0;
       } catch (error) {
@@ -1793,9 +1857,10 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           [
             {
               key: "agentId",
-              label: "Agent / Workspace",
+              label: "Connector / Workspace",
               render(g, td) {
-                p(`${str(g.agentId)} / ${str(g.workspaceId)}`, td);
+                const connector=agents.items.find(a=>a.id===g.agentId);
+                p(`${str(connector?.label,str(g.agentId))}${g.workspaceId ? " / "+str(g.workspaceId) : ""}`,td);
                 p(str(g.clientId), td, "muted");
               },
             },
@@ -1803,7 +1868,12 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
               key: "state",
               label: "Authorization",
               render(g, td) {
-                p(`${str(g.state)} · expires ${str(g.expiresAt)}`, td);
+                const connector=agents.items.find(a=>a.id===g.agentId);
+                p(g.state==="revoked"?"Revoked":g.expiresAt===null && g.contractVersion===2
+                  ? connector?.suspended===true ? "Suspended (authorization retained)" : "Authorized — until revoked"
+                  : num(g.expiresAt)>Date.now()?"Authorized (legacy finite Grant)":"Credentials unavailable / recovery required",td);
+                if (g.audience) p(`Audience: ${str(g.audience)}`,td,"muted");
+                if (Array.isArray(g.permissions)) p(`Grant permissions: ${arrayStrings(g.permissions).join(", ") || "None"}`,td,"muted");
               },
             },
             {
@@ -1852,6 +1922,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           ],
           grants.items,
           grantsPanel,
+          false,
         );
       } catch {
         if (own !== generation || destroyed || !opened || tab !== "Agents") return;
@@ -1861,728 +1932,6 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       }
     })();
   }
-  function normalizeResource(value: Row): ResourceDraft {
-    const files: Record<string, string> = Object.create(null) as Record<
-      string,
-      string
-    >;
-    for (const [path, content] of Object.entries(record(value.files)))
-      if (typeof content === "string") files[path] = content;
-    return {
-      id: str(value.id),
-      kind: str(value.kind, "document"),
-      title: str(value.title, str(value.id)),
-      description: str(value.description),
-      enabled: value.enabled !== false,
-      body: str(value.body),
-      files,
-      revision: num(value.revision),
-      dependencies: arrayStrings(value.dependencies),
-      provenance: str(value.provenance),
-      license: str(value.license, "operator-provided"),
-      ...(typeof value.upstreamVersion === "string"
-        ? { upstreamVersion: value.upstreamVersion }
-        : {}),
-    };
-  }
-  async function openResource(value: Row) {
-    const load = ++resourceLoad;
-    const loaded = record(
-      await client.request(
-        "GET",
-        `${ADMIN}/resources/${encodeURIComponent(str(value.id))}`,
-      ),
-    );
-    if (load !== resourceLoad || destroyed) return;
-    draft = normalizeResource(Object.keys(loaded).length ? loaded : value);
-    draftBase = draft.body;
-    draftBaseline = structuredClone(draft);
-    draftFile = "";
-    editorDirty = false;
-    const saved = await client.drafts?.get(`resource:${draft.id}`);
-    if (load !== resourceLoad || destroyed) return;
-    if (saved) {
-      try {
-        const parsed = record(JSON.parse(saved));
-        if (parsed.id === draft.id) {
-          const restored = normalizeResource(parsed);
-          if (restored.revision === draft.revision) {
-            draft = restored;
-            editorDirty = true;
-            announce(
-              "Recovered unpublished Resource draft. Other document drafts remain available through Settings → Export unpublished Resource drafts.",
-            );
-          } else
-            announce(
-              "An unpublished draft from another revision is retained. Export it before replacing the current draft.",
-              true,
-            );
-        }
-      } catch {
-        announce(
-          "A malformed Resource draft is retained. Export it from Settings before cleanup.",
-          true,
-        );
-      }
-    }
-    await refresh();
-    if (load === resourceLoad) focusResourceEditor();
-  }
-  function focusResourceEditor() {
-    const area = body.querySelector<HTMLTextAreaElement>(
-      'textarea[aria-label="Resource text"]',
-    );
-    const panel = area?.closest<HTMLElement>(".editor");
-    if (!area || !panel || !opened) return;
-    fitTextarea(area, 140);
-    area.focus({ preventScroll: true });
-    body.scrollTop +=
-      panel.getBoundingClientRect().top - body.getBoundingClientRect().top - 10;
-  }
-  function saveDraft() {
-    if (!draft) return;
-    editorDirty = true;
-    const key = `resource:${draft.id}`,
-      value = json(draft);
-    draftPending = draftPending
-      .then(() => client.drafts?.set(key, value))
-      .then(() => undefined)
-      .catch(report);
-  }
-  async function renderLibrary(own: number) {
-    const response = await loadList(`${ADMIN}/resources`);
-    if (own !== generation) return;
-    state.libraryRevision = response.revision;
-    heading("Library");
-    p(
-      "Resources are editable instructions, not security policy. Publishing creates a new revision. Local drafts survive a failed publish.",
-      body,
-      "muted",
-    );
-    search();
-    const createRow = el("div", undefined, "row"),
-      id = field("New Resource ID"),
-      kind = select(
-        "Kind",
-        ["skill", "workflow", "instruction", "document"].map((value) => ({
-          value,
-          label: value,
-        })),
-      );
-    createRow.append(
-      id.label,
-      kind.label,
-      button("Create Resource", async () => {
-        if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(id.input.value))
-          throw new Error(
-            "Use 1–80 lowercase letters, digits, or hyphens for the Resource ID.",
-          );
-        const created = record(
-          await client.request("POST", `${ADMIN}/resources`, {
-            resource: {
-              id: id.input.value,
-              kind: kind.input.value,
-              title: id.input.value,
-              description: "",
-              body: "",
-              files: {},
-              enabled: true,
-              dependencies: [],
-              provenance: "Operator-authored",
-              license: "operator-provided",
-            },
-          }),
-        );
-        await openResource(created);
-      }),
-    );
-    body.append(createRow);
-    actions(
-      body,
-      button("Export Library ZIP", async () => {
-        if (client.exportResources)
-          client.download(
-            "perch-mcp-library.zip",
-            await client.exportResources(),
-            "application/zip",
-          );
-        else {
-          const exported = await client.request(
-            "GET",
-            `${ADMIN}/resources/export`,
-          );
-          client.download(
-            "perch-mcp-library.json",
-            json(exported),
-            "application/json",
-          );
-        }
-      }),
-      button("Import Library…", () => {
-        importFile.click();
-      }),
-    );
-    const importFile = el("input");
-    importFile.type = "file";
-    importFile.accept = ".zip,application/zip";
-    importFile.hidden = true;
-    importFile.setAttribute("aria-label", "Import Library package");
-    on(importFile, "change", () => {
-      const file = importFile.files?.[0];
-      if (file) void run(() => previewImport(file, response.revision));
-    });
-    body.append(importFile);
-    table(
-      [
-        {
-          key: "id",
-          label: "Resource",
-          render(r, td) {
-            td.append(button(str(r.title, str(r.id)), () => openResource(r)));
-            p(str(r.id), td, "muted");
-          },
-        },
-        {
-          key: "kind",
-          label: "Kind / revision",
-          render(r, td) {
-            p(
-              `${str(r.kind)} · revision ${str(r.revision)} · ${r.enabled === false ? "disabled" : "enabled"}`,
-              td,
-            );
-            p(str(r.description), td, "muted");
-          },
-        },
-        {
-          key: "id",
-          label: "Actions",
-          render(r, td) {
-            actions(
-              td,
-              button("Duplicate", async () => {
-                const copyId = `${str(r.id).slice(0, 60)}-copy-${Date.now().toString(36)}`;
-                const full = record(
-                  await client.request(
-                    "GET",
-                    `${ADMIN}/resources/${encodeURIComponent(str(r.id))}`,
-                  ),
-                );
-                const value = normalizeResource({ ...full, id: copyId });
-                const created = record(
-                  await client.request("POST", `${ADMIN}/resources`, {
-                    resource: {
-                      ...value,
-                      revision: undefined,
-                      dependencies: full.dependencies ?? [],
-                    },
-                  }),
-                );
-                await openResource(created);
-              }),
-              button(r.enabled === false ? "Enable" : "Disable", async () => {
-                const full = record(
-                  await client.request(
-                    "GET",
-                    `${ADMIN}/resources/${encodeURIComponent(str(r.id))}`,
-                  ),
-                );
-                await client.request(
-                  "PUT",
-                  `${ADMIN}/resources/${encodeURIComponent(str(r.id))}`,
-                  {
-                    expectedRevision: num(r.revision),
-                    resource: {
-                      ...normalizeResource(full),
-                      revision: undefined,
-                      enabled: r.enabled === false,
-                    },
-                  },
-                );
-                await refresh();
-              }),
-              button(
-                "Delete",
-                async () => {
-                  confirmAction(
-                    `Delete Resource ${str(r.id)}? Active dependencies may block deletion.`,
-                    async () => {
-                      await client.request(
-                        "POST",
-                        `${ADMIN}/resources/${encodeURIComponent(str(r.id))}/delete`,
-                        { expectedRevision: num(r.revision) },
-                      );
-                      if (draft?.id === r.id) draft = undefined;
-                      await refresh();
-                    },
-                  );
-                },
-                "danger",
-              ),
-            );
-          },
-        },
-      ],
-      response.items,
-    );
-    if (draft) renderEditor();
-  }
-  function renderEditor() {
-    const current = draft!;
-    const panel = el("section", undefined, "editor");
-    heading(`Edit ${current.id}`, panel);
-    p(
-      `Base revision ${current.revision}${editorDirty ? " · unpublished draft" : ""}`,
-      panel,
-      "muted",
-    );
-    const row = el("div", undefined, "row"),
-      title = field("Resource title", current.title),
-      description = field("Description", current.description);
-    on(title.input, "input", () => {
-      current.title = title.input.value;
-      saveDraft();
-    });
-    on(description.input, "input", () => {
-      current.description = description.input.value;
-      saveDraft();
-    });
-    row.append(title.label, description.label);
-    panel.append(row);
-    const meta = el("details");
-    meta.append(el("summary", "Resource metadata"));
-    const metadataRow = el("div", undefined, "row"),
-      dependencies = field(
-        "Dependency Resource IDs (comma separated)",
-        current.dependencies.join(", "),
-      ),
-      provenance = field("Provenance", current.provenance),
-      license = field("License / redistribution terms", current.license);
-    on(dependencies.input, "input", () => {
-      current.dependencies = dependencies.input.value
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      saveDraft();
-    });
-    on(provenance.input, "input", () => {
-      current.provenance = provenance.input.value;
-      saveDraft();
-    });
-    on(license.input, "input", () => {
-      current.license = license.input.value;
-      saveDraft();
-    });
-    metadataRow.append(dependencies.label, provenance.label, license.label);
-    meta.append(metadataRow);
-    panel.append(meta);
-    const grid = el("div", undefined, "editor-grid"),
-      fileList = el("div", undefined, "file-list"),
-      main = el("div"),
-      areaLabel = el("label", "Resource text"),
-      area = el("textarea");
-    area.spellcheck = false;
-    area.setAttribute("aria-label", "Resource text");
-    area.value = draftFile ? (current.files[draftFile] ?? "") : current.body;
-    areaLabel.append(area);
-    main.append(areaLabel);
-    for (const path of ["", ...Object.keys(current.files).sort()]) {
-      const b = button(path || "Main text", async () => {
-        draftFile = path;
-        await refresh();
-        focusResourceEditor();
-      });
-      b.setAttribute("aria-pressed", String(path === draftFile));
-      fileList.append(b);
-    }
-    const fileName = field("Reference file path");
-    fileList.append(
-      fileName.label,
-      button("Add text file", async () => {
-        const path = fileName.input.value;
-        if (
-          !/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(path) ||
-          path
-            .split("/")
-            .some(
-              (p) =>
-                !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p) ||
-                p === "." ||
-                p === ".." ||
-                ["constructor", "prototype", "__proto__"].includes(p),
-            ) ||
-          Object.keys(current.files).some(
-            (p) => p.toLowerCase() === path.toLowerCase(),
-          )
-        )
-          throw new Error("Enter a unique relative path without traversal.");
-        current.files[path] = "";
-        draftFile = path;
-        saveDraft();
-        await refresh();
-        focusResourceEditor();
-      }),
-    );
-    area.dataset.autoGrowMinimum = "140";
-    const fit = () => fitTextarea(area, 140);
-    on(area, "input", () => {
-      if (draftFile) current.files[draftFile] = area.value;
-      else current.body = area.value;
-      saveDraft();
-      fit();
-    });
-    queueMicrotask(fit);
-    grid.append(fileList, main);
-    panel.append(grid);
-    actions(
-      panel,
-      button(
-        "Publish revision",
-        async () => {
-          await draftPending;
-          const saved = record(
-            await client.request(
-              "PUT",
-              `${ADMIN}/resources/${encodeURIComponent(current.id)}`,
-              {
-                expectedRevision: current.revision,
-                resource: {
-                  id: current.id,
-                  kind: current.kind,
-                  title: current.title,
-                  description: current.description,
-                  enabled: current.enabled,
-                  body: current.body,
-                  files: current.files,
-                  dependencies: current.dependencies,
-                  provenance: current.provenance,
-                  license: current.license,
-                  ...(current.upstreamVersion
-                    ? { upstreamVersion: current.upstreamVersion }
-                    : {}),
-                },
-              },
-            ),
-          );
-          await client.drafts?.delete(`resource:${current.id}`);
-          draft = normalizeResource(saved);
-          draftBase = draft.body;
-          draftBaseline = structuredClone(draft);
-          editorDirty = false;
-          await refresh();
-          announce("Published new Resource revision.");
-        },
-        "primary",
-      ),
-      button("Compare draft", async () => {
-        const details = el("details");
-        details.open = true;
-        details.append(el("summary", "Draft difference"));
-        const parts: [string, string, string][] = [
-          ["Main text", draftBase, current.body],
-          ...[
-            ...new Set([
-              ...Object.keys(draftBaseline?.files ?? {}),
-              ...Object.keys(current.files),
-            ]),
-          ]
-            .sort()
-            .map(
-              (path) =>
-                [
-                  path,
-                  draftBaseline?.files[path] ?? "",
-                  current.files[path] ?? "",
-                ] as [string, string, string],
-            ),
-        ];
-        let changed = false;
-        for (const [path, before, after] of parts) {
-          if (before === after) continue;
-          changed = true;
-          details.append(el("h3", path));
-          const pre = el("pre");
-          for (const line of lineDiff(before, after))
-            pre.append(
-              el(
-                "span",
-                `${line.kind === "add" ? "+" : line.kind === "remove" ? "-" : " "} ${line.text}\n`,
-                `diff-${line.kind}`,
-              ),
-            );
-          details.append(pre);
-        }
-        if (
-          draftBaseline &&
-          (draftBaseline.title !== current.title ||
-            draftBaseline.description !== current.description ||
-            draftBaseline.dependencies.join(",") !==
-              current.dependencies.join(",") ||
-            draftBaseline.provenance !== current.provenance ||
-            draftBaseline.license !== current.license)
-        ) {
-          changed = true;
-          p(
-            "Resource metadata changed. Review the metadata fields before publishing.",
-            details,
-          );
-        }
-        if (!changed) p("No changes.", details);
-        panel.append(details);
-      }),
-      button("Preview text", async () => {
-        const details = el("details");
-        details.open = true;
-        details.append(
-          el("summary", "Safe text preview"),
-          renderResourcePreview(
-            doc,
-            draftFile ? (current.files[draftFile] ?? "") : current.body,
-          ),
-        );
-        panel.append(details);
-      }),
-      button("Revision history", async () => {
-        const histories = list(
-          await client.request(
-            "GET",
-            `${ADMIN}/resources/${encodeURIComponent(current.id)}/history`,
-          ),
-        );
-        table(
-          [
-            { key: "revision", label: "Revision" },
-            { key: "hash", label: "Digest" },
-            {
-              key: "revision",
-              label: "Restore",
-              render(r, td) {
-                td.append(
-                  button("Restore as new revision", async () => {
-                    confirmAction(
-                      `Restore Resource ${current.id} revision ${str(r.revision)} as a new revision?`,
-                      async () => {
-                        const saved = record(
-                          await client.request(
-                            "POST",
-                            `${ADMIN}/resources/${encodeURIComponent(current.id)}/restore`,
-                            {
-                              expectedRevision: current.revision,
-                              historicalRevision: num(r.revision),
-                            },
-                          ),
-                        );
-                        draft = normalizeResource(saved);
-                        draftBase = draft.body;
-                        draftBaseline = structuredClone(draft);
-                        editorDirty = false;
-                        await refresh();
-                      },
-                    );
-                  }),
-                );
-              },
-            },
-          ],
-          histories.items,
-          panel,
-        );
-      }),
-      button("Close editor", async () => {
-        await draftPending;
-        draft = undefined;
-        draftFile = "";
-        await refresh();
-      }),
-    );
-    if (draftFile)
-      actions(
-        panel,
-        button(
-          "Remove selected reference file",
-          async () => {
-            delete current.files[draftFile];
-            draftFile = "";
-            saveDraft();
-            await refresh();
-          },
-          "danger",
-        ),
-      );
-    const assignment = el("details");
-    assignment.append(el("summary", "Resource assignment"));
-    p(
-      "Global → Workspace → Agent. A more specific Resource with the same ID replaces the broader assignment.",
-      assignment,
-      "muted",
-    );
-    const ar = el("div", undefined, "row"),
-      scope = select("Assignment scope", [
-        { value: "global", label: "Global" },
-        { value: "workspace", label: "Workspace" },
-        { value: "agent", label: "Agent" },
-      ]),
-      target = select("Assignment target", [
-        { value: "", label: "Global" },
-        ...workspaces.items.map((w) => ({
-          value: str(w.id),
-          label: `Workspace: ${str(w.label)}`,
-        })),
-        ...agents.items.map((a) => ({
-          value: str(a.id),
-          label: `Agent: ${str(a.label)}`,
-        })),
-      ]);
-    const updateTargets = () => {
-      const entries =
-        scope.input.value === "global"
-          ? [{ value: "", label: "Global" }]
-          : (scope.input.value === "workspace"
-              ? workspaces.items
-              : agents.items
-            ).map((e) => ({ value: str(e.id), label: str(e.label) }));
-      target.input.replaceChildren(
-        ...entries.map((e) => {
-          const option = el("option", e.label);
-          option.value = e.value;
-          return option;
-        }),
-      );
-    };
-    on(scope.input, "change", updateTargets);
-    updateTargets();
-    ar.append(
-      scope.label,
-      target.label,
-      button("Enable Resource at scope", async () => {
-        await client.request("POST", `${ADMIN}/resources/assign`, {
-          expectedRevision: num(state.libraryRevision),
-          resourceId: current.id,
-          scopeType: scope.input.value,
-          scopeId: scope.input.value === "global" ? "" : target.input.value,
-          enabled: true,
-        });
-        await refresh();
-        announce("Resource assignment updated.");
-      }),
-      button("Disable Resource at scope", async () => {
-        await client.request("POST", `${ADMIN}/resources/assign`, {
-          expectedRevision: num(state.libraryRevision),
-          resourceId: current.id,
-          scopeType: scope.input.value,
-          scopeId: scope.input.value === "global" ? "" : target.input.value,
-          enabled: false,
-        });
-        await refresh();
-        announce("Resource disabled at selected scope.");
-      }),
-    );
-    assignment.append(ar);
-    panel.append(assignment);
-    body.append(panel);
-  }
-  async function previewImport(file: File, expectedRevision: number) {
-    if (file.size > 8 * 1024 * 1024)
-      throw new Error("Import exceeds the 8 MiB compressed input limit.");
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const preview = record(
-      client.importPreview
-        ? await client.importPreview(bytes)
-        : await client.request("POST", `${ADMIN}/resources/import/preview`, {
-            archiveBase64: bytesToBase64(bytes),
-          }),
-    );
-    const panel = el("section", undefined, "editor");
-    heading(`Import preview: ${file.name}`, panel);
-    p(
-      `${file.size.toLocaleString()} input bytes. No changes have been published.`,
-      panel,
-    );
-    const entries = Array.isArray(preview.items)
-      ? preview.items.filter(isRecord)
-      : Array.isArray(preview.entries)
-        ? preview.entries.filter(isRecord)
-        : [];
-    const decisions: Record<
-      string,
-      {
-        action: string;
-        newId?: string;
-      }
-    > = {};
-    table(
-      [
-        { key: "id", label: "Resource" },
-        {
-          key: "status",
-          label: "Action / size",
-          render(r, td) {
-            p(
-              `${str(r.action, str(r.status))} · ${str(r.bytes, str(r.size))} bytes`,
-              td,
-            );
-            p(str(r.reason), td);
-          },
-        },
-        {
-          key: "id",
-          label: "Conflict decision",
-          render(r, td) {
-            if (r.action === "excluded") {
-              td.textContent = "Excluded";
-              return;
-            }
-            const choice = select(`Decision for ${str(r.id)}`, [
-              { value: "skip", label: "Keep existing / skip" },
-              { value: "replace", label: "Replace with imported revision" },
-              { value: "fork", label: "Create customized fork" },
-            ]);
-            decisions[str(r.id)] = {
-              action: r.action === "add" ? "replace" : "skip",
-            };
-            choice.input.value = r.action === "add" ? "replace" : "skip";
-            on(choice.input, "change", () => {
-              decisions[str(r.id)] = {
-                action: choice.input.value,
-                ...(choice.input.value === "fork"
-                  ? {
-                      newId: `${str(r.id).slice(0, 60)}-import-${Date.now().toString(36)}`,
-                    }
-                  : {}),
-              };
-            });
-            td.append(choice.label);
-          },
-        },
-      ],
-      entries,
-      panel,
-      false,
-    );
-    if (!entries.length) panel.append(el("pre", json(preview)));
-    actions(
-      panel,
-      button(
-        "Commit reviewed import",
-        async () => {
-          await client.request("POST", `${ADMIN}/resources/import`, {
-            expectedRevision,
-            archiveBase64: bytesToBase64(bytes),
-            decisions,
-          });
-          await refresh();
-          announce("Library import committed.");
-        },
-        "primary",
-      ),
-      button("Cancel import", () => {
-        panel.remove();
-      }),
-    );
-    body.prepend(panel);
-    panel.scrollIntoView?.({ block: "start" });
-  }
-  /** Recovery surfaces one clear next action per state; technical evidence is
-   * available under Details, never demanded as an unexplained input field. */
   function mountRetainedRecovery(own: number) {
     if (!client.localRecoveryScopes || !client.inspectLocalRecovery) return;
     if (retainedPanel?.own === own) {
@@ -2847,8 +2196,11 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     }
   }
   async function renderActivity(own: number) {
-    const response = list(await client.request("GET", `${ADMIN}/activity`));
+    const response = list(await client.request("GET", `${ADMIN}/activity`,undefined,{signal:viewAbort?.signal}));
     if (own !== generation) return;
+    if(lastKnown?.installation===installation()){
+      lastKnown.activity=response.items.slice(0,100).map(row=>({operationId:str(row.operationId).slice(0,128),tool:str(row.tool).slice(0,80),phase:str(row.phase).slice(0,40)}));
+    }
     heading("Activity");
     p(
       "Operation outcomes are authoritative. An unknown provider effect must not be replayed. Other operations can continue while current editor source is verified. Cancelling cannot undo a dispatched provider effect.",
@@ -3015,7 +2367,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     );
   }
   async function exportDiagnostics(): Promise<void> {
-    const report = await buildDiagnosticReport(client, options.version, status);
+    const report = await buildDiagnosticReport(client, options.version, status, authority?.generation!==generation);
     client.download("perch-mcp-diagnostics.json", json(report), "application/json");
     announce("Redacted diagnostic report exported, including OAuth audit and transport failures.");
   }
@@ -3098,7 +2450,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     heading("Setup and Settings");
     const config = client.configuration();
     p(
-      `Userscript ${options.version} · Gateway ${str(state.version, "unverified")} · schema ${str(state.schemaVersion, "unverified")}`,
+      `Userscript ${options.version} · Gateway ${authority?.generation===generation?str(state.version,"unverified"):"unverified"} · schema ${authority?.generation===generation?str(state.schemaVersion,"unverified"):"unverified"}`,
       body,
       "muted",
     );
@@ -3113,8 +2465,8 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     for (const step of [
       "Deploy the released Cloudflare gateway package with its bindings and a unique BOOTSTRAP_SECRET. No local service is needed.",
       "Enter the exact HTTPS gateway origin. Check compatibility, then pair with its one-time secret.",
-      "Open Workspaces and attach the current native editor. Create an Agent and copy its connector URL.",
-      "Authorize the external MCP connector, approve the matching request code in Agents, then call workspace_status.",
+      "Create a Connector, assign a Workspace and explicitly bind the ready native editor. Copy the Connector URL.",
+      "Authorize the external MCP Connector, approve the matching request in Connectors, then call workspace_status.",
     ])
       p(step, instructions);
     body.append(instructions);
@@ -3300,24 +2652,26 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       }),
     );
     if (client.localDrafts) {
-      p(
-        "Unpublished Resource drafts from concurrent documents remain separate. Export them before manually recovering an older draft; this export does not replace settings, source backups or the published Library.",
-        body,
-        "muted",
-      );
-      body.append(
-        button("Export unpublished Resource drafts", async () => {
-          const drafts = await client.localDrafts!();
-          client.download(
-            "perch-mcp-resource-drafts.json",
-            json(drafts),
-            "application/json",
-          );
-          announce(
-            "Unpublished Resource drafts exported separately. Published Resources and settings are unchanged.",
-          );
-        }),
-      );
+      // Never initialize or expose a legacy Library on fresh installations.
+      // Read-only export appears only if retained historical drafts actually exist.
+      const archive=el("section");
+      body.append(archive);
+      const own=generation;
+      void client.localDrafts().then(value => {
+        if(own!==generation || !archive.isConnected) return;
+        const old=record(value);
+        const rows=Array.isArray(old.drafts)?old.drafts:Array.isArray(old.documents)?old.documents:[];
+        if(rows.length===0) return;
+        const disclosure=el("details");
+        disclosure.append(el("summary","Historical unpublished Resource drafts"));
+        p("This is read-only recovery evidence. No Resource editor or publication controls are installed.",disclosure,"muted");
+        disclosure.append(button("Export unpublished Resource drafts",async()=>{
+          const current=await client.localDrafts!();
+          client.download("perch-mcp-resource-drafts.json",json(current),"application/json");
+          announce("Historical Resource drafts exported. Published Resources and settings are unchanged.");
+        }));
+        archive.append(disclosure);
+      }).catch(()=>undefined);
     }
     if (client.restoreSourceBackup) {
       const own = generation;
@@ -3502,11 +2856,11 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     const budget = el("details");
     budget.append(el("summary", "Execution limits and recovery"));
     p(
-      "Queue: 8 pending operations per Workspace. Interactive deadline: 30 seconds. Transport message: 512 KiB. Resource import: 16 MiB expanded / 500 entries. Initial checkpoints: 64 MiB total. Current deployment configuration remains authoritative.",
+      "Queue: 8 pending operations per Workspace. Interactive deadline: 30 seconds. Transport message: 512 KiB. Checkpoints: bounded local retention. Current deployment configuration remains authoritative.",
       budget,
     );
     p(
-      "Gateway outage: close this manager and keep editing normally. Reconnect verifies identity and obtains a fresh Epoch. Unknown effects stay held until read-only reconciliation.",
+      "Gateway outage: local inspection, recovery, export and native manual editing remain available. Remote mutations require fresh authority. Unknown effects stay held until read-only reconciliation.",
       budget,
     );
     p(
@@ -3518,13 +2872,16 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       heading("Remote execution");
       actions(
         body,
-        button(
-          state.paused ? "Resume all Workspaces" : "Pause all Workspaces",
+        remoteButton(
+          state.paused ? "Resume all Workspaces" : "Pause all Workspaces", generation,
           async () => {
-            if (!state.paused) await client.pauseLocal?.();
+            const own=generation;
+            const paused=state.paused===true, revision=num(state.policyRevision);
+            if (!paused) await client.pauseLocal?.();
+            requireAuthority(own);
             await client.request("POST", `${ADMIN}/pause`, {
-              expectedRevision: num(state.policyRevision),
-              paused: !state.paused,
+              expectedRevision: revision,
+              paused: !paused,
             });
             await refresh();
             announce(
@@ -3535,21 +2892,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           },
           "danger",
         ),
-        button(
-          "Stop this document immediately",
-          async () => {
-            await client.pauseLocal?.();
-            setStatus({
-              ...status,
-              connection: "paused",
-              reason: "Local stop requested",
-            });
-            announce(
-              "Local admissions stopped. Previously dispatched effects may still complete.",
-            );
-          },
-          "danger",
-        ),
+        button("Stop this document immediately",stopLocal,"danger"),
       );
     }
   }
@@ -3572,6 +2915,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   }
   async function open(next?: Tab) {
     if (destroyed) return;
+    if (next && !buttons.has(next)) throw new Error("Unknown manager tab.");
     if (next) tab = next;
     if (!opened) {
       previousFocus = doc.activeElement;
@@ -3592,7 +2936,6 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   for (const name of [
     "Workspaces",
     "Agents",
-    "Library",
     "Activity",
     "Recovery",
     "Settings",

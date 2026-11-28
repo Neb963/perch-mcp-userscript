@@ -61,7 +61,7 @@ test('manager journeys execute against real local Worker: pair, attach, Agent, R
         assert.equal((w.binding as any).generatorId, 'synthetic-generator');
         assert.deepEqual(w.permissions, ['READ_SOURCE', 'WRITE_SOURCE', 'PREVIEW_CONTROL', 'READ_RESOURCES']);
         await manager.open('Agents');
-        input(root, 'Agent name').value = 'Synthetic Agent';
+        input(root, 'Connector name').value = 'Synthetic Agent';
         click(root, 'Create Agent');
         await until(() => [...root.querySelectorAll('p')].some(n => n.textContent === 'Synthetic Agent'));
         const a = (await client.request('GET', '/api/v1/admin/agents') as {
@@ -69,55 +69,27 @@ test('manager journeys execute against real local Worker: pair, attach, Agent, R
         }).items[0]!;
         assert.equal(a.workspaceId, w.id);
         assert.equal(input(root, 'MCP connector URL').value, issuer + '/mcp/' + a.id);
-        await manager.open('Library');
+        // UI-LIB-01 supersedes the historical interactive Resource editor.
+        // Keep the v1 backend CAS regression here; the manager must not expose it.
+        assert.equal([...root.querySelectorAll('[role=tab]')].some(node=>node.textContent==='Library'),false);
+        assert.equal([...root.querySelectorAll('button')].some(node=>node.textContent==='Publish revision'),false);
         const catalog = await client.request('GET', '/api/v1/admin/resources') as {
-            items: Record<string, unknown>[];
-            revision: number;
+            items: Record<string, unknown>[]; revision:number;
         };
-        const summary = catalog.items.find(r => r.id === 'perchance-platform')!;
-        assert.ok(summary, 'Catalog exposes the seeded platform skill');
-        const skill = await client.request('GET', '/api/v1/admin/resources/perchance-platform') as Record<string, unknown>;
-        assert.equal(typeof skill.body, 'string');
-        assert.equal(typeof skill.license, 'string');
-        assert.equal(typeof skill.provenance, 'string');
-        click(root, String(summary.title));
-        await until(() => !!root.querySelector('textarea'));
-        let area = root.querySelector('textarea')!;
-        assert.equal(area.value, skill.body, 'Editor loads complete canonical Resource text, not catalog metadata');
-        area.value = String(skill.body) + '\nOriginal manager integration fixture.';
-        area.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-        click(root, 'Publish revision');
-        await until(() => /Published new Resource revision/.test(root.textContent ?? ''));
-        const published = await client.request('GET', '/api/v1/admin/resources/perchance-platform') as Record<string, unknown>;
-        assert.equal(published.revision, Number(skill.revision) + 1);
-        assert.equal(published.body, String(skill.body) + '\nOriginal manager integration fixture.');
-        for (const key of ['id', 'kind', 'title', 'description', 'license', 'provenance', 'upstreamVersion', 'dependencies', 'files']) {
-            assert.deepEqual(published[key], skill[key], `Publish preserves canonical ${key}`);
-        }
-        click(root, 'Enable Resource at scope');
-        await until(() => /Resource assignment updated/.test(root.textContent ?? ''));
-        click(root, 'Disable Resource at scope');
-        await until(() => /Resource disabled at selected scope/.test(root.textContent ?? ''));
-        const assignment = await client.request('GET', '/api/v1/admin/resources/assignments') as {
-            items: {
-                enabled: boolean;
-                resourceId: string;
-            }[];
-        };
-        assert.equal(assignment.items.find(x => x.resourceId === 'perchance-platform')?.enabled, false);
-        // A second administrator updates the canonical revision while this manager still edits its older draft.
-        const external = { ...resourceInput(published), body: String(published.body) + '\nExternal administrator revision' };
-        await client.request('PUT', '/api/v1/admin/resources/perchance-platform', { expectedRevision: published.revision, resource: external });
-        area = root.querySelector('textarea')!;
-        area.value += '\nPending local draft after conflict';
-        area.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-        click(root, 'Publish revision');
-        await until(() => /RESOURCE_CONFLICT/.test(root.textContent ?? ''));
-        assert.match(root.querySelector('textarea')!.value, /Pending local draft after conflict/);
-        assert.match(drafts.get('resource:perchance-platform') ?? '', /Pending local draft after conflict/);
-        const latest = await client.request('GET', '/api/v1/admin/resources/perchance-platform') as Record<string, unknown>;
-        assert.match(String(latest.body), /External administrator revision/);
-        assert.doesNotMatch(String(latest.body), /Pending local draft after conflict/);
+        const summary = catalog.items.find(r=>r.id==='perchance-platform');
+        assert.ok(summary,'Explicit legacy API access retains seeded historical resources');
+        const skill=await client.request('GET','/api/v1/admin/resources/perchance-platform') as Record<string,unknown>;
+        assert.equal(typeof skill.body,'string');
+        const next={...resourceInput(skill),body:String(skill.body)+'\nLegacy API CAS fixture.'};
+        const published=await client.request('PUT','/api/v1/admin/resources/perchance-platform',
+          {expectedRevision:skill.revision,resource:next}) as Record<string,unknown>;
+        assert.equal(published.revision,Number(skill.revision)+1);
+        assert.equal(published.body,next.body);
+        for(const key of ['id','kind','title','description','license','provenance','upstreamVersion','dependencies','files'])
+          assert.deepEqual(published[key],skill[key],`Legacy CAS preserves canonical ${key}`);
+        await assert.rejects(client.request('PUT','/api/v1/admin/resources/perchance-platform',
+          {expectedRevision:skill.revision,resource:next}),/conflict|revision|Resource/i);
+        assert.equal([...root.querySelectorAll('button')].some(node=>node.textContent==='Publish revision'),false);
         manager.close();
         assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>('#native-source')!.value, 'Original synthetic draft');
     }
@@ -175,7 +147,7 @@ test('bundled manager shows 30 scoped Workspaces and rebinds a clean Workspace w
       await manager.open('Workspaces');
       assert.equal(root.querySelectorAll('tbody tr').length,30);
       assert.ok([...root.querySelectorAll('button')].some(button=>button.textContent==='Connectors'));
-      assert.equal([...root.querySelectorAll('button')].find(button=>button.textContent==='Library')?.hidden,true);
+      assert.equal([...root.querySelectorAll('button')].some(button=>button.textContent==='Library'),false);
       click(root,'Reassign to this tab');
       await until(()=>attached?.bindingGeneration===Number(bound.bindingGeneration)+1);
       assert.equal(changed,1);

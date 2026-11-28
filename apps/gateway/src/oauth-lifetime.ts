@@ -3,8 +3,9 @@ import { ApiError } from './common.js';
 /** Bounded finite access-token candidates; persistent consent is independent. */
 export const MAX_ACCESS_TOKEN_TTL_SECONDS = 10 * 365 * 86400;
 export function persistentAccessTokenTTL(raw: string | undefined): number {
-  // One-year candidate pending exact SDK qualification of longer values.
-  if (raw === undefined) return 365 * 86400;
+  // Ten-year candidate passed the pinned SDK's offline issuance, refresh, expiry and revocation tests.
+  // External-client interoperability and real KV behavior remain owner-only acceptance gates.
+  if (raw === undefined) return MAX_ACCESS_TOKEN_TTL_SECONDS;
   if (!/^[1-9][0-9]{0,9}$/.test(raw)) throw new ApiError('INVALID_INPUT', 'Invalid access token lifetime.');
   const ttl = Number(raw);
   if (!Number.isSafeInteger(ttl) || ttl < 60 || ttl > MAX_ACCESS_TOKEN_TTL_SECONDS)

@@ -54,6 +54,7 @@ interface Configuration {
   issuer: string | null;
   paired: boolean;
   resources: string[];
+  assignmentContractVersion?: 2;
 }
 /**
  * Privileged installation routes remain Perchance-origin-only.
@@ -200,7 +201,7 @@ function manualCallback(url: string): Response {
   return new Response(result.body, { status: result.status, headers });
 }
 function oauthServer(config: Configuration, env: Env) {
-  const persistent = env.DEVELOPMENT_CONTRACT_V2_ENABLED === 'true';
+  const persistent = config.assignmentContractVersion === 2 || env.DEVELOPMENT_CONTRACT_V2_ENABLED === 'true';
   const accessTokenTTL = persistent ? persistentAccessTokenTTL(env.OAUTH_ACCESS_TOKEN_TTL_SECONDS) : 900;
   if (!config.issuer)
     throw new ApiError(

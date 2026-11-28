@@ -17,6 +17,7 @@ test('F16 persistent Grants have no age-based expiry or cleanup; old finite and 
 test('F16 finite access lifetime candidates are explicit and bounded', () => {
   for(const seconds of [900,1800,3600,7200,86400,604800,2592000,31536000,315360000])
     assert.equal(persistentAccessTokenTTL(String(seconds)),seconds);
+  assert.equal(persistentAccessTokenTTL(undefined),315360000);
   for(const raw of ['0','-1','Infinity','NaN','1.5','315360001',' 900'])
     assert.throws(()=>persistentAccessTokenTTL(raw));
 });
