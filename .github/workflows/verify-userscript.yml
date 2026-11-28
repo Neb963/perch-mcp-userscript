@@ -47,9 +47,10 @@ jobs:
           BENCHMARK_NATIVE: "true"
           BENCHMARK_MULTI_CONNECTOR: "true"
           BENCHMARK_TRACE: "true"
+          BENCHMARK_SQL_PROFILE: "true"
         run: |
           timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/benchmark-development-v2.ts "$RUNNER_TEMP/remediation-native.json"
-          BENCHMARK_NATIVE=false timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/benchmark-development-v2.ts "$RUNNER_TEMP/remediation-legacy.json"
+          BENCHMARK_SQL_PROFILE=false BENCHMARK_NATIVE=false timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/benchmark-development-v2.ts "$RUNNER_TEMP/remediation-legacy.json"
       - name: Publish offline cost measurements
         uses: actions/upload-artifact@v4
         with:

@@ -48,6 +48,12 @@ F10 status semantics: stale heartbeat is not verified source. Registry detail mu
 - Remaining: F06 conservative historical storage reclamation, actual preview pixels feasibility, all remaining A01–A34 matrix entries, full R04 performance and R05 final exact-head qualification. No unfinished row is PASS.
 R05 first exact-head CI qualification at `42ab329` [run 46097599704](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46097599704) succeeded: 686 tests passed, zero failed, one skipped, both offline cost paths, inventory generation, release build/hash check and Wrangler dry-run. Inventory has 1,317 distinct clauses: 54 PASS, 1,196 NOT_STARTED, 28 FAIL, 24 DEFERRED_OWNER, 1 BLOCKED_FEASIBILITY and 14 SUPERSEDED; the strict release gate fails by design. The artifact initially stamped synthetic PR merge `GITHUB_SHA`; next checkpoint corrects provenance to the checked-out source SHA and tree, enforcing expected PR head in CI.
 
+### R04 forensic SQL-cost profiling (2026-11-28)
+
+- Authoritative native lifecycle at 282ecef: **225 reads / 57 writes** vs <=120/40. Registry 97/27, Workspace 128/30 across admission, poll, RUNNING, terminal and status. This is synthetic gateway lifecycle, not provider billing.
+- Before storage rewrites, add opt-in SQL_TELEMETRY_DETAIL_ENABLED sampled query-shape fingerprints, SQL table and allowlisted key-kind to bounded telemetry. Never log SQL parameters, credentials, generator IDs or source text. Disabled mode must produce zero output.
+- Enable profiling only for the native offline benchmark; retain unprofiled legacy comparator. Use exact-head CI to identify dominant query families. Change only measured paths; preserve rollback behavior and fail-closed replay, revocation, Target, lease and terminal receipts.
+- This checkpoint is instrumentation, NOT a performance fix or release acceptance. Do not assert <=120/40 until equal-denominator measured lifecycle passes.
 ### R05 exact-head release audit
 
 1. Read all four atomic requirement matrices mechanically. Validate unique IDs, legal statuses, structural completeness, and that no PASS carries pending or missing verification evidence. Export a deterministic JSON inventory with every unresolved clause. Treat `--strict` as release-blocking until the requirements actually qualify; do not fill gaps by assumption.

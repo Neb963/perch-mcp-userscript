@@ -17,13 +17,13 @@ export class SqlRecords {
     this.usage.statements++;
     let cursor;
     try {cursor = this.storage.sql.exec<T>(sql,...args);}
-    catch(error){this.usage.unmetered++;trackSql(sql,{reads:0,writes:0,statements:1,unmetered:1});throw error;}
+    catch(error){this.usage.unmetered++;trackSql(sql,{reads:0,writes:0,statements:1,unmetered:1},args);throw error;}
     try { return cursor.toArray(); }
     finally {
       const metered=typeof cursor.rowsRead==="number"&&typeof cursor.rowsWritten==="number";
       const sample={reads:metered?cursor.rowsRead:0,writes:metered?cursor.rowsWritten:0,statements:1,unmetered:metered?0:1};
       this.usage.reads+=sample.reads;this.usage.writes+=sample.writes;this.usage.unmetered+=sample.unmetered;
-      trackSql(sql,sample);
+      trackSql(sql,sample,args);
     }
   }
   snapshotUsage(): SqlUsage { return { ...this.usage }; }

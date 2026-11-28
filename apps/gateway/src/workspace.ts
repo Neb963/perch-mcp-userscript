@@ -192,7 +192,7 @@ export class Workspace {
     });
   }
   async fetch(request: Request): Promise<Response> {
-    return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","workspace",new URL(request.url).pathname,()=>this.fetchMetered(request));
+    return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","workspace",new URL(request.url).pathname,()=>this.fetchMetered(request),this.env.SQL_TELEMETRY_DETAIL_ENABLED==="true");
   }
   private async fetchMetered(request: Request): Promise<Response> {
     let response: Response;

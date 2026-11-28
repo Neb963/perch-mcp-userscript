@@ -9,7 +9,9 @@ const native = process.env.BENCHMARK_NATIVE === 'true';
 const histories = (process.env.BENCHMARK_HISTORIES ?? '0,150,999,1000').split(',').map(Number);
 assert.ok(histories.every((count,index)=>Number.isInteger(count)&&count>=0&&count<=1000&&(index===0||count>histories[index-1]!)));
 const vars = {DEVELOPMENT_CONTRACT_V2_ENABLED:'true',DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED:'true',
-  ...(native ? {CANONICAL_STORAGE_MODE:'native',BINARY_PAYLOADS_ENABLED:'true'} : {})};
+  ...(native ? {CANONICAL_STORAGE_MODE:'native',BINARY_PAYLOADS_ENABLED:'true'} : {}),
+  ...(process.env.BENCHMARK_SQL_PROFILE==='true' ? {
+    SQL_TELEMETRY_ENABLED:'true',SQL_TELEMETRY_DETAIL_ENABLED:'true'} : {})};
 const h = await createCapacityHarness(1,vars,{entryPoint:'tests/fixtures/optimization-runtime.ts'});
 const admin='/api/v1/admin';
 try {

@@ -304,6 +304,8 @@ export interface Env {
   ADMISSION_BUDGET_CAPS_JSON?: string;
   ADMISSION_BUDGET_BASELINE_JSON?: string;
   SQL_TELEMETRY_ENABLED?: string;
+  /** Opt-in fingerprint-only query-cost profiling; never record SQL arguments. */
+  SQL_TELEMETRY_DETAIL_ENABLED?: string;
   REGISTRY: DurableObjectNamespace;
   WORKSPACES: DurableObjectNamespace;
   OAUTH_KV: KVNamespace;
