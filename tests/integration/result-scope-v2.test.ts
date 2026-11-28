@@ -29,8 +29,10 @@ test('W2 v2 result and cancel enforce original Grant/Target at Workspace before 
       body:JSON.stringify({jsonrpc:'2.0',id:crypto.randomUUID(),method:'tools/list'}),
     });
     assert.equal(listed.status,200);
-    const catalog=(await listed.json() as {result?:{tools:Array<{name:string;description:string;
-      annotations?:{readOnlyHint?:boolean;openWorldHint?:boolean}}>} >}).result?.tools;
+    const catalogResult=await listed.json() as {result?:{tools:{
+      name:string;description:string;annotations?:{readOnlyHint?:boolean;openWorldHint?:boolean};
+    }[]}};
+    const catalog=catalogResult.result?.tools;
     assert.ok(catalog);
     const expected=['read','write','delete','rename','list_files','page_eval','page_refresh',
       'preview_diagnostics','set_viewport_size','capture_page_image','execute_js','fetch_url',
