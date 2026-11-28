@@ -48,6 +48,11 @@ F10 status semantics: stale heartbeat is not verified source. Registry detail mu
 - Remaining: F06 conservative historical storage reclamation, actual preview pixels feasibility, all remaining A01–A34 matrix entries, full R04 performance and R05 final exact-head qualification. No unfinished row is PASS.
 R05 first exact-head CI qualification at `42ab329` [run 46097599704](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46097599704) succeeded: 686 tests passed, zero failed, one skipped, both offline cost paths, inventory generation, release build/hash check and Wrangler dry-run. Inventory has 1,317 distinct clauses: 54 PASS, 1,196 NOT_STARTED, 28 FAIL, 24 DEFERRED_OWNER, 1 BLOCKED_FEASIBILITY and 14 SUPERSEDED; the strict release gate fails by design. The artifact initially stamped synthetic PR merge `GITHUB_SHA`; next checkpoint corrects provenance to the checked-out source SHA and tree, enforcing expected PR head in CI.
 
+### R04 ordinary terminal Activity null-overlay optimization
+
+- Exact-head 5469b81 passed offline CI; native lifecycle **201 SQL reads / 57 writes**. Direct v2 RUNNING acknowledgment reduced its Workspace stage from 20 reads to 15 while preserving late-dispatch UNKNOWN records.
+- RegistryIndex.sync currently calls CanonicalActivity.setNotice(null) for every immutable successful/known terminal notice. Such receipts never have a `UNKNOWN`/`PARTIAL` overlay; this re-reads Activity metadata and entry without changing state. Skip only the no-op for nonuncertain notices; retain all uncertain overlay creation, resolution updates, tombstone cleanup, and full Activity correctness.
+- Verify against existing Activity native/legacy migration and image-revocation tests plus exact native cost benchmark. Record actual read reduction, not inferred savings.
 ### R04 v2 RUNNING exact-expiry fast path (2026-11-28)
 
 - Native 6a1012 CI 46104277932 passed all offline checks and measured **206 SQL reads / 57 writes** for the equivalent full read lifecycle; generic MCP auth skip saved 12 reads, and synchronous nonimage result recheck skip saved 7 more. The asynchronous image pixel recheck and F05 late-revocation test remain intact.

@@ -96,7 +96,12 @@ export class RegistryIndex {
               const uncertain=UNCERTAIN.includes(String(v.phase));
               hold=Number(uncertain&&!event?.resolution&&event?.tool!=="set_viewport_size");
               if(!hold)due=num(v.expires);
-              this.setActivity(key.slice("terminal-notice/".length),"notice",uncertain&&event?event:null);
+              // A known-terminal immutable receipt never had an uncertain
+              // overlay. Setting a null notice would re-read canonical Activity
+              // metadata and entry without changing them. Retain explicit
+              // deletion cleanup and every UNKNOWN/PARTIAL overlay transition.
+              if(uncertain&&event)
+                this.setActivity(key.slice("terminal-notice/".length),"notice",event);
             }
             const workspace=kind==="terminal-notice"?key.split("/")[1]??"":String(v.workspaceId??"");
             const state=kind==="agent"?(v.suspended?"suspended":"active"):String(v.state??v.phase??"");
