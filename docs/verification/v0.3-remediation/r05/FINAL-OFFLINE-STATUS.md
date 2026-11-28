@@ -1,5 +1,9 @@
 # R05 — Offline takeover exit, exact-head evidence and unresolved gates
 
+## 2026-11-28 R07 document qualification (latest strict register)
+
+**Latest tested code** [5cf2aa7](https://github.com/Neb963/perch-mcp-userscript/commit/5cf2aa7fa1346d7b1a4df4f6578dca29fa4d38f3), [CI 46150545750](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46150545750): **727 passed, 0 failed, 1 historical skip**. Eleven direct T0 documentation clauses now independently tested; earlier eight from R06 remain qualified. Current strict register **1317 = 112 PASS + 4 FAIL + 1162 NOT_STARTED + 24 owner-deferred + 1 feasibility-blocked + 14 superseded**. Native SQL **187/44 versus objective 120/40**, legacy **251/74**; required unsaved native pixels and owner-only gates unavailable. [R07 evidence](../r07/DOCUMENT-QUALIFICATION.md). The previous numeric checkpoints are historical below. No live provider interaction, rollout, deployment or merge.
+
 ## 2026-11-28 R06 documentation-only qualification (current register, supersedes numeric totals below)
 
 **Current independently tested code:** [d78a023](https://github.com/Neb963/perch-mcp-userscript/commit/d78a023ad0f2171cbf0732d24fdb0b73b9ea85dc); [offline CI 46149708275](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46149708275) **716 passed / 0 failed / 1 historical skip**. No runtime SQL change remains after zero-benefit cache experiment was reversed. Native five-stage lifecycle **187 reads / 44 writes**, legacy **251/74**; SQL target **≤120/40 FAILED**. The actual unsaved preview pixel capture remains unsupported. Eight documented-authority **T0-only** S00 clauses are now independently qualified by the passing exact-code tests; [direct proof](../r06/S00-DOC-QUALIFICATION.md).

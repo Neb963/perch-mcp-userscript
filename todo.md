@@ -1,11 +1,11 @@
 # Implementation ledger
 
-## R07 — remaining eleven direct documentation contracts (candidate pending locked CI)
+## R07 — eleven directly qualified T0 document contracts (CI SUCCESS)
 
 - Baseline exact code d78a023 and verified R06 register commit 3956255, no live calls/deploy/merge.
 - Source checks: S00-003 architecture boundaries; S00-010 labeled historical docs; S00-011 all 52 old tool/permission dispositions; S00-012 unchanged scope; S00-013 exact R00 evidence; S00-015 phase ledger; S00-016 original A01–A34 mapped one-for-one; S02-049 explicit Target; S02-101 exact stale MCP catalog recovery; S04-016 operation-key replay prohibition; S04-080 cross-segment partial and separate Save.
 - Change only narrow Connector setup guidance and agent-side instructions plus eleven T0 assertions. The client steps are intentionally UI-agnostic: no fake button names; live external client acceptance remains OWNER.
-- Local Node 22.16 built-in TypeScript stripping verified eleven direct source-document tests with 0 failures. Do **not** mark rows PASS until the exact-head offline CI reruns these; docs-only tests do not qualify runtime correctness.
+- Exact source 5cf2aa7 / [CI 46150545750](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46150545750) **727 PASS / 0 FAIL / 1 historical SKIP**, eleven named S00/S02/S04 document-only assertions passed. All package/hash/dry-run and synthetic benchmark steps succeeded. R07 promoted eleven T0-only rows; resulting strict inventory **112 PASS / 4 FAIL / 1162 NOT_STARTED / 24 OWNER / 1 feasibility BLOCKED / 14 SUPERSEDED =1317**. [R07 proof](docs/verification/v0.3-remediation/r07/DOCUMENT-QUALIFICATION.md). No browser/runtime/provider gate inferred.
 - Objective SQL native ≤120/40 still **unmet at 187/44**; native unsaved preview pixel gate and owner-only external conditions still blocked. No Cloudflare or browser provider interaction.
 
 
