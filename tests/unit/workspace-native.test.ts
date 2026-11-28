@@ -120,7 +120,7 @@ test('R04 native small read selectors share canonical row, while large and mutat
     assert.equal(raw.hasArgs,0);
     assert.deepEqual(JSON.parse(raw.context).args,small.args);
     assert.deepEqual(store.get('operation/small-read'),small);
-    assert.deepEqual(store.activeObligations().find(x=>x.tool==='read')?.args,small.args);
+    assert.deepEqual(store.budgetObligations().find(x=>x.tool==='read')?.args,small.args);
     const large={...op('large-read'),phase:'ADMITTED',terminalAt:undefined,
       terminalNotified:undefined,result:undefined,args:{files:[{path:'x'.repeat(2048)}]}};
     store.put('operation/large-read',large);
@@ -158,7 +158,7 @@ test('R04 small selector survives legacy migration, legacy external conversion a
     finish(store);
     assert.deepEqual(store.get('operation/small-legacy')?.args,args);
     assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_args_v2 WHERE key='operation/small-legacy'").get()!.n,0);
-    assert.deepEqual(store.activeObligations().find(x=>x.tool==='read'),undefined);
+    assert.deepEqual(store.budgetObligations().find(x=>x.tool==='read'),undefined);
     const sql="UPDATE operation_native_v2 SET context=? WHERE key=?";
     const native=f.sqlite.prepare("SELECT context FROM operation_native_v2 WHERE key='operation/small-legacy'").get() as {context:string};
     const bad=JSON.parse(native.context) as Record<string,unknown>;

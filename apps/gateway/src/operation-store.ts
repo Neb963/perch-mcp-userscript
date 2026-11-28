@@ -112,7 +112,7 @@ function decode<T extends StoredOperation>(row:NativeRow):T {
       if(payload===null||payload===undefined||own(context,kind))corrupt();
       value[kind]=parsed(payload);
     } else if(payload!==null&&payload!==undefined)corrupt();
-    if(kind==='args'&&has===0&&own(context,'args')&&!inlineReadArgs(value as StoredOperation))
+    if(kind==='args'&&has===0&&own(context,'args')&&!inlineReadArgs(value as unknown as StoredOperation))
       corrupt();
     if(kind==='result'&&own(context,'result'))corrupt();
   }
