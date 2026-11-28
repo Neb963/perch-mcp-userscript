@@ -9,5 +9,7 @@
 - Batching substantially amortized *offline measured Gateway admission/receipt costs* for 10 action cases, but the synthetic benchmark did not execute provider/native sub-actions; do not treat measured Gateway-only savings as actual Perchance workload or a quota guarantee.
 - Put verified testing after source updates. Keep Save and POST separate. Evaluate preview code only for the requested operation. Do not pass ambient credentials or arbitrary destination URLs.
 - Report which actions committed, which were rejected before dispatch and which remain uncertain. For UNKNOWN, PARTIAL, or missing evidence, inspect the exact Operation and current readback. Do not repeat uncertain effects.
+- Across native publication, preview, and network segments, a later failure does not roll back earlier completed segments. A partial batch result must distinguish completed, failed, skipped and uncertain actions; do not claim cross-segment atomicity. `save_generator` is excluded from `batch` and is a separate explicit final Save, with independently verified saved-source readback.
+
 - SourceRevision describes complete native draft bytes. LocalRevision covers private scratch and imports. PreviewRevision requires applied document proof. SavedRevision requires independent persisted source readback.
 - Capture requires a verified actual-pixel interface and explicit permission. Report unavailability or operator action when the tool says capture is unsupported.

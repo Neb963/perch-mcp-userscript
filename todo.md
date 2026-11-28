@@ -1,5 +1,14 @@
 # Implementation ledger
 
+## R07 — remaining eleven direct documentation contracts (candidate pending locked CI)
+
+- Baseline exact code d78a023 and verified R06 register commit 3956255, no live calls/deploy/merge.
+- Source checks: S00-003 architecture boundaries; S00-010 labeled historical docs; S00-011 all 52 old tool/permission dispositions; S00-012 unchanged scope; S00-013 exact R00 evidence; S00-015 phase ledger; S00-016 original A01–A34 mapped one-for-one; S02-049 explicit Target; S02-101 exact stale MCP catalog recovery; S04-016 operation-key replay prohibition; S04-080 cross-segment partial and separate Save.
+- Change only narrow Connector setup guidance and agent-side instructions plus eleven T0 assertions. The client steps are intentionally UI-agnostic: no fake button names; live external client acceptance remains OWNER.
+- Local Node 22.16 built-in TypeScript stripping verified eleven direct source-document tests with 0 failures. Do **not** mark rows PASS until the exact-head offline CI reruns these; docs-only tests do not qualify runtime correctness.
+- Objective SQL native ≤120/40 still **unmet at 187/44**; native unsaved preview pixel gate and owner-only external conditions still blocked. No Cloudflare or browser provider interaction.
+
+
 
 ## R06 — reject ineffective transaction read cache; qualify eight documentation contracts
 
