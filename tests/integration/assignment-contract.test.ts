@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCapacityHarness } from './gateway-capacity-harness.js';
 import { issueSyntheticToken } from '../fixtures/optimization-client.js';
-import { encodeTarget, nextGeneration, parseTarget } from '../../packages/contracts/src/target.js';
+import { encodeTarget, nextGeneration, parseTarget, validGeneration } from '../../packages/contracts/src/target.js';
 
 const admin = '/api/v1/admin';
 const ceiling = ['READ_SOURCE', 'WRITE_SOURCE', 'PREVIEW_CONTROL'];
@@ -15,6 +15,31 @@ test('Target encoding rejects alternate representations and generation overflow'
     assert.throws(() => parseTarget(value), /Invalid Workspace Target|canonical Workspace Target/);
   }
   assert.throws(() => nextGeneration(Number.MAX_SAFE_INTEGER), /cannot advance/);
+});
+
+test('S02-009 generation boundaries use canonical zero and MAX_SAFE_INTEGER, rejecting every overflow', () => {
+  const maximum = Number.MAX_SAFE_INTEGER;
+  for (const value of [0, 1, maximum - 1, maximum]) assert.equal(validGeneration(value), true, String(value));
+  for (const value of [-1, -0.5, 1.5, maximum + 1, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY,
+    Number.NaN, '0', null, undefined]) assert.equal(validGeneration(value), false, String(value));
+  for (const [assignmentGeneration, bindingGeneration] of [[0, 0], [maximum, maximum],
+    [0, maximum], [maximum, 0]]) {
+    const identity = {workspaceId: 'scope_9-A', assignmentGeneration, bindingGeneration};
+    const encoded = encodeTarget(identity);
+    assert.equal(encoded, 'w2.scope_9-A.' + assignmentGeneration + '.' + bindingGeneration);
+    assert.deepEqual(parseTarget(encoded), identity);
+  }
+  assert.equal(nextGeneration(0), 1);
+  assert.equal(nextGeneration(maximum - 1), maximum);
+  for (const value of [-1, -0.1, 1.5, maximum, maximum + 1, Number.NaN, Number.POSITIVE_INFINITY])
+    assert.throws(() => nextGeneration(value), /cannot advance/);
+  for (const value of ['w2.scope_9-A.00.0', 'w2.scope_9-A.0.00', 'w2.scope_9-A.-0.1',
+    'w2.scope_9-A.9007199254740992.0', 'w2.scope_9-A.0.9007199254740992',
+    'w2.scope_9-A.0.1e1'])
+    assert.throws(() => parseTarget(value), /Invalid Workspace Target/);
+  for (const value of [-1, maximum + 1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])
+    assert.throws(() => encodeTarget({workspaceId: 'scope_9-A', assignmentGeneration: value, bindingGeneration: 0}),
+      /Invalid Workspace Target/);
 });
 
 test('v2 Connector consent, legacy scope and indexed discovery in local workerd', async () => {
