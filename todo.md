@@ -1,5 +1,13 @@
 # Implementation ledger
 
+## R09 — bounded v2 input admission (offline verified)
+
+- Exact source `2e2f5221baddf0bf404accfe66ea8c3be230c46f`; [offline CI 46156403985](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46156403985) **730 PASS, 0 FAIL, 1 historical SKIP**. Executed full pinned CI test/build/benchmark/artifact workflow; no production or native Firefox operations.
+- Added iterative input-structure validation (depth ≤16, nodes ≤16,384, no shared/cyclic object references) before any Registry/Workspace work, and serialized UTF-8 envelope budget on standalone requests. The original batch budget remains. Bounded positive and over-limit negative cases are directly asserted by `S03-007/008` tests in `tests/unit/development-v2.test.ts`.
+- Promoted only **S03-007** and **S03-008** in existing `SPEC-00-05.md` register on exact named test evidence ([R09](docs/verification/v0.3-remediation/r09/DIRECT-QUALIFICATION.md)). Register: **1,317 = 124 PASS, 4 FAIL, 1,150 NOT_STARTED, 24 DEFERRED_OWNER, 1 BLOCKED_FEASIBILITY, 14 superseded**.
+- **Next executable**: Profile native five-stage SQL physical query/index amplification under current authority and choose one measurable safe structural reduction, then exact same 120/40 benchmark and historical-compatibility negative tests; separately qualify next P0 recovery/authorization requirement with direct assertions. S07-023 screenshot remains blocked on operator authorization and demonstrable exact unsaved-preview pixels.
+- PR #25 remains draft and unmerged. Do not deploy, run provider/production tests, request browser permissions or merge.
+
 ## R08 — finishing state, direct Target/discovery and pre-admission qualifications (offline verified)
 
 - Baseline: source/docs `d9906633467e72d3ecb1364fb60139b5110a3698`, [successful offline CI 46150920907](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46150920907), 727 PASS / 0 FAIL / 1 historical SKIP; 1,317 clauses = 112 PASS / 4 FAIL / 1,162 NOT_STARTED / 24 OWNER / 1 feasibility BLOCKED / 14 superseded.
