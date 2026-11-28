@@ -37,4 +37,15 @@ export const managerStyles = `
  .compact-workspaces .secondary-actions .row{align-items:stretch}
  .compact-connector{align-items:start}
 }
+
+/* Collapsed v2 rows: measured 30/50 Workspace target across three viewports. */
+.compact-workspaces td{font-size:13px;line-height:1.25;padding:2px 6px}
+.compact-workspaces td p{font-size:12px;line-height:1.25;margin:1px 0}
+.compact-workspaces td strong{font-size:13px}
+.compact-workspaces button{font-size:12px;min-height:26px;padding:3px 6px}
+.compact-workspaces .secondary-actions summary{font-size:12px}
+.compact-filter{display:flex;align-items:center;gap:8px}
+.compact-filter input{flex:1;min-width:0;width:auto}
+@media(max-width:620px){.compact-workspaces button{min-height:30px}
+ .compact-workspaces td{font-size:13px;padding:4px 3px}}
 `;

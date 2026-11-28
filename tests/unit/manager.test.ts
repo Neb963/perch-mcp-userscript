@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { mountManager, exportSafeSettings, renderResourcePreview, lineDiff, type ManagerClient } from '../../apps/userscript/src/manager';
+import { mountManager, exportSafeSettings, renderResourcePreview, lineDiff, approvalPollingDelay, type ManagerClient } from '../../apps/userscript/src/manager';
 import { managerStyles } from '../../apps/userscript/src/manager.css';
 function fixture(overrides: Partial<ManagerClient> = {}, synthetic = true) {
     const dom = new JSDOM('<!doctype html><html><body><input id="native-editor" value="untouched"></body></html>', { url: 'https://perchance.org/synthetic#edit', pretendToBeVisual: true });
@@ -503,4 +503,84 @@ test('F22.07 background Connector view stops polling and invalidates mutation au
   await until(()=>f.requests.length>calls);
   assert.equal(f.root.querySelector('[role=tab][aria-selected=true]')?.textContent,'Connectors');
   f.handle.destroy();
+});
+
+test('F22.07 and F26.04 consent polling stops at idle or bounded failure, while pending requests remain visible',()=>{
+  assert.equal(approvalPollingDelay(0,0,0),4000);
+  assert.equal(approvalPollingDelay(0,29999,0),4000);
+  assert.equal(approvalPollingDelay(0,30000,0),null);
+  assert.equal(approvalPollingDelay(0,3_600_000,0),null);
+  assert.equal(approvalPollingDelay(1,3_600_000,0),4000);
+  assert.equal(approvalPollingDelay(0,30000,1),8000);
+  assert.equal(approvalPollingDelay(0,30000,2),16000);
+  assert.equal(approvalPollingDelay(0,30000,4),60000);
+  assert.equal(approvalPollingDelay(0,30000,5),null);
+  assert.equal(approvalPollingDelay(0,30000,1,300000),300000);
+  assert.equal(approvalPollingDelay(1,30000,5,300000),null);
+});
+
+test('F23 rollout Settings identifies disabled v2 execution and marks Gateway truth unknown during outage',async()=>{
+  const f=fixture();
+  const original=f.client.request;
+  f.client.request=async(method,path,body,options)=>{
+    if(path.endsWith('/state'))return {revision:3,policyRevision:2,version:'0.3.0',schemaVersion:1,
+      assignmentContractVersion:2,rollout:{developmentContractV2Enabled:true,
+        developmentContractV2ExecutionEnabled:false,canonicalStorageMode:'native',
+        pushNotificationsEnabled:false,binaryPayloadsEnabled:true,admissionBudgetEnabled:false}};
+    if(path.endsWith('/connectors'))return {items:[],revision:3};
+    return original(method,path,body,options);
+  };
+  await f.handle.open('Settings');
+  assert.match(f.root.textContent??'',/Rollout and capability state/);
+  assert.match(f.root.textContent??'',/Assignment contract: v2/);
+  assert.match(f.root.textContent??'',/19-tool v2 execution: Disabled/);
+  assert.match(f.root.textContent??'',/Canonical storage: native/);
+  f.handle.setStatus({connection:'degraded',reason:'Quota exhausted'});
+  assert.match(f.root.textContent??'',/Authoritative Gateway status: UNVERIFIED\/OFFLINE/);
+  assert.match(f.root.textContent??'',/19-tool v2 execution: unknown/);
+  f.handle.destroy();
+});
+
+test('F20 unbound Workspace never inherits stale heartbeat or dirty state',async()=>{
+ const f=fixture();
+ const original=f.client.request;
+ f.client.request=async(method,path,body,options)=>{
+  if(path.endsWith('/state'))return {revision:2,policyRevision:2,assignmentContractVersion:2,
+    version:'0.3.0',schemaVersion:1};
+  if(path.endsWith('/workspaces'))return {items:[{
+    id:'unbound',label:'Reserved development slot',revision:1,
+    contractVersion:2,binding:null,bindingRevision:2,bindingGeneration:2,
+    assignmentGeneration:2,epoch:3,permissions:['READ_SOURCE'],paused:false,
+    connectorId:null,observation:{epoch:3,dirty:false,observedAt:Date.now()},
+  }],revision:1};
+  if(path.endsWith('/connectors'))return {items:[],revision:1};
+  return original(method,path,body,options);
+ };
+ await f.handle.open('Workspaces');
+ const content=f.root.querySelector('tbody')?.textContent??'';
+ assert.match(content,/No active Binding/);
+ assert.match(content,/Dirty unknown/);
+ assert.doesNotMatch(content,/Heartbeat recent|Draft clean/);
+ f.handle.destroy();
+});
+test('OAUTH-PERSIST-01 manager displays permanent v2 Grant and exact revocation affordance',async()=>{
+ const f=fixture();
+ const original=f.client.request;
+ f.client.request=async(method,path,body,options)=>{
+  if(path.endsWith('/state'))return {revision:2,policyRevision:2,assignmentContractVersion:2,
+    version:'0.3.0',schemaVersion:1};
+  if(path.endsWith('/workspaces'))return {items:[],revision:1};
+  if(path.endsWith('/connectors'))return {items:[{id:'connector-a',label:'ChatGPT',endpoint:'https://gateway.example.workers.dev/mcp/connector-a',
+    contractVersion:2,revision:1,assignmentCount:0,permissionCeiling:['READ_SOURCE'],suspended:false}],revision:1};
+  if(path.endsWith('/grants'))return {items:[{id:'grant-a',agentId:'connector-a',workspaceId:'',
+    clientId:'client-a',state:'active',revision:1,contractVersion:2,expiresAt:null,
+    audience:'https://gateway.example.workers.dev/mcp/connector-a',permissions:['READ_SOURCE']}],revision:1};
+  return original(method,path,body,options);
+ };
+ await f.handle.open('Agents');
+ await until(()=>/Authorized — until revoked/.test(f.root.textContent??''));
+ assert.match(f.root.textContent??'',/ChatGPT/);
+ assert.match(f.root.textContent??'',/Revoke Grant/);
+ assert.doesNotMatch(f.root.querySelector('tbody')?.textContent??'',/expires null/);
+ f.handle.destroy();
 });

@@ -1664,7 +1664,17 @@ export class Registry {
       return json({
         revision: c.revision,
         policyRevision: c.policyRevision,
-        ...(this.env.DEVELOPMENT_CONTRACT_V2_ENABLED === 'true' ? { assignmentContractVersion: 2 } : {}),
+        assignmentContractVersion: c.assignmentContractVersion ?? 1,
+        rollout: {
+          developmentContractV2Enabled: this.env.DEVELOPMENT_CONTRACT_V2_ENABLED === 'true',
+          developmentContractV2ExecutionEnabled: this.env.DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED === 'true',
+          canonicalStorageMode: this.env.CANONICAL_STORAGE_MODE ?? 'legacy',
+          pushNotificationsEnabled: this.env.PUSH_NOTIFICATIONS_ENABLED === 'true',
+          binaryPayloadsEnabled: this.env.BINARY_PAYLOADS_ENABLED === 'true',
+          admissionBudgetEnabled: this.env.ADMISSION_BUDGET_ENABLED === 'true',
+          actualPixelCapture: 'UNSUPPORTED_INTERFACE',
+          accountQuotaKnown: false,
+        },
         paused: c.paused,
         paired: c.paired,
         version: VERSION,

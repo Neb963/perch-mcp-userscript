@@ -48,8 +48,17 @@ jobs:
           BENCHMARK_MULTI_CONNECTOR: "true"
           BENCHMARK_TRACE: "true"
         run: |
-          mkdir -p dist
-          timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/benchmark-development-v2.ts dist/remediation-native.json
+          timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/benchmark-development-v2.ts "$RUNNER_TEMP/remediation-native.json"
+          BENCHMARK_NATIVE=false timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/benchmark-development-v2.ts "$RUNNER_TEMP/remediation-legacy.json"
+      - name: Publish offline cost measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: perch-mcp-remediation-cost-evidence
+          path: |
+            ${{ runner.temp }}/remediation-native.json
+            ${{ runner.temp }}/remediation-legacy.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Build userscript and Worker package
         run: npm run build
       - name: Verify release package hashes
@@ -74,6 +83,5 @@ jobs:
             dist/perch-mcp-cloudflare.zip
             dist/SHA256SUMS.txt
             dist/DOWNLOAD-SHA256SUMS.txt
-            dist/remediation-native.json
           if-no-files-found: error
           retention-days: 30

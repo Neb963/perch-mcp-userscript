@@ -1,5 +1,14 @@
 import { v2Permissions, v2DefaultPermissions } from '../../../packages/contracts/src/target.js';
 import { managerStyles } from "./manager.css";
+/** The visible Connector view watches briefly for user-initiated consent,
+ * never polls an idle Gateway indefinitely or retries a failed quota forever. */
+export function approvalPollingDelay(pending: number, elapsedMs: number,
+  failedAttempts: number, quotaDelayMs = 0): number | null {
+  if (failedAttempts >= 5 || (failedAttempts === 0 && pending === 0 && elapsedMs >= 30_000))
+    return null;
+  return Math.max(quotaDelayMs, failedAttempts
+    ? Math.min(60_000, 4000 * 2 ** Math.min(failedAttempts, 4)) : 4000);
+}
 import type { HistoricalRecoveryInspection, HistoricalRecoveryScope } from "./historical-recovery.js";
 import { validatePublicFetchUrl } from "./public-fetch.js";
 export interface ManagerIdentity {
@@ -385,6 +394,19 @@ export async function buildDiagnosticReport(
         paused: safeState.paused === true,
         workspaces: num(safeState.workspaces),
         agents: num(safeState.agents),
+        assignmentContractVersion: num(safeState.assignmentContractVersion),
+        rollout: (() => {
+          const r=record(safeState.rollout);
+          return {
+            developmentContractV2Enabled:r.developmentContractV2Enabled===true,
+            developmentContractV2ExecutionEnabled:r.developmentContractV2ExecutionEnabled===true,
+            canonicalStorageMode:['legacy','prepare','native'].includes(str(r.canonicalStorageMode))
+              ?r.canonicalStorageMode:'unknown',
+            pushNotificationsEnabled:r.pushNotificationsEnabled===true,
+            binaryPayloadsEnabled:r.binaryPayloadsEnabled===true,
+            admissionBudgetEnabled:r.admissionBudgetEnabled===true,
+          };
+        })(),
       }),
     },
     oauthAudit: { ok: remote.ok, ...(!remote.ok ? { error: remote } : {}), events },
@@ -822,6 +844,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   }
   function search(parent = body) {
     const f = field("Filter", filterValue, "search");
+    f.label.classList.add("compact-filter");
     const apply = () => {
       if(confirmation) dismissConfirmation();
       filterValue = f.input.value;
@@ -1194,11 +1217,14 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       {key:'binding',label:'Binding and status',render(w,td){
         const previous=record(w.binding);
         const observation=record(w.observation);
-        const fresh=observation.epoch===w.epoch && num(observation.observedAt)+60000>Date.now();
+        const now=Date.now();
+        const seenAt=num(observation.observedAt);
+        const fresh=!!w.binding && observation.epoch===w.epoch &&
+          Number.isSafeInteger(seenAt) && seenAt<=now+60000 && seenAt+60000>now;
         p(w.binding ? `${str(previous.slug)} · ${str(previous.generatorId)} · draft ${str(previous.draftId)||'(default)'}` : 'Unbound',td);
-        const connection=w.paused?'Paused':fresh?'Heartbeat recent':'Offline or unverified';
-        const source=fresh?observation.dirty===true?'Unsaved changes':
-          observation.dirty===false?'Draft clean':'Draft state unknown':'Draft state unknown';
+        const connection=!w.binding?'No active Binding':w.paused?'Paused':fresh?'Heartbeat recent':'Offline';
+        const source=fresh?observation.dirty===true?'Unsaved':
+          observation.dirty===false?'Draft clean':'Dirty unknown':'Dirty unknown';
         p(connection+' · '+source,td,'muted');
         if (w.transition) p('Transition awaiting settlement',td,'muted');
       }},
@@ -1811,6 +1837,10 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         false,
       );
     };
+    const approvalToolbar=el("div",undefined,"row");
+    approvalToolbar.append(button("Check pending approvals", async()=>loadApprovals()));
+    p("Automatic checks stop after 30 seconds without pending requests. Use this button when starting a new authorization.",approvalToolbar,"muted");
+    approvalPanel.before(approvalToolbar);
     const showApprovalsFailure = (error: unknown) => {
       if (own !== generation || !opened || destroyed || tab !== "Agents") return;
       authority=undefined;
@@ -1819,7 +1849,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       if (!approvalPanel.textContent?.includes("Pending approvals")) {
         approvalPanel.replaceChildren();
         heading("Pending approvals", approvalPanel);
-        p("Could not retrieve approvals. Automatic retry is active.", approvalPanel);
+        p("Could not retrieve approvals. Check approvals manually or retry after service recovery.", approvalPanel);
       }
       announce(errorText(error), true);
     };
@@ -1845,9 +1875,9 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       // Check generation after the await: a closed or superseded manager must
       // never restart the timer. Only one automatic request is in flight.
       if (own !== generation || destroyed || !opened || tab !== "Agents" || isDocumentHidden()) return;
-      const delay = Math.max(quotaDelay,approvalFailures
-        ? Math.min(60000,4000*2**Math.min(approvalFailures,4))
-        : pendingApprovalCount || Date.now()-approvalWatchStarted < 30000 ? 4000 : 15000);
+      const delay=approvalPollingDelay(pendingApprovalCount,Date.now()-approvalWatchStarted,
+        approvalFailures,quotaDelay);
+      if(delay===null) return; // idle or repeatedly failing; explicit refresh is always available.
       approvalRefreshTimer = setTimeout(() => void pollApprovals(), delay);
       (approvalRefreshTimer as unknown as { unref?: () => void }).unref?.();
     };
@@ -2460,11 +2490,22 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       body,
       "muted",
     );
-    p(
-      "Candidate verification gate: native preview execution, unsaved preview pixel capture, and external provider effects remain gated until their required Firefox/provider evidence passes. A connected gateway does not establish functional parity.",
-      body,
-      "muted",
-    );
+    const connected=authority?.generation===generation && authority.installation===installation();
+    const rollout=record(state.rollout);
+    const activation=el("section",undefined,"recovery-status");
+    heading("Rollout and capability state",activation);
+    p("Authoritative Gateway status: "+(connected?"Loaded now":"UNVERIFIED/OFFLINE"),activation,"muted");
+    p("Assignment contract: "+(connected?str(state.assignmentContractVersion) === '2'?'v2':'legacy':'unknown'),activation);
+    p("19-tool v2 execution: "+(connected?
+      rollout.developmentContractV2ExecutionEnabled===true?"Enabled":
+      rollout.developmentContractV2ExecutionEnabled===false?"Disabled":"not reported":"unknown"),activation);
+    p("Canonical storage: "+(connected?str(rollout.canonicalStorageMode,"not reported"):"unknown"),activation,"muted");
+    const boolStatus=(value:unknown)=>!connected||typeof value!=="boolean"?"unknown":value?"enabled":"disabled";
+    p("Push: "+boolStatus(rollout.pushNotificationsEnabled)+
+      " · binary payloads: "+boolStatus(rollout.binaryPayloadsEnabled)+
+      " · admission estimates: "+boolStatus(rollout.admissionBudgetEnabled),activation,"muted");
+    p("Preview pixels: UNSUPPORTED_INTERFACE until an authorized actual-pixel provider is accepted. Production provider effects require OWNER acceptance. Account quota remains unknown.",activation,"muted");
+    body.append(activation);
     const instructions = el("details");
     instructions.open = !config.paired;
     instructions.append(el("summary", "Installation steps"));

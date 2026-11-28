@@ -52,3 +52,27 @@ test('F10 v2 workspace_status is scope-safe and distinguishes heartbeat from sou
   await assert.rejects(status({target,verifySource:true}),/UPGRADE_REQUIRED/);
  }finally {await h.close();}
 });
+
+test('F23 gateway management state safely reports v2 rollout gates and preserves persisted contract when execution is disabled',async()=>{
+ const h=await createCapacityHarness(0,{DEVELOPMENT_CONTRACT_V2_ENABLED:'true',
+   DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED:'false',BINARY_PAYLOADS_ENABLED:'true',
+   CANONICAL_STORAGE_MODE:'legacy',ADMISSION_BUDGET_ENABLED:'false'});
+ try {
+  const initial=await h.get(admin+'/state');
+  assert.equal(initial.assignmentContractVersion,1);
+  assert.equal((initial.rollout as Record<string,unknown>).developmentContractV2ExecutionEnabled,false);
+  const connector=await h.request(admin+'/connectors',{
+    expectedRevision:initial.revision,label:'Rollout-capability Connector'});
+  const current=await h.get(admin+'/state');
+  assert.equal(current.assignmentContractVersion,2);
+  const rollout=current.rollout as Record<string,unknown>;
+  assert.equal(rollout.developmentContractV2Enabled,true);
+  assert.equal(rollout.developmentContractV2ExecutionEnabled,false);
+  assert.equal(rollout.binaryPayloadsEnabled,true);
+  assert.equal(rollout.canonicalStorageMode,'legacy');
+  assert.equal(rollout.actualPixelCapture,'UNSUPPORTED_INTERFACE');
+  assert.equal(rollout.accountQuotaKnown,false);
+  assert.equal(Object.keys(rollout).some(x=>/secret|token|credential|password/i.test(x)),false);
+  assert.equal(connector.contractVersion,2);
+ }finally{await h.close();}
+});

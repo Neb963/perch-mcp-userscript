@@ -59,7 +59,7 @@ def run(bundle: Path, fixture: Path, output: Path, chromium: str):
                                   const root=document.querySelector('[data-perch-mcp-manager]').shadowRoot;
                                   return root.querySelector('[role=tab][aria-selected=true]')?.textContent===t
                                     && root.querySelector('.notice')?.textContent==='Updated.';
-                                }""",tab)
+                                }""",arg=tab)
                             measured=page.evaluate("""() => {
                               const root=document.querySelector('[data-perch-mcp-manager]').shadowRoot;
                               const dialog=root.querySelector('dialog'),body=root.querySelector('.body');
@@ -90,6 +90,10 @@ def run(bundle: Path, fixture: Path, output: Path, chromium: str):
                                 assert record["renderedRows"]==total,record
                                 if width==1440:
                                     assert record["visibleCompleteRows"]>=8,record
+                                if width==1024:
+                                    assert record["visibleCompleteRows"]>=6,record
+                                if width==390:
+                                    assert record["visibleCompleteRows"]>=1,record
                     finally:
                         page.close()
         finally:
