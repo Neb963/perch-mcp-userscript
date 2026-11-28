@@ -3,6 +3,12 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### 2026-11-28 complete takeover offline verification exit
+
+- `a736513`, [CI 46143344849](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46143344849) **705 pass/0 fail/1 skip**; exact checked-out tree, full builds/hashes/dry-run passed; no live operations. UI exact-bundle: 30 screenshots, 10/8/2 complete rows, zero outbound requests; local filter/approval/reassign/recovery/UNKNOWN revision details all pass.
+- Updated **four still-FAILED** matrix records to their **actual latest values** rather than stale R00 measurements. S08-058 + F13.01/.02 native five-stage lifecycle **187/46** vs **≤120/40**; S07-023 actual preview pixels unsupported. Firefox 2026 Region Capture remains unavailable and Violentmonkey has no tab-pixel API; owner-authored new component/flow required.
+- See [R05 exact-head exit](docs/verification/v0.3-remediation/r05/FINAL-OFFLINE-STATUS.md) for complete traceability, source/security boundaries and owner checklist. Matrix 1317: PASS 88, FAIL 4, NOT_STARTED 1186, OWNER 24, BLOCKED 1, SUPERSEDED 14. Strict release gate NOT ELIGIBLE. Remaining work must not be relabeled as complete; PR remains draft, unmerged, no Cloudflare deployment.
+
 ### 2026-11-28 exact S10-004 Workspace observation proof
 
 - `9956d04` [CI 46142955098](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46142955098): 705 PASS, 0 FAIL, 1 historical skip; typecheck/build/hashes/dry-run passed. Verified native revision hashes only when the projection supplies `verified:true`; unverified Source, Preview, Saved remain UNKNOWN. Local Activity observation includes Workspace, phase, tool and observedAt with installation scope; does not assert a current clear Hold.
