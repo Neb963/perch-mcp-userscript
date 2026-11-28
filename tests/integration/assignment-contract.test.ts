@@ -42,7 +42,7 @@ test('S02-009 generation boundaries use canonical zero and MAX_SAFE_INTEGER, rej
       /Invalid Workspace Target/);
 });
 
-test('v2 Connector consent, legacy scope and indexed discovery in local workerd', async () => {
+test('S02-020 S02-023 S02-024 v2 Connector discovery and Target isolation in local workerd', async () => {
   const h = await createCapacityHarness(1, { DEVELOPMENT_CONTRACT_V2_ENABLED: 'true' });
   try {
     const legacy = h.fixtures[0]!;
@@ -93,7 +93,16 @@ test('v2 Connector consent, legacy scope and indexed discovery in local workerd'
     const asTarget = (w: Record<string, unknown>) => encodeTarget({
       workspaceId: String(w.id), assignmentGeneration: Number(w.assignmentGeneration), bindingGeneration: Number(w.bindingGeneration),
     });
+    // Foreign and nonexistent IDs must be indistinguishable to this Connector.
+    const absent = encodeTarget({workspaceId:'nonexistent-workspace',assignmentGeneration:0,bindingGeneration:0});
     await assert.rejects(discover(a, pa, { target: asTarget(b1) }), /TARGET_NOT_FOUND/);
+    await assert.rejects(discover(a, pa, { target: absent }), /TARGET_NOT_FOUND/);
+    // An owned Workspace with a mismatched canonical generation is known
+    // to this Connector, but is never accepted as the current Target.
+    const staleAssignment = encodeTarget({workspaceId:String(a1.id),
+      assignmentGeneration:Number(a1.assignmentGeneration)+1,
+      bindingGeneration:Number(a1.bindingGeneration)});
+    await assert.rejects(discover(a, pa, { target: staleAssignment }), /STALE_TARGET/);
     await assert.rejects(discover(a, pa, { target: asTarget(a2) }), /STALE_TARGET/);
     await assert.rejects(h.internal(h.registry, '/internal/authorize', {
       props: legacy.props, agentId: legacy.agentId, target: asTarget(a1),
@@ -120,7 +129,7 @@ test('v2 Connector consent, legacy scope and indexed discovery in local workerd'
   }
 });
 
-test('A01 exact owned targets, isolated discovery trace, 50-Workspace pagination and stale cursor', async()=>{
+test('A01 S02-012 exact owned targets, isolated discovery trace, 50-Workspace pagination and stale cursor', async()=>{
   const h=await createCapacityHarness(0,{DEVELOPMENT_CONTRACT_V2_ENABLED:'true',
     DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED:'true',REGISTRY_WORKSPACE_BUDGET:'60'},
     {entryPoint:'tests/fixtures/optimization-runtime.ts'});
