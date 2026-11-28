@@ -24,6 +24,12 @@ Next scoped change removes the active Library under every manager state; preserv
 
 Local Chromium and workerd fixtures use synthetic data. Production, provider, live OAuth and browser acceptance, deployment, preview, and merge are reserved for the operator.
 
+### R03 second-checkpoint investigation
+
+The 3fac671 manager release passed strict typecheck and 667/670 tests in offline run 46093062222: two new legacy Resource-retirement cases failed because the GET harness itself demanded HTTP 200 before exposing a 410 response; the intended gateway rejection was observed. The test assertions are repaired to inspect raw authorized HTTP status/error codes. No production failure was inferred from the tests.
+
+F10 status semantics: stale heartbeat is not verified source. Registry detail must explicitly report unverified SourceRevision/LocalRevision/PreviewRevision/SavedRevision, effective tool permissions, unsupported pixel capture and scoped blockers without reading source. Native generator_info must return reasoned revision objects without implicit verification. A focused local-workerd test exercises a READ_SOURCE-only Connector, unbound discovery, bound Target detail, unauthorized write capability and explicit unavailable verified-source path. Verification pending exact-head CI.
+
 ## V00–V10 development contract (2026-11-27)
 
 Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179db13df0112c15f7e7942dca198e7d0486dbe`, equal to the merged v0.2.0 qualification head `3fd1e48630737a1defd96484a3af3d3d881c84a1`. The working branch is `development/v0.3.0`. Use local synthetic fixtures and local workerd. Production and preview calls, deployment, real browser/provider tests, production readiness dispatch and merging are operator-only.

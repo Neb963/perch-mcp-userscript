@@ -19,10 +19,17 @@ export async function developmentInfo(args: Record<string,unknown>, context: Dev
   await context.assertCurrent();
   if (saved && !equalIdentity(saved.identity,identity))
     throw new BrowserError('BINDING_MISMATCH','Saved identity differs from the bound native editor.');
+  const local=verifiedSource ? (await context.vfs.localView()).revision : null;
   return {identity,ownership:{known:owned!==null,owned},access:{known:canSave!==null,canSave},
-    sourceRevision:{value:verifiedSource?.revision??null,verified:!!verifiedSource},
-    savedRevision:{value:saved?.revision??null,verified:!!saved},
-    ...(verifiedSource ? {dirty:verifiedSource.dirty,localRevision:(await context.vfs.localView()).revision} : {})};
+    sourceRevision:{value:verifiedSource?.revision??null,verified:!!verifiedSource,
+      ...(!verifiedSource?{reason:'NOT_VERIFIED'}:{})},
+    localRevision:local?{value:local.value,verified:local.verified}:
+      {value:null,verified:false,reason:'SOURCE_NOT_VERIFIED'},
+    savedRevision:{value:saved?.revision??null,verified:!!saved,
+      ...(!saved?{reason:'NOT_REQUESTED'}:{})},
+    previewRevision:{value:null,verified:false,reason:'USE_PREVIEW_DIAGNOSTICS'},
+    dirty:verifiedSource?.dirty??null,dirtyReason:verifiedSource?'VERIFIED_SOURCE':'SOURCE_NOT_VERIFIED',
+    savedStatus:saved?{known:true,verified:true}: {known:false,verified:false,reason:'NOT_REQUESTED'}};
 }
 export async function saveDevelopment(args: Record<string,unknown>, context: DevelopmentContext, read?: Reader) {
   const adapter = context.vfs.adapter;

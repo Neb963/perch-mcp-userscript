@@ -803,8 +803,26 @@ export class Registry {
         const w = resolveTarget(this.db, agent.id, args.target);
         if (args.verifySource)
           throw new ApiError("UPGRADE_REQUIRED", "Verified browser source is unavailable during contract preparation.", 409);
-        return { ...common, ...projectAssignment(w, grant.permissions), sourceRevision: null,
-          localRevision: null, previewRevision: null, savedRevision: null };
+        const readable = grant.permissions.includes('READ_SOURCE') && w.permissions.includes('READ_SOURCE');
+        const observed = w.observation?.epoch===w.epoch ? w.observation : undefined;
+        const reason = readable ? 'NOT_VERIFIED_IN_REGISTRY' : 'SCOPE_DENIED';
+        const revision = {value:null,verified:false,reason};
+        const projection=projectAssignment(w,grant.permissions);
+        return { ...common, ...projection,
+          sourceRevision:revision,localRevision:revision,previewRevision:revision,savedRevision:revision,
+          ...(args.detail === true ? {
+            diagnostics: {
+              observationEpoch:readable?observed?.epoch??null:null,
+              bindingEpoch:readable?w.epoch:null,
+              observationAgeMs:observed?Math.max(0,Date.now()-observed.observedAt):null,
+              observationVerification:'HEARTBEAT_ONLY',
+              blockers:[...(!w.binding?['UNBOUND']:[]),...(w.paused?['PAUSED']:[]),
+                ...(w.transition?['TRANSITION_PENDING']:[]),
+                ...(!observed?['NO_OBSERVATION']:observed.observedAt+60_000<Date.now()?['STALE_HEARTBEAT']:[])],
+            },
+            negotiatedLimits: {maxWorkspaces:50,maxFiles:1000,maxBatchActions:32,
+              maxInlineResultBytes:256*1024,maxStagedFileBytes:16*1024*1024},
+          } : {}) };
       }));
     }
     if (path === '/api/v1/tab/rebind-proof') {
