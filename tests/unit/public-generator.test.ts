@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readPublicGenerator } from "../../apps/userscript/src/public-generator.js";
@@ -117,4 +118,21 @@ test('explicit zero-byte public asset with absent Response.body is complete',asy
  const result=await readPublicGenerator('fixture',fetcher);
  assert.equal(result.completeness,'complete');
  assert.equal(result.files['src/empty.bin']!.length,0);
+});
+
+test('F12 source manifest SHA-256 is independently verified before import exposure',async()=>{
+  const bytes=new Uint8Array([0,255,1]);
+  const hash=createHash('sha256').update(bytes).digest('hex');
+  const mk=(sha256:string)=>({generator:{...generator,srcManifest:{'binary.bin':{key:'binary',size:3,sha256}}}});
+  const fetcher=(sha:string)=>(async(url:string|URL|Request)=>{
+    return String(url).includes('getGeneratorPageData')?Response.json(mk(sha)):
+      new Response(bytes);
+  }) as typeof fetch;
+  const matched=await readPublicGenerator('fixture',fetcher(hash));
+  assert.equal(matched.completeness,'complete');
+  assert.deepEqual(matched.files['src/binary.bin'],bytes);
+  await assert.rejects(readPublicGenerator('fixture',fetcher('0'.repeat(64))),
+    (error)=>(error as {code:string}).code==='NATIVE_CONFLICT');
+  await assert.rejects(readPublicGenerator('fixture',fetcher('NOT_SHA256')),
+    (error)=>(error as {code:string}).code==='UNSUPPORTED_INTERFACE');
 });

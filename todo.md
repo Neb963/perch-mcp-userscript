@@ -10,7 +10,7 @@ Baseline `298f3b9619335364c668a69b6f04570ae530fcab` (tree `c07b3e7e25ea0e4d063ee
 | R00 | Pin authority and baseline, build an atomic requirement inventory, rerun the offline suite, replay the P0 reports, and record measured baselines. | Baseline verified |
 | R01 | Preflight full batches, fence execution at effect boundaries, preserve receipt uncertainty, and bind operator actions and consent to exact intent. | Regressions verified |
 | R02 | Recover transfers and historical local state, deduplicate immutable storage, and exercise publication faults. | Scoped recovery verified. Historical reclamation remains open. |
-| R03 | Qualify permanent OAuth, clean installation, all feasible development behavior, and the local-first manager. | In progress: OAuth SDK verified; local-first manager and retired Library verification pending |
+| R03 | Qualify permanent OAuth, clean installation, all feasible development behavior, and the local-first manager. | OAuth, manager and v2 Resource denial verified offline; F12 retrieval and UI density next; F11 capture feasibility blocked |
 | R04 | Meter comparable workflows and quotas, calibrate admission, and qualify long finite access lifetimes. | Pending |
 | R05 | Rebuild and test the exact candidate, reconcile every requirement, and verify artifact bytes and the unmerged PR. | Pending |
 
@@ -30,6 +30,13 @@ The 3fac671 manager release passed strict typecheck and 667/670 tests in offline
 
 F10 status semantics: stale heartbeat is not verified source. Registry detail must explicitly report unverified SourceRevision/LocalRevision/PreviewRevision/SavedRevision, effective tool permissions, unsupported pixel capture and scoped blockers without reading source. Native generator_info must return reasoned revision objects without implicit verification. A focused local-workerd test exercises a READ_SOURCE-only Connector, unbound discovery, bound Target detail, unauthorized write capability and explicit unavailable verified-source path. Verification pending exact-head CI.
 
+### R03 evidence and next gate
+
+- Exact-head b125c32 CI run [46093489526](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46093489526) passed offline typecheck, unit/integration, build, checksum verification and Wrangler dry-run. Earlier 84242a5 run 46091943832 independently qualified nine OAuth SDK lifetimes up to ten years, nonexpiring v2 consent/refresh/client, suspension and revocation. The default v2 access TTL is now ten years.
+- The exact tested userscript was rendered in isolated Chromium with 30-Workspace synthetic fixtures and zero external network requests. F17, F21, F25, F26 and F27 checks pass: local identity, stop, scoped Recovery export and private staging remain functional in a cold outage. Obsolete F26 fixture expectations were corrected to test actual local operability rather than invent remote rows.
+- The first 30/50 Workspace × 3 viewport measurement found zero dialog/horizontal overflow but only six fully visible desktop Workspace rows. The next patch collapses Create Workspace and combines status lines, then requires >=8 fully visible rows at 1440×900.
+- F12 changes in next checkpoint: validate optional provider SHA-256, enforce cancellation/deadline for paired public reads, atomically publish a revision-pinned local receipt with import bytes, and cover failed/mismatched/time-out branches without any unauthorized network access.
+- Remaining: F06 conservative historical storage reclamation, actual preview pixels feasibility, all remaining A01–A34 matrix entries, full R04 performance and R05 final exact-head qualification. No unfinished row is PASS.
 ## V00–V10 development contract (2026-11-27)
 
 Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179db13df0112c15f7e7942dca198e7d0486dbe`, equal to the merged v0.2.0 qualification head `3fd1e48630737a1defd96484a3af3d3d881c84a1`. The working branch is `development/v0.3.0`. Use local synthetic fixtures and local workerd. Production and preview calls, deployment, real browser/provider tests, production readiness dispatch and merging are operator-only.

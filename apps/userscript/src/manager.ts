@@ -1161,12 +1161,15 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   }
   async function renderDevelopmentWorkspaces(own: number) {
     heading('Workspaces');
+    const creation=el("details",undefined,"workspace-create");
+    creation.append(el("summary","Create Workspace"));
     const create = field('Workspace name');
-    actions(body,create.label,remoteButton('Create Workspace',own,async()=>{
+    actions(creation,create.label,remoteButton('Create Workspace',own,async()=>{
       if (!create.input.value.trim()) throw new Error('Enter a Workspace name.');
       await client.request('POST',`${ADMIN}/workspaces`,{contractVersion:2,label:create.input.value.trim()});
       if (own===generation) await refresh();
     }));
+    body.append(creation);
     const scope = installation();
     const [nextIdentity, pending] = await Promise.all([
       client.currentIdentity().catch(()=>undefined),
@@ -1192,9 +1195,10 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         const observation=record(w.observation);
         const fresh=observation.epoch===w.epoch && num(observation.observedAt)+60000>Date.now();
         p(w.binding ? `${str(previous.slug)} · ${str(previous.generatorId)} · draft ${str(previous.draftId)||'(default)'}` : 'Unbound',td);
-        p(w.paused?'Paused':fresh?'Last heartbeat verified':'Offline or unverified',td,'muted');
-        p(fresh ? observation.dirty===true?'Draft has unsaved edits':observation.dirty===false?'Draft clean':'Draft state unknown' :
-          'Draft state unknown',td,'muted');
+        const connection=w.paused?'Paused':fresh?'Heartbeat recent':'Offline or unverified';
+        const source=fresh?observation.dirty===true?'Unsaved changes':
+          observation.dirty===false?'Draft clean':'Draft state unknown':'Draft state unknown';
+        p(connection+' · '+source,td,'muted');
         if (w.transition) p('Transition awaiting settlement',td,'muted');
       }},
       {key:'action',label:'Actions',render(w,td){

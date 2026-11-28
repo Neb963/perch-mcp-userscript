@@ -206,20 +206,51 @@ async function importPublic(args: BrowserToolArgs<'fetch_generator'>, context: D
   await context.permit('public-get', await digest(JSON.stringify(args.generators)));
   for (const generator of args.generators) {
     await context.assertCurrent();
-    const first = await readPublicGenerator(generator.slug,fetchImpl,context.signal);
-    const second = await readPublicGenerator(generator.slug,fetchImpl,context.signal);
+    const remaining = Math.min(args.timeoutMs ?? 30_000, context.envelope.deadlineMs-Date.now());
+    if (remaining < 1) throw new BrowserError('TIMEOUT','Public source verification exceeded its deadline.');
+    const controller=new AbortController();
+    const abort=()=>controller.abort();
+    context.signal.addEventListener('abort',abort,{once:true});
+    if(context.signal.aborted) controller.abort();
+    const timer=setTimeout(abort,remaining);
+    let first: Awaited<ReturnType<typeof readPublicGenerator>>;
+    let second: Awaited<ReturnType<typeof readPublicGenerator>>;
+    try {
+      first=await readPublicGenerator(generator.slug,fetchImpl,controller.signal);
+      await context.assertCurrent();
+      second=await readPublicGenerator(generator.slug,fetchImpl,controller.signal);
+    } catch(error) {
+      if(controller.signal.aborted && !context.signal.aborted)
+        throw new BrowserError('TIMEOUT','Public source verification exceeded its deadline.');
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      context.signal.removeEventListener('abort',abort);
+    }
     if (first.completeness !== 'complete' || second.completeness !== 'complete' || first.revision !== second.revision)
       throw new BrowserError('STALE_REVISION','Complete public source could not be independently read back.');
     const paths = generator.paths ?? Object.keys(first.files);
+    const proofs: Array<{path:string;bytes:number;sha256:string}> = [];
     for (const path of paths) {
+      if (path === 'perch-receipt.json' || path.startsWith('perch-receipt.json/'))
+        throw new BrowserError('PATH_DENIED','Selected source path collides with reserved import receipt.');
       if (!Object.hasOwn(first.files,path) || !equalBytes(first.files[path]!,second.files[path]!))
         throw new BrowserError('STALE_REVISION','Selected public import source changed.');
       const bytes = first.files[path]!;
       transferred += bytes.length;
       if (transferred > 16 * 1024 * 1024) throw new BrowserError('LIMIT_EXCEEDED','Public import exceeds its total byte budget.');
       imports['imports/' + generator.slug + '/' + path] = bytes;
+      proofs.push({path,bytes:bytes.length,sha256:await digest(bytes)});
     }
-    revisions.push({slug:generator.slug,generatorId:first.generatorId,revision:first.revision,paths});
+    // A separate read-only manifest travels in the *same* durable local
+    // publication as the bytes. The receipt never claims provider-side CAS.
+    const receipt={schemaVersion:1,slug:generator.slug,generatorId:first.generatorId,
+      revision:first.revision,completeness:first.completeness,files:proofs};
+    const proofBytes=new TextEncoder().encode(JSON.stringify(receipt));
+    transferred+=proofBytes.length;
+    if(transferred>16*1024*1024) throw new BrowserError('LIMIT_EXCEEDED','Import receipt exceeds total byte budget.');
+    imports['imports/' + generator.slug + '/perch-receipt.json']=proofBytes;
+    revisions.push({...receipt,paths});
   }
   await context.permit('source-publication', await digest(JSON.stringify(revisions)));
   const revision = await context.vfs.publishImportedFiles(names, imports, local.revision.value,

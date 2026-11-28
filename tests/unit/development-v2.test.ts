@@ -152,3 +152,50 @@ test('Save uses the native revision and independent saved base, leaving a hold a
     f.context,async()=>saved),/Reconcile/);
   assert.equal(calls,1);
 });
+
+test('F12 verified public import stores bytes and a revision-pinned private receipt atomically',async()=>{
+  const args={generators:[{slug:'fixture'}],timeoutMs:5000};
+  const f=await fixture('fetch_generator',args);
+  const source={generator:{id:42,name:'fixture',modelText:'output = fixture',
+    outputTemplate:'<p>fixture</p>',srcManifest:{}}};
+  let calls=0;
+  const fetcher=(async(input:string|URL|Request,init?:RequestInit)=>{
+    calls++;
+    assert.equal(init?.credentials,'omit');
+    assert.equal(init?.redirect,'error');
+    assert.match(String(input),/getGeneratorPageData/);
+    return Response.json(source);
+  }) as typeof fetch;
+  const result=await executeDevelopment(f.context,undefined,fetcher) as {
+    imports:Array<{slug:string;revision:string;files:Array<{path:string;sha256:string;bytes:number}>}>};
+  assert.equal(calls,4);
+  assert.equal(result.imports.length,1);
+  assert.equal(result.imports[0]?.slug,'fixture');
+  assert.deepEqual(f.permits,['public-get','source-publication']);
+  const view=await f.vfs.localView();
+  assert.deepEqual(view.files.map(x=>x.path).sort(),[
+    'imports/fixture/perch-receipt.json','imports/fixture/index.html',
+    'imports/fixture/main.pjs','scratch/input',
+  ]);
+  const receipt=JSON.parse(new TextDecoder().decode(await view.read('imports/fixture/perch-receipt.json')));
+  assert.equal(receipt.revision,result.imports[0]?.revision);
+  assert.deepEqual(receipt.files.map((x:{path:string})=>x.path).sort(),['index.html','main.pjs']);
+  for (const row of receipt.files as Array<{path:string;sha256:string;bytes:number}>) {
+    const bytes=await view.read('imports/fixture/'+row.path);
+    assert.equal(bytes.length,row.bytes);
+    assert.equal(await digest(bytes),row.sha256);
+  }
+});
+
+test('F12 timeout aborts verified public snapshot before any imported bytes or publication permit',async()=>{
+  const args={generators:[{slug:'fixture'}],timeoutMs:80};
+  const f=await fixture('fetch_generator',args);
+  const pending=(async(_url:string|URL|Request,init?:RequestInit)=>new Promise<Response>((_resolve,reject)=>{
+    if(init?.signal?.aborted) return reject(new Error('Aborted'));
+    init?.signal?.addEventListener('abort',()=>reject(new Error('Aborted')),{once:true});
+  })) as typeof fetch;
+  await assert.rejects(executeDevelopment(f.context,undefined,pending),
+    (error)=>(error as {code:string}).code==='TIMEOUT');
+  assert.deepEqual(f.permits,['public-get']);
+  assert.deepEqual((await f.vfs.localView()).files.map(x=>x.path),['scratch/input']);
+});

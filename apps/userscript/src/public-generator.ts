@@ -157,9 +157,13 @@ export async function readPublicGenerator(
       entry && typeof entry === 'object' && !Array.isArray(entry) ? (entry as Record<string, unknown>).key : undefined;
     const size = entry && typeof entry === 'object' && !Array.isArray(entry)
       ? (entry as Record<string, unknown>).size : undefined;
+    const expectedSha256 = entry && typeof entry === 'object' && !Array.isArray(entry)
+      ? (entry as Record<string, unknown>).sha256 : undefined;
     if (typeof key !== 'string' || !/^[A-Za-z0-9_-][A-Za-z0-9_.~-]{0,511}$/.test(key) ||
         (size !== undefined && (typeof size !== 'number' ||
-          !Number.isSafeInteger(size) || size < 0 || size > MAX_FILE)))
+          !Number.isSafeInteger(size) || size < 0 || size > MAX_FILE)) ||
+        (expectedSha256 !== undefined &&
+          (typeof expectedSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedSha256))))
       throw new ExecutionError('UNSUPPORTED_INTERFACE',
         'Public manifest asset key or declared byte size is unsupported.');
     let response: Response;
@@ -173,6 +177,9 @@ export async function readPublicGenerator(
     if (size !== undefined && bytes.length !== size)
       throw new ExecutionError('NATIVE_CONFLICT',
         'Public asset byte size differs from the saved manifest; no source installed.');
+    if (expectedSha256 !== undefined && await digest(bytes) !== expectedSha256)
+      throw new ExecutionError('NATIVE_CONFLICT',
+        'Public asset digest differs from its declared manifest; no source installed.');
     files[path] = bytes;
     total += bytes.length;
   }

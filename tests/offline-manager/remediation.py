@@ -192,7 +192,16 @@ def main():
         "F21": any(field not in report["approvalText"]
                    for field in ("ChatGPT 01", "https://fixture.invalid/mcp/c-1", "READ_SOURCE")),
         "F25": any("Library" in report[mode]["tabNames"] for mode in ("v1", "v2", "outage", "unpaired")),
-        "F26": "Gateway unavailable" in report["outage"]["panel"] and "Story generator" not in report["outage"]["panel"],
+        # Cold outages cannot invent remote Workspace rows. Verify functional local
+        # navigation, native identity, recovery/export and stop without the Gateway.
+        "F26": not (
+            report["outage"]["tabNames"] == ["Workspaces", "Connectors", "Activity", "Recovery", "Settings"]
+            and "Current editor:" in report["outage"]["panel"]
+            and "Export local diagnostics" in report["outage"]["enabled"]
+            and "Stop this document immediately" in report["outage"]["enabled"]
+            and report.get("localRecoveryExportGatewayRequests") == 0
+            and report.get("offlinePrivateFileStaged") is True
+        ),
         "F27": any("Reassign to this tab" in view["enabled"] for view in stale_views),
     }
     print(json.dumps({"reproduced": results, "externalRequests": report["externalRequests"]}))
