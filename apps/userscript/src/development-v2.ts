@@ -294,11 +294,14 @@ async function importPublic(args: BrowserToolArgs<'fetch_generator'>, context: D
     }
     if (first.completeness !== 'complete' || second.completeness !== 'complete' || first.revision !== second.revision)
       throw new BrowserError('STALE_REVISION','Complete public source could not be independently read back.');
-    const paths = generator.paths ?? Object.keys(first.files);
+    const paths = [...(generator.paths ?? Object.keys(first.files))].sort();
+    if (new Set(paths.map(path => path.toLowerCase())).size !== paths.length)
+      throw new BrowserError('INVALID_INPUT', 'Public import selectors collide or repeat.');
     const proofs: Array<{path:string;bytes:number;sha256:string}> = [];
     for (const path of paths) {
-      if (path === 'perch-receipt.json' || path.startsWith('perch-receipt.json/'))
-        throw new BrowserError('PATH_DENIED','Selected source path collides with reserved import receipt.');
+      if (path === 'perch-receipt.json' || path.startsWith('perch-receipt.json/') ||
+          path === 'perch-revisions' || path.startsWith('perch-revisions/'))
+        throw new BrowserError('PATH_DENIED','Selected source path collides with the reserved import metadata namespace.');
       if (!Object.hasOwn(first.files,path) || !equalBytes(first.files[path]!,second.files[path]!))
         throw new BrowserError('STALE_REVISION','Selected public import source changed.');
       const bytes = first.files[path]!;
@@ -307,14 +310,24 @@ async function importPublic(args: BrowserToolArgs<'fetch_generator'>, context: D
       imports['imports/' + generator.slug + '/' + path] = bytes;
       proofs.push({path,bytes:bytes.length,sha256:await digest(bytes)});
     }
-    // A separate read-only manifest travels in the *same* durable local
-    // publication as the bytes. The receipt never claims provider-side CAS.
-    const receipt={schemaVersion:1,slug:generator.slug,generatorId:first.generatorId,
-      revision:first.revision,completeness:first.completeness,files:proofs};
+    // The canonical current import remains compatible with earlier agents.
+    // Every verified snapshot also has a content-addressed immutable address.
+    // Manifest bytes and source bytes publish under one durable local pointer.
+    const sourcePaths=Object.keys(first.files);
+    const materialization=paths.length === sourcePaths.length &&
+      sourcePaths.every(path=>paths.includes(path)) ? 'complete' : 'selected';
+    const core={schemaVersion:2,slug:generator.slug,generatorId:first.generatorId,
+      revision:first.revision,completeness:first.completeness,materialization,files:proofs};
+    const snapshotId=await digest(JSON.stringify(core));
+    const versionPrefix='imports/' + generator.slug + '/perch-revisions/' + snapshotId + '/';
+    const manifestPath=versionPrefix + 'manifest.json';
+    const receipt={...core,snapshotId,manifestPath,sourcePrefix:versionPrefix + 'files/'};
     const proofBytes=new TextEncoder().encode(JSON.stringify(receipt));
     transferred+=proofBytes.length;
     if(transferred>16*1024*1024) throw new BrowserError('LIMIT_EXCEEDED','Import receipt exceeds total byte budget.');
     imports['imports/' + generator.slug + '/perch-receipt.json']=proofBytes;
+    imports[manifestPath]=proofBytes;
+    for(const path of paths) imports[versionPrefix + 'files/' + path]=first.files[path]!.slice();
     revisions.push({...receipt,paths});
   }
   await context.permit('source-publication', await digest(JSON.stringify(revisions)));

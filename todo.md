@@ -3,6 +3,13 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### R03 F12 immutable public import publication (2026-11-28)
+
+- Restore verified revision-addressed source under `imports/<slug>/perch-revisions/<snapshotId>/files/`, with an immutable `manifest.json`. Keep backward-compatible `imports/<slug>/<path>` and active `perch-receipt.json` pointing at the exact immutable manifest.
+- All alias/immutable paths publish in one binding-local durable pointer and exact readback. On repeated same revision, verify existing immutable bytes, refuse changes before publication; retain previous revision across a new import. Reject reserved metadata path collisions/duplicate selectors and mark selective imports as `materialization:selected` instead of claiming full materialization.
+- Trade-off: immutable archives consume physical GM space; existing 64 MiB budget and refusal/recovery safeguards remain, no silent eviction, no new cloud store. Source/doc acceptance remains unqualified until exact-source CI and tests pass; no real public provider request.
+- Focused tests: `tests/unit/development-v2.test.ts` F12 original, two successive revisions, corrupt archive, timeout, and existing negative tests. Do not promote S06-048 until verified.
+
 ### R05 synthetic bundled manager closure and digest correction (2026-11-28)
 
 - Added reproducible offline Playwright `tests/offline-manager/closure-r05.py` (actual shipped manager, local Chromium, zero network). F18 urgent approval survives foreign Connector filter; F22 three local filter operations add 0 GET; F19 all 6 conflicting controls disabled with delayed rebind; F26 Recovery/Settings local-first during 60s pending Gateway read; F25 no Library destination across v1/v2/outage/unpaired.

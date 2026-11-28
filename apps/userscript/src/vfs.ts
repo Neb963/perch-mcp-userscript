@@ -3,7 +3,7 @@ import { NativeAdapter, NativeEffectNotInvoked } from './adapter.js';
 import { BoundObjectStore, readBoundCheckpoint, resolveBindingStorage, type BindingStorageIdentity, type BindingStorageScope } from './binding-storage.js';
 import { unresolvedHistoricalStages } from './historical-recovery.js';
 import { ChunkStore } from './storage.js';
-import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, digest, equalIdentity, isUint8Array, snapshotRevision, utf8, type FileWrite, type KeyValueStore, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
+import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, digest, equalBytes, equalIdentity, isUint8Array, snapshotRevision, utf8, type FileWrite, type KeyValueStore, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
 export interface WorkspaceSnapshot extends NativeSnapshot { nativeRevision: string; generation: number }
 interface StoredSource { version: 1; identity: NativeIdentity; files: Record<string, string>; revision: string; createdAt: number; label: string; pinned: boolean }
 export interface CheckpointSummary {
@@ -171,10 +171,25 @@ export class VirtualFileSystem {
     const old = await this.localView();
     if (old.revision.value !== expectedLocalRevision)
       throw new BrowserError('STALE_REVISION', 'Local import manifest changed before publication.');
-    const writes: FileWrite[] = old.files.filter(file => prefixes.some(prefix => file.path.startsWith(prefix)) &&
+    const archives=prefixes.map(prefix=>prefix+'perch-revisions/');
+    const existing=new Map(old.files.map(file=>[file.path,file]));
+    // Retain revision-addressed verified source: changing the current Slug
+    // pointer must never destroy a prior immutable snapshot. Conflicting bytes
+    // at a previously published revision address fail *before* any effect.
+    const writes: FileWrite[] = old.files.filter(file=>
+      prefixes.some(prefix=>file.path.startsWith(prefix)) &&
+      !archives.some(prefix=>file.path.startsWith(prefix)) &&
       !Object.hasOwn(files,file.path)).map(file=>({path:file.path,bytes:null}));
     for (const [path,bytes] of Object.entries(files)) {
-      if (!prefixes.some(prefix=>path.startsWith(prefix))) throw new BrowserError('PATH_DENIED', 'Import outside the requested public namespace.');
+      if (!prefixes.some(prefix=>path.startsWith(prefix)))
+        throw new BrowserError('PATH_DENIED', 'Import outside the requested public namespace.');
+      if (archives.some(prefix=>path.startsWith(prefix)) && existing.has(path)) {
+        const previous=existing.get(path)!;
+        if (previous.bytes !== bytes.length || previous.sha256 !== await digest(bytes) ||
+            !equalBytes(await old.read(path),bytes))
+          throw new BrowserError('STORAGE_CORRUPT', 'Immutable public source revision differs; original archived bytes preserved.');
+        continue;
+      }
       writes.push({path,bytes});
     }
     return this.writePrivateFiles(writes, expectedLocalRevision, gatewayOperationId, 'IMPORT', assertOperationCurrent);

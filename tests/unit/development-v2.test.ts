@@ -219,18 +219,66 @@ test('F12 verified public import stores bytes and a revision-pinned private rece
   assert.equal(result.imports[0]?.slug,'fixture');
   assert.deepEqual(f.permits,['public-get','source-publication']);
   const view=await f.vfs.localView();
+  const receipt=JSON.parse(new TextDecoder().decode(await view.read('imports/fixture/perch-receipt.json')));
+  assert.match(receipt.snapshotId,/^[a-f0-9]{64}$/);
+  assert.equal(receipt.materialization,'complete');
   assert.deepEqual(view.files.map(x=>x.path).sort(),[
     'imports/fixture/index.html','imports/fixture/main.pjs',
-    'imports/fixture/perch-receipt.json','scratch/input',
-  ]);
-  const receipt=JSON.parse(new TextDecoder().decode(await view.read('imports/fixture/perch-receipt.json')));
+    'imports/fixture/perch-receipt.json',
+    receipt.manifestPath,
+    receipt.sourcePrefix+'index.html',receipt.sourcePrefix+'main.pjs',
+    'scratch/input',
+  ].sort());
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(await view.read(receipt.manifestPath))),receipt);
   assert.equal(receipt.revision,result.imports[0]?.revision);
   assert.deepEqual(receipt.files.map((x:{path:string})=>x.path).sort(),['index.html','main.pjs']);
   for (const row of receipt.files as Array<{path:string;sha256:string;bytes:number}>) {
     const bytes=await view.read('imports/fixture/'+row.path);
     assert.equal(bytes.length,row.bytes);
     assert.equal(await digest(bytes),row.sha256);
+    assert.deepEqual(await view.read(receipt.sourcePrefix+row.path),bytes);
   }
+});
+
+test('F12 immutable snapshots retain prior public revisions while advancing only current Slug',async()=>{
+  const f=await fixture('fetch_generator',{generators:[{slug:'fixture'}],timeoutMs:5000});
+  let generation=0;
+  const publicSource=(n:number)=>({generator:{id:42,name:'fixture',modelText:'output = version-'+n,
+    outputTemplate:'<p>fixture</p>',srcManifest:{}}});
+  const fetcher=(async()=>Response.json(publicSource(Math.floor(generation++/2)))) as typeof fetch;
+  const first=await executeDevelopment(f.context,undefined,fetcher) as {imports:Array<{manifestPath:string;sourcePrefix:string;snapshotId:string}>};
+  const receipt1=first.imports[0]!;
+  const old=await f.vfs.localView();
+  const prior=await old.read(receipt1.sourcePrefix+'main.pjs');
+  assert.equal(new TextDecoder().decode(prior),'output = version-0');
+  f.context.envelope.operationId='second-import';
+  const next=await executeDevelopment(f.context,undefined,fetcher) as {imports:Array<{manifestPath:string;sourcePrefix:string;snapshotId:string}>};
+  const receipt2=next.imports[0]!;
+  assert.notEqual(receipt2.snapshotId,receipt1.snapshotId);
+  const latest=await f.vfs.localView();
+  assert.deepEqual(await latest.read(receipt1.sourcePrefix+'main.pjs'),prior);
+  assert.equal(new TextDecoder().decode(await latest.read('imports/fixture/main.pjs')),'output = version-1');
+  assert.equal(new TextDecoder().decode(await latest.read(receipt2.sourcePrefix+'main.pjs')),'output = version-1');
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(await latest.read(receipt1.manifestPath))).snapshotId,receipt1.snapshotId);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(await latest.read(receipt2.manifestPath))).snapshotId,receipt2.snapshotId);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(await latest.read('imports/fixture/perch-receipt.json'))).snapshotId,receipt2.snapshotId);
+});
+
+test('F12 conflicting archive bytes fail before publication and leave active receipt unchanged',async()=>{
+  const f=await fixture('fetch_generator',{generators:[{slug:'fixture'}],timeoutMs:5000});
+  const source={generator:{id:42,name:'fixture',modelText:'output = immutable',outputTemplate:'<p>fixture</p>',srcManifest:{}}};
+  const fetcher=(async()=>Response.json(source)) as typeof fetch;
+  const result=await executeDevelopment(f.context,undefined,fetcher) as {imports:Array<{sourcePrefix:string}>};
+  const before=await f.vfs.localView();
+  const original=await before.read('imports/fixture/perch-receipt.json');
+  await assert.rejects(f.vfs.publishImportedFiles(['fixture'],{
+    [result.imports[0]!.sourcePrefix+'main.pjs']:new TextEncoder().encode('output = IMMUTABLE'),
+  },before.revision.value,'bad-import'),
+    (error:unknown)=>(error as {code?:string}).code==='STORAGE_CORRUPT');
+  const after=await f.vfs.localView();
+  assert.equal(after.revision.value,before.revision.value);
+  assert.deepEqual(await after.read('imports/fixture/perch-receipt.json'),original);
+  assert.equal(new TextDecoder().decode(await after.read(result.imports[0]!.sourcePrefix+'main.pjs')),'output = immutable');
 });
 
 test('F12 timeout aborts verified public snapshot before any imported bytes or publication permit',async()=>{
