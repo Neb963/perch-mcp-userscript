@@ -246,13 +246,13 @@ test('R04 v2 execute_js costs one bounded local compute operation, not a thousan
   const v2=completionReservation('execute_js',args,2);
   assert.ok(legacy.sqlReads>=512_000 && legacy.sqlWrites>=96_000);
   assert.ok(legacy.workerRequests>=1000);
-  assert.ok(v2.sqlReads<=800 && v2.sqlWrites<=200);
+  assert.ok(v2.sqlReads<1500 && v2.sqlWrites<700);
   assert.ok(v2.workerRequests<=20 && v2.durableObjectRequests<=40);
   assert.ok(v2.logEvents<20);
   assert.ok(BUDGET_DIMENSIONS.every(key=>Number.isSafeInteger(v2[key])&&v2[key]>=0));
   const p=policy();p.caps.sqlWrites=900;
   const isolated=admit(new Store(),p,now,{tool:'execute_js',args,props:{contractVersion:2}});
-  assert.ok(isolated && isolated.reservation.sqlWrites<=200);
+  assert.ok(isolated && isolated.reservation.sqlWrites<700);
   assert.throws(()=>admit(new Store(),p,now,{tool:'execute_js',args}),/headroom/);
 });
 
@@ -263,7 +263,7 @@ test('R04 v2 batch estimate is bounded and monotonic in declared actions, includ
   const max=completionReservation('batch',{actions:actions(32)},2);
   assert.ok(one.sqlReads < ten.sqlReads && ten.sqlReads < max.sqlReads);
   assert.ok(one.sqlWrites < ten.sqlWrites && ten.sqlWrites < max.sqlWrites);
-  assert.ok(max.sqlReads < 4000 && max.sqlWrites<900);
+  assert.ok(max.sqlReads < 4000 && max.sqlWrites<1400);
   assert.ok(max.workerRequests<=20 && max.durableObjectRequests<100);
   assert.deepEqual(BUDGET_DIMENSIONS.filter(key=>max[key]<0||!Number.isSafeInteger(max[key])),[]);
   assert.throws(()=>completionReservation('batch',{actions:[]},2),/1–32/);

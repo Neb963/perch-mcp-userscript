@@ -484,3 +484,23 @@ test('UI-OFFLINE-02: outage preserves local stop, local diagnostics and identity
   assert.equal([...f.root.querySelectorAll('button')].some(x=>x.textContent==='Export local diagnostics'),true);
   f.handle.destroy();
 });
+
+test('F22.07 background Connector view stops polling and invalidates mutation authority',async()=>{
+  const f=fixture();
+  let visibility:'visible'|'hidden'='visible';
+  Object.defineProperty(f.dom.window.document,'visibilityState',{configurable:true,get:()=>visibility});
+  await f.handle.open('Agents');
+  assert.ok(f.requests.some(r=>r.path.endsWith('/approvals')));
+  visibility='hidden';
+  f.dom.window.document.dispatchEvent(new f.dom.window.Event('visibilitychange'));
+  const calls=f.requests.length;
+  const buttons=[...f.root.querySelectorAll<HTMLButtonElement>('[data-remote-mutation]')];
+  assert.ok(buttons.every(b=>b.disabled));
+  await new Promise(resolve=>setTimeout(resolve,30));
+  assert.equal(f.requests.length,calls);
+  visibility='visible';
+  f.dom.window.document.dispatchEvent(new f.dom.window.Event('visibilitychange'));
+  await until(()=>f.requests.length>calls);
+  assert.equal(f.root.querySelector('[role=tab][aria-selected=true]')?.textContent,'Connectors');
+  f.handle.destroy();
+});

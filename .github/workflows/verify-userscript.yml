@@ -46,6 +46,7 @@ jobs:
           BENCHMARK_HISTORIES: "0"
           BENCHMARK_NATIVE: "true"
           BENCHMARK_MULTI_CONNECTOR: "true"
+          BENCHMARK_TRACE: "true"
         run: |
           mkdir -p dist
           timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/benchmark-development-v2.ts dist/remediation-native.json

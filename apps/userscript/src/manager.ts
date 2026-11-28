@@ -653,7 +653,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       throw new Error("Gateway authority changed. Refresh this view before taking action.");
   }
   function refreshRemoteButtons() {
-    const active = authority?.generation === generation && authority.installation === installation() && !remoteAction;
+    const active = doc.visibilityState !== "hidden" && authority?.generation === generation && authority.installation === installation() && !remoteAction;
     for (const control of body.querySelectorAll<HTMLButtonElement>("[data-remote-mutation]")) {
       control.disabled = !active || control.dataset.unavailable === "true";
     }
@@ -1830,6 +1830,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     const pollApprovals = async () => {
       if (own !== generation || destroyed || !opened || tab !== "Agents") return;
       approvalRefreshTimer = undefined;
+      if (doc.visibilityState === "hidden") return;
       try {
         await loadApprovals();
         // A failed poll invalidates prior mutation authority. Reacquire through explicit Refresh, not by assuming this list repairs all revisions.
@@ -1842,7 +1843,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       }
       // Check generation after the await: a closed or superseded manager must
       // never restart the timer. Only one automatic request is in flight.
-      if (own !== generation || destroyed || !opened || tab !== "Agents") return;
+      if (own !== generation || destroyed || !opened || tab !== "Agents" || doc.visibilityState==="hidden") return;
       const delay = Math.max(quotaDelay,approvalFailures
         ? Math.min(60000,4000*2**Math.min(approvalFailures,4))
         : pendingApprovalCount || Date.now()-approvalWatchStarted < 30000 ? 4000 : 15000);
@@ -3011,6 +3012,19 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     updateTabs();
     void refresh();
   });
+  const onVisibilityChange=()=>{
+    if(doc.visibilityState==="hidden"){
+      stopApprovalRefresh();
+      authority=undefined;
+      dismissConfirmation();
+      refreshRemoteButtons();
+    } else if(opened && !destroyed && tab==="Agents") {
+      // Returning to a visible Connector pane must reacquire current approval
+      // and Grant authority; do not replay a request from the hidden view.
+      void refresh();
+    } else if(opened && !destroyed) refreshRemoteButtons();
+  };
+  doc.addEventListener("visibilitychange",onVisibilityChange);
   doc.defaultView?.addEventListener("resize", fitVisibleTextareas);
   on(dialog, "toggle", fitVisibleTextareas, true);
   setStatus(status);
@@ -3027,6 +3041,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       opened = false;
       ++generation;
       doc.defaultView?.removeEventListener("resize", fitVisibleTextareas);
+      doc.removeEventListener("visibilitychange",onVisibilityChange);
       host.remove();
     },
   };

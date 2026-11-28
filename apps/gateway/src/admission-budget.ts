@@ -120,8 +120,8 @@ export function admissionBudgetPolicy(env: BudgetEnvironment): BudgetPolicy {
  * Conservative coefficients, deliberately larger than the small-payload
  * lifecycle target. Includes bounded payload transfer, one retained late
  * observation as well as the original 512 KiB result, result retention/deletion,
- * auth, alarms and retry margin. A compute parent reserves its maximum 1000
- * child broker calls. Repeated arbitrary status traffic and other installations
+ * auth, alarms and retry margin. A legacy v1 compute parent reserves its maximum 1000
+ * remote child broker calls. V2 isolates local reads and uses declared batch segments. Repeated arbitrary status traffic and other installations
  * are outside this model and must be measured separately.
  */
 export function completionReservation(tool: string, args: Record<string,unknown> = {}, contractVersion?: number): BudgetVector {

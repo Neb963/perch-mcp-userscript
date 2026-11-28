@@ -32,16 +32,29 @@ try {
     await operation();
     samples.push({name,tag,elapsedMs:performance.now()-clock,usage:metricDelta(start,await fixtureSnapshot(h,fixture))});
   }
+  let tracePending=process.env.BENCHMARK_TRACE==='true';
   async function cycle(tool:string,args:Record<string,unknown>,effect?:'source-publication') {
+    const traced=tracePending;
+    if(traced)tracePending=false;
+    async function step<T>(name:string,fn:()=>Promise<T>):Promise<T> {
+      if(!traced)return fn();
+      const baseline=await fixtureSnapshot(h,fixture),clock=performance.now();
+      const result=await fn();
+      samples.push({name:'trace:'+name,tag:0,elapsedMs:performance.now()-clock,
+        usage:metricDelta(baseline,await fixtureSnapshot(h,fixture))});
+      return result;
+    }
     const operationKey='k2.'+Date.now()+'.'+crypto.randomUUID();
-    const admitted=await syntheticMcp(h,fixture,token,tool,{target,operationKey,...args});
+    const admitted=await step('mcp-admission',()=>syntheticMcp(h,fixture,token,tool,{target,operationKey,...args}));
     const operationId=String(admitted.operationId);
-    const polled=await h.browser(fixture,'poll',{waitMs:0});
+    const polled=await step('browser-poll',()=>h.browser(fixture,'poll',{waitMs:0}));
     assert.equal((polled.operations as Record<string,unknown>[])[0]?.operationId,operationId);
-    await h.browser(fixture,'reply',{operationId,phase:'RUNNING'});
-    if(effect)await h.browser(fixture,'segment',{operationId,segment:{sequence:0,kind:effect,digest:'a'.repeat(64)}});
-    await h.browser(fixture,'reply',{operationId,phase:'SUCCEEDED',result:{operationId,status:'SUCCEEDED',effectState:'VERIFIED',data:{fixture:true}}});
-    const status=await syntheticMcp(h,fixture,token,'operation_status',{target,operationKey});
+    await step('browser-running',()=>h.browser(fixture,'reply',{operationId,phase:'RUNNING'}));
+    if(effect)await step('browser-segment',()=>h.browser(fixture,'segment',{operationId,
+      segment:{sequence:0,kind:effect,digest:'a'.repeat(64)}}));
+    await step('browser-terminal',()=>h.browser(fixture,'reply',{operationId,phase:'SUCCEEDED',
+      result:{operationId,status:'SUCCEEDED',effectState:'VERIFIED',data:{fixture:true}}}));
+    const status=await step('mcp-status',()=>syntheticMcp(h,fixture,token,'operation_status',{target,operationKey}));
     assert.equal(status.phase,'SUCCEEDED');
   }
   const read={files:[{path:'main.pjs'}]};
