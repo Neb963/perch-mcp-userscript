@@ -30,6 +30,11 @@ The 3fac671 manager release passed strict typecheck and 667/670 tests in offline
 
 F10 status semantics: stale heartbeat is not verified source. Registry detail must explicitly report unverified SourceRevision/LocalRevision/PreviewRevision/SavedRevision, effective tool permissions, unsupported pixel capture and scoped blockers without reading source. Native generator_info must return reasoned revision objects without implicit verification. A focused local-workerd test exercises a READ_SOURCE-only Connector, unbound discovery, bound Target detail, unauthorized write capability and explicit unavailable verified-source path. Verification pending exact-head CI.
 
+### R04 inline bounded read-only native selectors (2026-11-28)
+
+- Corrected partial terminal-index CI ef6671c run 46111436457 PASS. Exact native operation 194 reads/48 writes; legacy249/76. This is one additional write reduction with unchanged five-stage denominator and compatible existing indexes.
+- New measured candidate: only if operation tool is read, mutating===false, and JSON-encoded arguments <=512 UTF-8 bytes, persist exact selector in existing canonical operation context rather than an additional operation_args_v2 row. Preserve all large/mutating args and every result in external payload tables. Strict decode rejects context/external duplicates and unsupported inline shape. Metadata remains inside the private Workspace Durable Object; no external projection may expose args.
+- Legacy native migration uses the same shape(), preserving canonical(legacy) equality and all receipt digests. Old external read-selector rows get deleted only when the new canonical row is updated atomically. `activeObligations` must read either layout. Test positive/negative, Unicode, oversized, transition, cold reopen, migration and corrupt external payload. Retain only on equal-workload measured write savings without additional reads or authorization regressions.
 ### R04 measured Activity savings and native terminal partial index (2026-11-28)
 
 - cacc613 exact-head CI 46110889498 succeeded. Native lifecycle now 194 reads/49 writes; legacy249/76. Removing the new-only combined Activity index reduced one write per complete native terminal and retained correctness of ordered Workspace/phase query and native readback.

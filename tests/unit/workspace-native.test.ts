@@ -106,3 +106,64 @@ test('R04 partial terminal index excludes active rows, preserves terminal orderi
     assert.equal(legacyShape.lastActivityAt(),0);
   }finally{f.close();}
 });
+
+test('R04 native small read selectors share canonical row, while large and mutating args retain external payloads',()=>{
+  const f=fixture();
+  try {
+    const store=new OperationStore<StoredOperation&Record<string,unknown>>(f.db,'native');
+    finish(store);
+    const small={...op('small-read'),phase:'ADMITTED',terminalAt:undefined,
+      terminalNotified:undefined,result:undefined,args:{files:[{path:'main.pjs'}]}};
+    store.put('operation/small-read',small);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_args_v2 WHERE key='operation/small-read'").get()!.n,0);
+    const raw=f.sqlite.prepare("SELECT hasArgs,context FROM operation_native_v2 WHERE key='operation/small-read'").get() as {hasArgs:number;context:string};
+    assert.equal(raw.hasArgs,0);
+    assert.deepEqual(JSON.parse(raw.context).args,small.args);
+    assert.deepEqual(store.get('operation/small-read'),small);
+    assert.deepEqual(store.activeObligations().find(x=>x.tool==='read')?.args,small.args);
+    const large={...op('large-read'),phase:'ADMITTED',terminalAt:undefined,
+      terminalNotified:undefined,result:undefined,args:{files:[{path:'x'.repeat(2048)}]}};
+    store.put('operation/large-read',large);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_args_v2 WHERE key='operation/large-read'").get()!.n,1);
+    assert.deepEqual(store.get('operation/large-read')?.args,large.args);
+    const mutation={...op('mutating-read'),phase:'ADMITTED',terminalAt:undefined,
+      terminalNotified:undefined,result:undefined,mutating:true,args:{files:[{path:'main.pjs'}]}};
+    store.put('operation/mutating-read',mutation);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_args_v2 WHERE key='operation/mutating-read'").get()!.n,1);
+    const running=store.get('operation/small-read')!;
+    running.phase='DISPATCHED';
+    store.put('operation/small-read',running);
+    running.phase='RUNNING';
+    store.put('operation/small-read',running);
+    const terminal=store.get('operation/small-read')!;
+    terminal.phase='SUCCEEDED';
+    terminal.terminalAt=Date.now();
+    terminal.terminalNotified=true;
+    terminal.result={operationId:'small-read',status:'SUCCEEDED',effectState:'NONE'};
+    delete terminal.args;
+    store.put('operation/small-read',terminal);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_args_v2 WHERE key='operation/small-read'").get()!.n,0);
+    assert.equal(store.get('operation/small-read')?.args,undefined);
+    assert.equal(store.receiptDigest('operation/small-read')?.length,64);
+    assert.equal(new OperationStore<StoredOperation&Record<string,unknown>>(f.db,'legacy').get('operation/small-read')?.phase,'SUCCEEDED');
+  }finally{f.close();}
+});
+test('R04 small selector survives legacy migration, legacy external conversion and corruption is rejected',()=>{
+  const f=fixture();
+  try{
+    const args={files:[{path:'main.pjs'}]};
+    const legacy={...op('small-legacy'),args};
+    f.db.put('operation/small-legacy',legacy);
+    const store=new OperationStore<StoredOperation&Record<string,unknown>>(f.db,'native');
+    finish(store);
+    assert.deepEqual(store.get('operation/small-legacy')?.args,args);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_args_v2 WHERE key='operation/small-legacy'").get()!.n,0);
+    assert.deepEqual(store.activeObligations().find(x=>x.tool==='read'),undefined);
+    const sql="UPDATE operation_native_v2 SET context=? WHERE key=?";
+    const native=f.sqlite.prepare("SELECT context FROM operation_native_v2 WHERE key='operation/small-legacy'").get() as {context:string};
+    const bad=JSON.parse(native.context) as Record<string,unknown>;
+    bad.args={files:[{path:'x'.repeat(2048)}]};
+    f.db.query(sql,JSON.stringify(bad),'operation/small-legacy');
+    assert.throws(()=>store.get('operation/small-legacy'),/SQLITE_RECORD_CORRUPT/);
+  }finally{f.close();}
+});

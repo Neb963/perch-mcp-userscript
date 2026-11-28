@@ -26,6 +26,17 @@ const BOOLEANS = new Set(['terminalNotified','mutating']);
 const PHASES = ['ADMITTED','DISPATCHED','RUNNING','SUCCEEDED','REJECTED','UNKNOWN','PARTIAL','CANCELLED'];
 const TERMINAL = ['SUCCEEDED','REJECTED','UNKNOWN','PARTIAL','CANCELLED'];
 const PAYLOADS = ['args','result'] as const;
+const INLINE_READ_ARGS_MAX_BYTES=512;
+/** No native source or mutation arguments share the metadata row. Only
+ * small nonmutating read selectors are eligible, with byte-sized and
+ * schema-checked representation. The exact bytes remain canonical. */
+function inlineReadArgs(value:StoredOperation):boolean {
+  if(value.tool!=='read'||(value as {mutating?:unknown}).mutating!==false||
+     !object(value.args))return false;
+  const encoded=JSON.stringify(value.args);
+  return typeof encoded==='string' &&
+    new TextEncoder().encode(encoded).byteLength<=INLINE_READ_ARGS_MAX_BYTES;
+}
 const TABLE = 'operation_native_v2';
 const RECOVERY = '(pending=1 OR hold=1 OR leaseBlock=1)';
 const WEEK = 7 * 86400000;
@@ -61,9 +72,12 @@ function shape(value:StoredOperation): Record<string,string|number|null> {
     if(own(input,field)&&v!==undefined)presence.push(field);
     delete input[field];
   }
-  delete input.args;delete input.result;
+  const inlineArgs=inlineReadArgs(value);
+  if(!inlineArgs)delete input.args;
+  delete input.result;
   row.context=JSON.stringify(input);row.presence=JSON.stringify(presence);
-  row.hasArgs=Number(value.args!==undefined);row.hasResult=Number(value.result!==undefined);
+  row.hasArgs=Number(value.args!==undefined&&!inlineArgs);
+  row.hasResult=Number(value.result!==undefined);
   const terminal=value.terminalAt??0;
   const active=terminal?0:1;
   const pending=terminal&&!value.terminalNotified?1:0;
@@ -94,8 +108,13 @@ function decode<T extends StoredOperation>(row:NativeRow):T {
     const has=row[kind==='args'?'hasArgs':'hasResult'];
     const payload=row[kind+'Value'];
     if(has!==0&&has!==1)corrupt();
-    if(has===1){if(payload===null||payload===undefined)corrupt();value[kind]=parsed(payload);}
-    else if(payload!==null&&payload!==undefined)corrupt();
+    if(has===1){
+      if(payload===null||payload===undefined||own(context,kind))corrupt();
+      value[kind]=parsed(payload);
+    } else if(payload!==null&&payload!==undefined)corrupt();
+    if(kind==='args'&&has===0&&own(context,'args')&&!inlineReadArgs(value as StoredOperation))
+      corrupt();
+    if(kind==='result'&&own(context,'result'))corrupt();
   }
   validate(value);
   return value as T;
@@ -235,8 +254,13 @@ export class OperationStore<T extends StoredOperation> {
       if(changed.length)this.db.query(`UPDATE ${TABLE} SET ${changed.map(([column])=>column+'=?').join(',')} WHERE key=?`,...changed.map(([,v])=>v),key);
     }
     for(const kind of PAYLOADS) {
-      if(value[kind]!==undefined)this.db.query(`INSERT INTO operation_${kind}_v2 VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value<>excluded.value`,key,JSON.stringify(value[kind]));
-      else this.db.query(`DELETE FROM operation_${kind}_v2 WHERE key=?`,key);
+      // A new small read selector is already preserved in context. Avoid
+      // writing an extra argument row; migrate older external rows only when
+      // necessary. No result, mutation or oversized argument is ever inline.
+      const external=kind==='args'?next.hasArgs===1:next.hasResult===1;
+      if(external)this.db.query(`INSERT INTO operation_${kind}_v2 VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value<>excluded.value`,key,JSON.stringify(value[kind]));
+      else if(previous?.[kind==='args'?'hasArgs':'hasResult']===1)
+        this.db.query(`DELETE FROM operation_${kind}_v2 WHERE key=?`,key);
     }
   }
   /** One transaction, at most 16 logical records and 1 MiB JSON plus one accepted record. */
@@ -344,7 +368,7 @@ export class OperationStore<T extends StoredOperation> {
     }else keys=this.legacy().obligationKeys();
     return keys.map(({key})=>{
       let row:{tool:string;args:string|null;reservation:string|null}|undefined;
-      if(this.native)row=this.db.query<{tool:string;args:string|null;reservation:string|null}>(`SELECT o.tool,a.value AS args,json_extract(o.context,'$.budgetReservation') AS reservation FROM ${TABLE} o LEFT JOIN operation_args_v2 a USING(key) WHERE o.key=?`,key)[0];
+      if(this.native)row=this.db.query<{tool:string;args:string|null;reservation:string|null}>(`SELECT o.tool,COALESCE(a.value,json_extract(o.context,'$.args')) AS args,json_extract(o.context,'$.budgetReservation') AS reservation FROM ${TABLE} o LEFT JOIN operation_args_v2 a USING(key) WHERE o.key=?`,key)[0];
       else {
         if(!this.legacyPartsPresent(key))corrupt();
         row=this.db.query<{tool:string;args:string|null;reservation:string|null}>("SELECT json_extract(value,'$.tool') AS tool,json_extract(value,'$.args') AS args,json_extract(value,'$.budgetReservation') AS reservation FROM (SELECT group_concat(value,'') AS value FROM (SELECT value FROM records WHERE key=? ORDER BY part))",key)[0];
