@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {isScopedDevelopmentCall} from '../../apps/gateway/src/index.js';
+import {isScopedDevelopmentCall} from '../../apps/gateway/src/mcp-scope.js';
 
 const url='https://capacity.test/mcp/connector-1';
 function message(method:string,name?:string,args:unknown={}):Request {

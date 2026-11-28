@@ -1,4 +1,5 @@
 import { persistentAccessTokenTTL } from './oauth-lifetime.js';
+import { isScopedDevelopmentCall } from './mcp-scope.js';
 import { developmentToolDefinitions, hasEffectV2, parseDevelopmentCall, requiredPermissionsV2,
   type developmentToolArgs } from '../../../packages/contracts/src/development-v2.js';
 import { parseTarget } from '../../../packages/contracts/src/target.js';
@@ -268,31 +269,6 @@ function capabilityAvailable(name: string, env: Env): boolean {
     "upload_file",
     "generate_image",
   ].includes(name);
-}
-/** A v2 tool call is authorized exactly once at the most specific Target
- * or discovery boundary inside mcpDevelopment. All other MCP messages,
- * including malformed calls and tools/list, require the initial Grant check.
- * Parse only a bounded clone. An unrecognized request can never bypass the
- * outer authority check; the inner handler still checks the current Grant,
- * revocation, audience, permissions, and Target before accessing any data.
- * SDK token validation is independent and always required.
- */
-export async function isScopedDevelopmentCall(request: Request): Promise<boolean> {
-  if (request.method !== 'POST') return false;
-  if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) return false;
-  try {
-    const body = await parseBody(request.clone(), MAX_BODY);
-    if (body.jsonrpc !== '2.0' || body.method !== 'tools/call') return false;
-    const params = body.params;
-    if (!params || typeof params !== 'object' || Array.isArray(params)) return false;
-    const values = params as Record<string, unknown>;
-    if (typeof values.name !== 'string') return false;
-    parseDevelopmentCall(values.name, values.arguments ?? {});
-    return true;
-  } catch {
-    // Invalid and oversized messages retain the older, stricter precheck.
-    return false;
-  }
 }
 async function mcp(
   request: Request,

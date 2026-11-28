@@ -48,6 +48,11 @@ F10 status semantics: stale heartbeat is not verified source. Registry detail mu
 - Remaining: F06 conservative historical storage reclamation, actual preview pixels feasibility, all remaining A01–A34 matrix entries, full R04 performance and R05 final exact-head qualification. No unfinished row is PASS.
 R05 first exact-head CI qualification at `42ab329` [run 46097599704](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46097599704) succeeded: 686 tests passed, zero failed, one skipped, both offline cost paths, inventory generation, release build/hash check and Wrangler dry-run. Inventory has 1,317 distinct clauses: 54 PASS, 1,196 NOT_STARTED, 28 FAIL, 24 DEFERRED_OWNER, 1 BLOCKED_FEASIBILITY and 14 SUPERSEDED; the strict release gate fails by design. The artifact initially stamped synthetic PR merge `GITHUB_SHA`; next checkpoint corrects provenance to the checked-out source SHA and tree, enforcing expected PR head in CI.
 
+### R04 48027bd fault-injection correction
+
+- CI 46103447198 found a test packaging error: the pure unit classifier imported the Cloudflare Worker entrypoint under Node. Move the same bounded classifier to pure `mcp-scope.ts` and retain it as an index.ts dependency. No runtime authority changes.
+- F05 image-transfer late-revocation probe was configured for five auth checks including the now-removed duplicate generic ingress check. The safe v2 path has four: exact Target, Workspace status, image read, and post-hydration result ACL. Re-arm at check four and independently verify no pixel disclosure after revocation. Never relax the late-recheck or disable the fault-injection assertion.
+- Do not claim a read reduction until same-denominator CI benchmark demonstrates it. Roll back scoped skip on any ACL regression.
 ### R04 targeted double-authorization elimination (2026-11-28)
 
 - Detailed exact-head SQL profile run 46102908402: the Registry receives multiple /internal/authorize RPCs per valid MCP call. The outer mcp() performs a generic Grant check; the v2 tools/call handler performs a second fresh, Target-specific authorization. There is no operator/provider effect between these two checks. The second specific check remains mandatory.

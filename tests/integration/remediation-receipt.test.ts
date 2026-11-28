@@ -229,9 +229,10 @@ test('F05 A09-revoked-during-projection revocation before the final result ACL w
       assert.ok(grant);
       const hook = '/__fixture_revoke_before_authorization';
       const armed = await h.internal(h.registry, hook, {
-        // Ingress auth, Target auth, Workspace status auth, image auth,
-        // then the Workspace's result-delivery recheck.
-        beforeAuthorization: 5, grantId: grant.id, revision: grant.revision,
+        // Scoped tools/call skips the redundant generic ingress check. The
+        // four required fresh checks are Target auth, Workspace status auth,
+        // image auth, then post-hydration result-delivery revocation recheck.
+        beforeAuthorization: 4, grantId: grant.id, revision: grant.revision,
         adminCredential: h.syntheticPairing().adminCredential,
       });
       assert.equal(armed.armed, true);
