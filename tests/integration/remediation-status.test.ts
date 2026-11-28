@@ -75,7 +75,9 @@ test('F23 gateway management state safely reports v2 rollout gates and preserves
   assert.equal(rollout.oauthGrantPersistence,'UNTIL_REVOKED');
   assert.equal(rollout.oauthAccessTokenTtlSeconds,24*86400);
   assert.equal(rollout.oauthAccessTokenQualification,'DEFAULT_BROWSER_TIMER_SAFE');
-  assert.equal(Object.keys(rollout).some(x=>/secret|token|credential|password/i.test(x)),false);
+  assert.deepEqual(Object.keys(rollout).filter(k=>/secret|token|credential|password/i.test(k)).sort(),
+    ['oauthAccessTokenQualification','oauthAccessTokenTtlSeconds'],
+    'Only explicitly allowlisted non-secret token lifetime metadata may appear in rollout status.');
   assert.equal(connector.contractVersion,2);
  }finally{await h.close();}
 });
