@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {JSDOM} from 'jsdom';
 import {createNativePreviewBridge,NativeProtocolPreviewBridge,PreviewAdapter,type PreviewReceipt} from '../../apps/userscript/src/preview.js';
-import {type ExecutionError} from '../../apps/userscript/src/compute.js';
+import {ExecutionError} from '../../apps/userscript/src/compute.js';
 
 const publicId='b95e4473dace29730b4433ad33b4c64c';
 async function hash(value:unknown){return Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(value)))).toString('hex')}
@@ -64,6 +64,38 @@ test('a trusted DOM frame reload fences a pending native evaluation',async()=>{
 test('native frame Public ID mismatch denies requests before dispatch',async()=>{
  const f=await fixture();f.page.generatorPublicId='0'.repeat(32);
  await assert.rejects(f.bridge.evaluate('return 42;',1000),(e:ExecutionError)=>e.code==='BINDING_MISMATCH');assert.equal(f.requests.length,0);
+});
+
+test('F04 native preview rechecks the deadline after diagnostics and before user evaluation', async () => {
+ const f = await fixture();
+ const abort = new AbortController();
+ let dispatched = false;
+ try {
+  await assert.rejects(f.bridge.evaluate('return 42;', 1000, {
+   signal: abort.signal,
+   assertCurrent: async () => {
+    assert.equal(f.requests.length, 1, 'the inert diagnostic request completed');
+    throw new ExecutionError('TIMEOUT', 'Synthetic expired operation');
+   },
+   onDispatch: () => { dispatched = true; },
+  }), (error: ExecutionError) => error.code === 'TIMEOUT' && error.effectState === 'NONE');
+  assert.equal(dispatched, false);
+  assert.equal(f.requests.length, 1);
+ } finally { f.dom.window.close(); }
+});
+
+test('F04 cancelling preview observation after native dispatch preserves unknown effects', async () => {
+ const f = await fixture();
+ const abort = new AbortController();
+ let dispatched = false;
+ try {
+  f.onUser(() => { assert.equal(dispatched, true); abort.abort(); });
+  await assert.rejects(f.bridge.evaluate('return 42;', 1000, {
+   signal: abort.signal, assertCurrent: async () => {},
+   onDispatch: () => { dispatched = true; },
+  }), (error: ExecutionError) => error.code === 'CANCELLED' && error.effectState === 'UNKNOWN');
+  assert.equal(f.requests.filter(request => request.js === 'return 42;').length, 1);
+ } finally { f.dom.window.close(); }
 });
 
 test('PreviewAdapter attests native evaluateJs with exact source/origin/caller ID before enabling page_eval',async()=>{

@@ -19,7 +19,8 @@ test("pending ChatGPT OAuth request auto-appears even when Grant history fails, 
   let polls = 0, decisions = 0, grants = 0;
   const request: ManagerClient["request"] = async (method, path, body) => {
     if (method === "GET") {
-      if (path.endsWith("/state")) return { version: "0.1.2", schemaVersion: 1, paired: true };
+      if (path.endsWith("/state"))
+        return { version: "0.1.2", schemaVersion: 1, paired: true, revision: 2, policyRevision: 1 };
       if (path.endsWith("/workspaces"))
         return { items: [{ id: "workspace1", label: "aleph-alpha", agentId: "agent1", revision: 2 }], revision: 2 };
       if (path.endsWith("/agents"))

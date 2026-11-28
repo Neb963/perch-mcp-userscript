@@ -164,7 +164,7 @@ export class BoundObjectStore {
     if (await this.physicalBytes(keys) + additionalBytes > this.maxBytes)
       throw new BrowserError('QUOTA_EXCEEDED', 'Binding physical storage is full.');
   }
-  async put(name: string, input: Uint8Array): Promise<void> {
+  async put(name: string, input: Uint8Array, beforePublish?: () => void | Promise<void>): Promise<void> {
     await this.writable();
     const key = this.rootKey(name);
     if (input.length > this.maxBytes) throw new BrowserError('QUOTA_EXCEEDED', 'Binding object exceeds capacity.');
@@ -212,6 +212,7 @@ export class BoundObjectStore {
       for (const [chunkKey, encoded] of additions) await this.store.set(chunkKey, encoded);
       await this.readRoot(root);
       await this.writable();
+      if (beforePublish) await beforePublish();
       rootAttempted = true;
       try { await this.store.set(key, root); }
       catch { /* Exact readback distinguishes a lost acknowledgement. */ }

@@ -1,7 +1,9 @@
 import { z } from 'zod/v4';
-import { filesystemV2Schemas, filesystemInlineWriteSchema, filesystemV2Permissions, type FilesystemToolV2 } from './filesystem-v2.js';
+import { filesystemV2Schemas, filesystemInlineWriteSchema, filesystemV2Permissions, preflightBatchMutation, type FilesystemToolV2 } from './filesystem-v2.js';
 import { cancelOperationV2Schema, deliveryFields, operationKeySchema, operationStatusV2Schema, targetV2Schema } from './operations-v2.js';
-import { canonicalPath } from './paths.js';
+import { assertNoFilePathConflicts, assertNoPathCollisions, canonicalPath } from './paths.js';
+import { LIMITS } from './envelopes.js';
+import { parsePublicFetchDestination } from './public-fetch.js';
 import { ToolError } from './errors.js';
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -128,6 +130,136 @@ export function hasEffectV2(name: keyof typeof developmentToolArgs, args: Record
   return !['read','list_files','preview_diagnostics','generator_info','capture_page_image'].includes(name);
 }
 
+const utf8 = new TextEncoder();
+const batchEnvelopeReserve = 4096;
+export const batchResultBudget = 192 * 1024;
+const batchLedgerBaseBytes = 16 * 1024;
+
+function receiptPaths(step: BatchArgumentsV2['actions'][number]): string[] {
+  switch (step.tool) {
+    case 'read': case 'write': return step.args.files.map(file => file.path);
+    case 'delete': return step.args.paths.map(item => item.path);
+    case 'rename': return step.args.moves.flatMap(move => [move.from, move.to]);
+    default: return [];
+  }
+}
+
+/** Reserve space for path outcomes and digest-pinned read continuations. */
+export function batchEvidenceReserve(batch: BatchArgumentsV2): number {
+  return batch.actions.reduce((size, step) => size + receiptPaths(step).reduce(
+    (bytes, path) => bytes + utf8.encode(JSON.stringify(path)).byteLength + (step.tool === 'read' ? 400 : 96), 0),
+  batchLedgerBaseBytes);
+}
+
+export function pathMatchesRules(path: string, rules: readonly string[]): boolean {
+  return rules.some(rule => rule.endsWith('/') ? path.startsWith(rule) : path === rule);
+}
+
+/**
+ * Pure checks for an already decoded batch. Callers supply approved hosts only
+ * at the trusted browser boundary, where the Operator's policy is stored.
+ */
+export function preflightDevelopmentBatch(batch: BatchArgumentsV2, approvedHosts?: readonly string[]): void {
+  const serialized = JSON.stringify(batch, (_key, value: unknown) => {
+    if (typeof value === 'string' && /[\uD800-\uDFFF]/u.test(value)) {
+      throw new ToolError('INVALID_INPUT', 'Batch contains unpaired Unicode surrogates.');
+    }
+    return value;
+  });
+  if (utf8.encode(serialized).byteLength > LIMITS.transportBytes - batchEnvelopeReserve) {
+    throw new ToolError('LIMIT_EXCEEDED', 'Batch exceeds the serialized browser envelope budget.');
+  }
+  if (batchEvidenceReserve(batch) > batchResultBudget) {
+    throw new ToolError('LIMIT_EXCEEDED', 'Batch cannot retain bounded step and file continuation evidence.');
+  }
+  let decodedWriteBytes = 0;
+  // Only adjacent mutations stage against one known file set. Other actions
+  // can publish independently, so their content must be checked at runtime.
+  const declaredFiles = new Set<string>();
+  const declaredMissing = new Set<string>();
+  const requireStagedState = (path: string, shouldExist: boolean) => {
+    if (shouldExist ? declaredMissing.has(path) : declaredFiles.has(path)) {
+      throw new ToolError('INVALID_INPUT', 'A mutation contradicts an earlier path outcome in the same publication segment.');
+    }
+  };
+  const stagePath = (path: string, exists: boolean) => {
+    if (exists) {
+      declaredFiles.add(path);
+      declaredMissing.delete(path);
+    } else {
+      declaredMissing.add(path);
+      declaredFiles.delete(path);
+    }
+  };
+  for (const step of batch.actions) {
+    if (step.tool === 'write' || step.tool === 'delete' || step.tool === 'rename') {
+      decodedWriteBytes += preflightBatchMutation(step);
+      if (step.tool === 'write') {
+        for (const file of step.args.files) {
+          requireStagedState(file.path, !file.ifAbsent);
+          stagePath(file.path, true);
+        }
+      } else if (step.tool === 'delete') {
+        for (const item of step.args.paths) {
+          requireStagedState(item.path, true);
+          stagePath(item.path, false);
+        }
+      } else {
+        for (const move of step.args.moves) {
+          requireStagedState(move.from, true);
+          requireStagedState(move.to, false);
+          stagePath(move.from, false);
+          stagePath(move.to, true);
+        }
+      }
+      assertNoFilePathConflicts([...declaredFiles]);
+      continue;
+    }
+    declaredFiles.clear();
+    declaredMissing.clear();
+    switch (step.tool) {
+      case 'read':
+        assertNoPathCollisions(step.args.files.map(file => file.path));
+        break;
+      case 'fetch_url':
+        assertNoFilePathConflicts(step.args.requests.map(request => request.path));
+        for (const request of step.args.requests) parsePublicFetchDestination(request.url, approvedHosts);
+        break;
+      case 'fetch_generator':
+        if (new Set(step.args.generators.map(generator => generator.slug)).size !== step.args.generators.length) {
+          throw new ToolError('INVALID_INPUT', 'Duplicate public generator.');
+        }
+        for (const generator of step.args.generators) {
+          if (!generator.paths) continue;
+          assertNoFilePathConflicts(generator.paths);
+          if (generator.paths.some(path => path.startsWith('scratch/') || path.startsWith('imports/'))) {
+            throw new ToolError('PATH_DENIED', 'Public generators contain only native source files.');
+          }
+        }
+        break;
+      case 'execute_js': {
+        const { access, modules = [] } = step.args;
+        if (access.write?.some(path => path.startsWith('imports/'))) {
+          throw new ToolError('PATH_DENIED', 'Imports are read-only.');
+        }
+        if (new Set(modules.map(module => module.specifier)).size !== modules.length) {
+          throw new ToolError('INVALID_INPUT', 'Duplicate pinned module.');
+        }
+        if (modules.some(module => !pathMatchesRules(module.path, access.read ?? []))) {
+          throw new ToolError('SCOPE_DENIED', 'Pinned module is outside declared read access.');
+        }
+        if (modules.length > (access.maxReads ?? 256)) {
+          throw new ToolError('LIMIT_EXCEEDED', 'Pinned module loads exceed the declared read count.');
+        }
+        break;
+      }
+    }
+  }
+  if (decodedWriteBytes > LIMITS.transportBytes - batchEnvelopeReserve) {
+    throw new ToolError('LIMIT_EXCEEDED', 'Batch inline writes exceed the decoded byte budget.');
+  }
+}
+
 export function parseDevelopmentCall(name: string, raw: unknown) {
   if (!developmentToolNames.includes(name as DevelopmentTool))
     throw new ToolError('INVALID_INPUT', 'Unknown development tool.');
@@ -144,6 +276,7 @@ export function parseDevelopmentCall(name: string, raw: unknown) {
   const tool = name as keyof typeof developmentToolArgs;
   const parsed = developmentToolArgs[tool].safeParse(args);
   if (!parsed.success) throw new ToolError('INVALID_INPUT', 'Invalid development tool arguments.');
+  if (tool === 'batch') preflightDevelopmentBatch(parsed.data as BatchArgumentsV2);
   if (hasEffectV2(tool, parsed.data as Record<string, unknown>) && operationKey === undefined)
     throw new ToolError('INVALID_INPUT', 'This tool requires an operationKey.');
   return {name: name as DevelopmentTool, args: parsed.data as Record<string, unknown>, delivery: delivery.data};

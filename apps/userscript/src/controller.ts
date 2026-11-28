@@ -46,6 +46,14 @@ interface Lease {
   permissions: string[];
   notifications?: { version: 1 };
 }
+const ACTIVE_OPERATION_HEARTBEAT_MS = 5000;
+interface ScopedOperationControl {
+  lease: Lease;
+  operationId: string;
+  abort: AbortController;
+  deadlineTimer: ReturnType<typeof setTimeout>;
+  heartbeatTimer: ReturnType<typeof setInterval>;
+}
 interface LocalOperation {
   operationId: string;
   digest: string;
@@ -119,6 +127,7 @@ export class BrowserController {
   private sourceReadback: {state: 'not-checked'|'checking'|'verified'|'unavailable';code?:string} = {state:'not-checked'};
   private running?: Promise<void>;
   private abort?: AbortController;
+  private scopedControl?: ScopedOperationControl;
   constructor(
     readonly adapter: NativeAdapter,
     readonly store: KeyValueStore,
@@ -353,6 +362,7 @@ export class BrowserController {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
     this.abort?.abort();
+    this.clearScopedControl();
     const lease = this.lease;
     this.lease = undefined;
     // A transport abort never asserts cancellation of a dispatched effect.
@@ -373,21 +383,22 @@ export class BrowserController {
       connection: this.transport.configuration().paired ? "paused" : "unpaired",
     });
   }
-  private async renew(lease: Lease): Promise<void> {
+  private async renew(lease: Lease, controlOnly = false): Promise<void> {
     if (this.stopped || this.lease !== lease || this.renewalInFlight) return;
     this.renewalInFlight = true;
     try {
+      const active = this.scopedControl?.lease === lease ? this.scopedControl : undefined;
       let observation = {};
-      if (lease.contractVersion === 2) {
+      if (lease.contractVersion === 2 && !controlOnly) {
         const current = await this.adapter.probe();
         observation = {dirty: current.ready && current.identity && this.identity &&
           equalIdentity(current.identity, this.identity) ? current.dirty ?? null : null};
       }
       const state = (await this.transport.tab(
         "/api/v1/tab/heartbeat",
-        {...this.ids(lease), ...observation},
+        {...this.ids(lease), ...observation, ...(active ? {activeOperationId: active.operationId} : {})},
         lease.leaseCredential,
-      )) as { expiresAt: number; permissions: string[]; workAvailable?: boolean };
+      )) as { expiresAt: number; permissions: string[]; workAvailable?: boolean; cancelRequestedOperationId?: string };
       if (this.stopped || this.lease !== lease) return;
       if (
         !Number.isSafeInteger(state.expiresAt) ||
@@ -395,6 +406,8 @@ export class BrowserController {
       )
         throw new Error("Expired lease.");
       lease.expiresAt = Math.max(lease.expiresAt, state.expiresAt);
+      if (active && this.scopedControl === active && state.cancelRequestedOperationId === active.operationId)
+        active.abort.abort(new BrowserError('CANCELLED', 'The scoped operation was cancelled.'));
       this.push?.reconcile(state.workAvailable === true);
       if (Array.isArray(state.permissions))
         lease.permissions = lease.permissions.filter((p) =>
@@ -751,8 +764,17 @@ export class BrowserController {
     try {
       await this.executeOperation(raw, lease);
     } finally {
+      this.clearScopedControl();
       this.executing = false;
     }
+  }
+  private clearScopedControl(): void {
+    const control = this.scopedControl;
+    if (!control) return;
+    clearTimeout(control.deadlineTimer);
+    clearInterval(control.heartbeatTimer);
+    if (this.abort === control.abort) this.abort = undefined;
+    this.scopedControl = undefined;
   }
   private async executeScopedOperation(raw: unknown, lease: Lease): Promise<void> {
     const parsed = browserEnvelopeV2.safeParse(raw);
@@ -764,18 +786,30 @@ export class BrowserController {
         target.bindingGeneration !== lease.bindingGeneration || envelope.assignmentGeneration !== lease.assignmentGeneration ||
         target.assignmentGeneration !== lease.assignmentGeneration || !envelope.permissions.every(p=>lease.permissions.includes(p)))
       throw new BrowserError('STALE_EPOCH','Operation does not match this exact scoped lease.');
-    this.abort = new AbortController();
-    const signal = this.abort.signal;
-    const assertCurrent = async () => {
+    const abort = new AbortController();
+    const signal = abort.signal;
+    const assertTimeAndLease = () => {
+      if (signal.aborted && signal.reason instanceof BrowserError) throw signal.reason;
       if (signal.aborted || this.stopped || this.lease !== lease)
         throw new BrowserError('CANCELLED','Operation is cancelled or its lease is no longer active.');
       const now = Date.now();
       if (now >= lease.expiresAt || now >= envelope.deadlineMs || envelope.deadlineMs - now > 3_600_000)
         throw new BrowserError('TIMEOUT','Exact scoped operation deadline expired.');
+    };
+    const assertCurrent = async () => {
+      assertTimeAndLease();
       await vfs.scope!.assertCurrent();
+      assertTimeAndLease();
+    };
+    const operationId = envelope.operationId;
+    assertTimeAndLease();
+    this.abort = abort;
+    this.scopedControl = {lease, operationId, abort,
+      deadlineTimer: setTimeout(() => abort.abort(new BrowserError('TIMEOUT', 'Exact scoped operation deadline expired.')),
+        Math.max(0, envelope.deadlineMs - Date.now())),
+      heartbeatTimer: setInterval(() => { if (!signal.aborted) void this.renew(lease, true); }, ACTIVE_OPERATION_HEARTBEAT_MS),
     };
     await assertCurrent();
-    const operationId = envelope.operationId;
     const key = this.operationPrefix(envelope.workspaceId) + operationId;
     const seal = await digest(JSON.stringify(envelope));
     const reply = (phase: string, result?: Record<string,unknown>) => this.transport.tab(
@@ -823,9 +857,10 @@ export class BrowserController {
     };
     try {
       const data = await (this.tools?.callDevelopment ? this.tools.callDevelopment(context) : executeDevelopment(context));
-      const reported = data as {status?:string};
+      const reported = data as {status?:string; effectState?:string};
       const status = reported?.status === 'PARTIAL' || reported?.status === 'UNKNOWN' || (reported?.status==='REJECTED' || reported?.status==='CANCELLED') ? reported.status : 'SUCCEEDED';
-      const effectState = status==='PARTIAL'?'PARTIAL':status==='UNKNOWN'?'POSSIBLE':status==='REJECTED'||status==='CANCELLED'?'NONE':'VERIFIED';
+      const effectState = status==='PARTIAL'?'PARTIAL':status==='UNKNOWN'?'POSSIBLE':
+        status==='REJECTED'||status==='CANCELLED'||envelope.tool==='batch'&&reported?.effectState==='NONE'?'NONE':'VERIFIED';
       result = {operationId,status,effectState,data:new TextEncoder().encode(JSON.stringify(data)).length <= 240_000 ?
         data : {resultAvailability:'TOO_LARGE'}};
       if (status!=='SUCCEEDED') result.error = {code:status==='PARTIAL'?'PARTIAL_EFFECT':status==='UNKNOWN'?'EFFECT_UNKNOWN':status==='CANCELLED'?'CANCELLED':'PROVIDER_REJECTED',

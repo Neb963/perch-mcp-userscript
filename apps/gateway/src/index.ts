@@ -37,6 +37,7 @@ import {
   VERSION,
   errorResponse,
   json,
+  omitDevelopmentResult,
   origin,
   parseBody,
   registry,
@@ -480,15 +481,22 @@ function mcpDevelopment(request: Request, env: Env, props: AuthProps, agentId: s
     server.setRequestHandler('tools/call',async (incoming)=>{
       let data: Record<string,unknown>, images: McpImageBlock[] = [], isError = false;
       let target: string | undefined;
+      let operationKey: string | undefined;
+      let operationId: string | undefined;
+      let submitted = false;
+      let resultOp = false;
       try {
         const call = parseDevelopmentCall(incoming.params.name,incoming.params.arguments ?? {});
         target = call.delivery?.target ?? (typeof call.args.target === 'string' ? call.args.target : undefined);
+        resultOp = call.name === 'operation_status' || call.name === 'cancel_operation';
+        operationKey = call.delivery?.operationKey ??
+          (resultOp && typeof call.args.operationKey === 'string' ? call.args.operationKey : undefined);
+        if (resultOp && typeof call.args.operationId === 'string') operationId = call.args.operationId;
         const inputScope = {props,agentId,...(target ? {target} : {})};
         if (call.name === 'workspace_status' && call.args.verifySource !== true) {
           data = await rpc(registry(env),'/internal/v2/discover',{...inputScope,args:call.args});
         } else {
           const requested = parseTarget(target);
-          const resultOp = call.name === 'operation_status' || call.name === 'cancel_operation';
           const name = call.name as keyof typeof developmentToolArgs;
           const verifiedStatus = call.name === 'workspace_status';
           const needed = resultOp ? [] : verifiedStatus ? ['READ_SOURCE'] : requiredPermissionsV2(name,call.args);
@@ -501,31 +509,54 @@ function mcpDevelopment(request: Request, env: Env, props: AuthProps, agentId: s
               operationId:call.args.operationId,operationKey:call.args.operationKey,
             });
           } else {
-            const key = call.delivery?.operationKey ?? ('k2.'+Date.now()+'.'+crypto.randomUUID());
+            operationKey ??= 'k2.'+Date.now()+'.'+crypto.randomUUID();
+            submitted = true;
             data = await rpc(stub,'/internal/admit',{
               ...inputScope,workspace:auth.workspace,policyRevision:auth.policyRevision,
               tool:verifiedStatus?'workspace_status_verified':call.name,args:verifiedStatus?{}:call.args,
-              operationKey:key,mutating:!verifiedStatus&&hasEffectV2(name,call.args),
+              operationKey,mutating:!verifiedStatus&&hasEffectV2(name,call.args),
               requiredPermissions:needed,permissions:auth.grant.permissions.filter(permission=>auth.workspace.permissions.includes(permission)),
             });
           }
-          const projected = projectMcpImages(data);
-          data = projected.data as Record<string,unknown>;
-          images = projected.images;
-          if (new TextEncoder().encode(JSON.stringify(data)).length > 248_000) {
-            const {data: _, resolution: __, lateObservation: ___, ...metadata} = data;
-            data = {...metadata,resultAvailability:'TOO_LARGE'};
-            images=[];
+          const availability = data.resultAvailability;
+          if (availability === 'TOO_LARGE' || availability === 'EXPIRED' || availability === 'UNAVAILABLE') {
+            data = omitDevelopmentResult(data, availability);
+          } else {
+            try {
+              const projected = projectMcpImages(data);
+              const body = projected.data as Record<string, unknown>;
+              if (new TextEncoder().encode(JSON.stringify(body)).length > 248_000) {
+                data = omitDevelopmentResult(data, 'TOO_LARGE');
+              } else {
+                data = body;
+                images = projected.images;
+              }
+            } catch (error) {
+              data = omitDevelopmentResult(data,
+                error instanceof ApiError && error.code === 'LIMIT_EXCEEDED' ? 'TOO_LARGE' : 'UNAVAILABLE');
+            }
           }
         }
       } catch(error) {
         isError = true;
-        data = {contractVersion:2,target:target ?? null,operationId:null,serverTimeMs:Date.now(),
-          phase:'REJECTED',effectState:'NONE',result:null,
-          error:{code:error instanceof ApiError || error instanceof ToolError ? error.code : 'INTERNAL_ERROR',
-            message:error instanceof ApiError || error instanceof ToolError ? error.message : 'Request failed before a receipt was available.',
+        const known = error instanceof ApiError || error instanceof ToolError;
+        // These Workspace rejections occur before admission of the requested intent.
+        // Quota and transport errors without such a receipt remain ambiguous.
+        const rejectedAdmission = error instanceof ApiError && (
+          (error.status === 409 && ['OPERATION_KEY_EXPIRED', 'IDEMPOTENCY_CONFLICT', 'STALE_EPOCH', 'TRANSITION_BLOCKED'].includes(error.code)) ||
+          (error.status === 429 && ['QUOTA_EXCEEDED', 'QUEUE_FULL'].includes(error.code)) ||
+          (error.status === 503 && error.code === 'TAB_OFFLINE')
+        );
+        const uncertain = resultOp || (submitted && !rejectedAdmission);
+        data = {contractVersion:2,target:target ?? null,operationId:operationId ?? null,
+          operationKey:operationKey ?? null,serverTimeMs:Date.now(),traceId:crypto.randomUUID(),
+          phase:uncertain ? 'UNKNOWN' : 'REJECTED',effectState:uncertain ? 'UNKNOWN' : 'NONE',result:null,
+          ...(uncertain ? {resultAvailability:'UNAVAILABLE'} : {}),
+          error:{code:known ? error.code : 'INTERNAL_ERROR',
+            message:known ? error.message : 'Request failed before a receipt was available.',
             retryable:false,
-            recovery:error instanceof ApiError || error instanceof ToolError ? error.recovery : 'Reconcile by operationKey before retrying an intent.'}};
+            recovery:uncertain ? 'Inspect the exact operation by its original key or ID when authorized. Do not replay the intent.'
+              : known ? error.recovery : 'Inspect Workspace status before submitting new work.'}};
       }
       return {content:[{type:'text' as const,text:JSON.stringify(data)},...images],structuredContent:data,isError};
     });

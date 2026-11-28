@@ -12,7 +12,7 @@ CONTEXT = """<!doctype html><html lang="en"><title>Offline native editor</title>
 <main><h1>Synthetic native editor</h1><textarea>Untouched draft</textarea></main>"""
 
 
-def run(browser, bundle, output):
+def run(browser, bundle, output, verify_races):
     report = {}
     external = []
 
@@ -85,6 +85,53 @@ def run(browser, bundle, output):
     page.screenshot(path=output / "approval.png")
     page.close()
 
+    if verify_races:
+        page = mount("v2")
+        row = page.get_by_role("row").filter(has_text="Story generator").first
+        row.get_by_role("button", name="Reassign to this tab", exact=True).click()
+        page.evaluate("""() => {
+          const root = document.querySelector('[data-perch-mcp-manager]').shadowRoot;
+          window.obsoleteConfirm = [...root.querySelectorAll('button')].find(b => b.innerText === 'Confirm');
+          fixture.delay = 180;
+        }""")
+        page.get_by_role("tab", name="Connectors", exact=True).click()
+        assert page.get_by_role("tabpanel", name="Connectors", exact=True).is_visible()
+        assert page.get_by_role("button", name="Reassign to this tab", exact=True).count() == 0
+        page.get_by_role("tab", name="Recovery", exact=True).click()
+        page.evaluate("obsoleteConfirm.dispatchEvent(new MouseEvent('click'))")
+        page.get_by_role("heading", name="Connection recovery").wait_for()
+        assert page.get_by_role("tabpanel", name="Recovery", exact=True).is_visible()
+        assert page.get_by_role("button", name="Reassign to this tab", exact=True).count() == 0
+        assert page.evaluate("fixture.requests.every(x => x.method === 'GET')")
+        report["obsoleteConfirmationWrites"] = 0
+        page.close()
+
+        page = mount("v2")
+        page.evaluate("fixture.approvals[0].audience = 'https://fixture.invalid/mcp/c-2'")
+        page.get_by_role("tab", name="Connectors", exact=True).click()
+        approve = page.get_by_role("button", name="Approve exact request", exact=True)
+        approve.wait_for()
+        assert approve.is_disabled()
+        assert page.evaluate("fixture.requests.every(x => x.method === 'GET')")
+        report["mismatchedApprovalDisabled"] = True
+        page.close()
+
+        page = mount("v2")
+        page.evaluate("fixture.loseRebindResponse = true; fixture.failReceiptRead = true")
+        row = page.get_by_role("row").filter(has_text="Image studio").first
+        row.get_by_role("button", name="Reassign to this tab", exact=True).click()
+        page.get_by_text("Transition outcome is unknown. Inspect the original Workspace receipt.").wait_for()
+        page.evaluate("auditManager.destroy(); fixture.failReceiptRead = false; void fixture.mount()")
+        row.get_by_role("button", name="Inspect original transition", exact=True).click()
+        page.get_by_text("Updated.", exact=True).wait_for()
+        writes = page.evaluate("fixture.requests.filter(x => x.method !== 'GET')")
+        assert len(writes) == 1
+        assert page.evaluate("""key => fixture.requests.some(
+          x => x.method === 'GET' && x.path.endsWith('/receipts/' + key))""", writes[0]["key"])
+        assert page.evaluate("fixture.attached.length") == 0
+        report["lostTransitionWritesAcrossRemount"] = len(writes)
+        page.close()
+
     assert external == [], external
     report["externalRequests"] = len(external)
     return report
@@ -96,6 +143,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--chromium", default="/usr/bin/chromium")
     parser.add_argument("--expect-baseline", action="store_true")
+    parser.add_argument("--finding", action="append", choices=("F17", "F21", "F25", "F26", "F27"))
     args = parser.parse_args()
     source = args.bundle.read_text()
     matches = list(STARTUP.finditer(source))
@@ -106,7 +154,7 @@ def main():
         browser = playwright.chromium.launch(executable_path=args.chromium, args=[
             "--no-sandbox", "--disable-background-networking", "--disable-dev-shm-usage",
         ])
-        report = run(browser, mounted, args.output)
+        report = run(browser, mounted, args.output, not args.expect_baseline)
         browser.close()
     (args.output / "manager-report.json").write_text(json.dumps(report, indent=2) + "\n")
     stale_views = [report[name] for name in ("warm-outage-connectors", "warm-outage-recovery")]
@@ -120,7 +168,8 @@ def main():
         "F27": any("Reassign to this tab" in view["enabled"] for view in stale_views),
     }
     print(json.dumps({"reproduced": results, "externalRequests": report["externalRequests"]}))
-    assert all(reproduced is args.expect_baseline for reproduced in results.values()), results
+    selected = args.finding or list(results)
+    assert all(results[item] is args.expect_baseline for item in selected), results
 
 
 if __name__ == "__main__":

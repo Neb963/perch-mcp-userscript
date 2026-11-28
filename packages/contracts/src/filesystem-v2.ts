@@ -1,5 +1,6 @@
 import { z } from 'zod/v4';
-import { canonicalPath } from './paths.js';
+import { assertNoFilePathConflicts, canonicalPath } from './paths.js';
+import { ToolError } from './errors.js';
 
 const filePath = z.string().min(1).max(512).refine((path) => {
   try { return canonicalPath(path) === path; } catch { return false; }
@@ -69,4 +70,71 @@ export function filesystemV2Permissions(name: FilesystemToolV2, args: Record<str
   if (name === 'read' || name === 'list_files') return ['READ_SOURCE'];
   if (name === 'write' && ['start', 'chunk', 'abort'].includes(String(args.mode))) return ['WRITE_SOURCE'];
   return ['READ_SOURCE', 'WRITE_SOURCE'];
+}
+
+const encoder = new TextEncoder();
+const base64Alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+/** Count decoded bytes and reject noncanonical padding without materializing binary input. */
+function base64Length(value: string): number {
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  const bodyEnd = value.length - padding;
+  const tail = base64Alphabet.indexOf(value.charAt(bodyEnd - 1));
+  if (value.length % 4 || /[^A-Za-z0-9+/]/.test(value.slice(0, bodyEnd))
+      || padding && (tail < 0 || tail % (padding === 2 ? 16 : 4))) {
+    throw new ToolError('INVALID_INPUT', 'Invalid canonical base64.');
+  }
+  return value.length / 4 * 3 - padding;
+}
+
+type BatchMutation =
+  | { tool: 'write'; args: z.infer<typeof inline> & { base?: 'previous' } }
+  | { tool: 'delete'; args: FilesystemArgs<'delete'> & { base?: 'previous' } }
+  | { tool: 'rename'; args: FilesystemArgs<'rename'> & { base?: 'previous' } };
+
+export function preflightBatchMutation({ tool, args }: BatchMutation): number {
+  if (args.base && (args.expectedSourceRevision || args.expectedLocalRevision)) {
+    throw new ToolError('INVALID_INPUT', 'The previous batch base cannot be combined with an explicit revision.');
+  }
+  const revision = (path: string) => path.startsWith('scratch/') ? args.expectedLocalRevision : args.expectedSourceRevision;
+  const requirePrecondition = (path: string, ifSha256: string | undefined, ifAbsent?: true) => {
+    if (ifAbsent && ifSha256) {
+      throw new ToolError('INVALID_INPUT', 'A file cannot require both absence and an existing digest.');
+    }
+    if (ifAbsent && (path === 'main.pjs' || path === 'index.html')) {
+      throw new ToolError('INVALID_INPUT', 'A fixed native panel can only be replaced.');
+    }
+    if (!ifAbsent && !ifSha256 && !revision(path) && !args.base) {
+      throw new ToolError('INVALID_INPUT', 'A matching file digest, verified revision or explicit absence is required.');
+    }
+  };
+  if (tool === 'delete') {
+    assertNoFilePathConflicts(args.paths.map(item => item.path));
+    for (const item of args.paths) requirePrecondition(item.path, item.ifSha256);
+    return 0;
+  }
+  if (tool === 'rename') {
+    assertNoFilePathConflicts(args.moves.flatMap(move => [move.from, move.to]));
+    for (const move of args.moves) {
+      if (move.from.split('/')[0] !== move.to.split('/')[0]) {
+        throw new ToolError('PATH_DENIED', 'Rename must stay within one writable namespace.');
+      }
+      requirePrecondition(move.from, move.ifSha256);
+    }
+    return 0;
+  }
+  assertNoFilePathConflicts(args.files.map(file => file.path));
+  let bytes = 0;
+  for (const file of args.files) {
+    requirePrecondition(file.path, file.ifSha256, file.ifAbsent);
+    bytes += file.encoding === 'base64' ? base64Length(file.content) : encoder.encode(file.content).byteLength;
+    if (file.encoding === 'base64' && (file.path === 'main.pjs' || file.path === 'index.html')) {
+      try {
+        new TextDecoder('utf-8', {fatal:true}).decode(Uint8Array.from(atob(file.content), char => char.charCodeAt(0)));
+      } catch {
+        throw new ToolError('INVALID_INPUT', 'A fixed native panel requires valid UTF-8 bytes.');
+      }
+    }
+  }
+  return bytes;
 }

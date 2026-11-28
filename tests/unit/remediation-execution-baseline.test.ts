@@ -23,9 +23,13 @@ const errorCode = (code: string) => (error: unknown) => error instanceof Browser
 
 class CheckpointFixtureStore extends MemoryStore {
   onCheckpoint: () => void = () => {};
+  onDispatch: () => void = () => {};
+  onStage: () => void = () => {};
   override async set<T>(key: string, value: T): Promise<void> {
     await super.set(key, value);
     if (key.includes(':root:checkpoint:')) this.onCheckpoint();
+    if (key.includes(':stage:')) this.onStage();
+    if (key.includes(':journal:') && (value as {state?: unknown})?.state === 'DISPATCHED') this.onDispatch();
   }
 }
 
@@ -79,7 +83,7 @@ const malformedBatches = [
   ]}}],
 ] as const;
 
-test('F01 malformed later actions are rejected at ingress and browser preflight before effects', offline, async context => {
+test('F01 malformed later actions are rejected at ingress and browser preflight before effects', async context => {
   for (const [label, invalid] of malformedBatches) await context.test(label, async () => {
     const f = await nativeFixture();
     const key = operationKey();
@@ -109,7 +113,7 @@ test('F01 malformed later actions are rejected at ingress and browser preflight 
   });
 });
 
-test('F04 deadline crossing during durable checkpoint stops the first native setter', offline, async () => {
+test('F04 deadline crossing during durable checkpoint stops the first native setter', async () => {
   const f = await nativeFixture();
   let now = 0;
   f.scope.assertCurrent = () => { if (now >= 1) throw new BrowserError('TIMEOUT', 'Synthetic operation deadline'); };
@@ -121,7 +125,7 @@ test('F04 deadline crossing during durable checkpoint stops the first native set
   assert.equal((await f.vfs.unresolved()).length, 0, 'a proved pre-setter stop has no native uncertainty');
 });
 
-test('F04 operation cancellation preserves the first verified setter and stops the next', offline, async () => {
+test('F04 operation cancellation preserves the first verified setter and stops the next', async () => {
   const f = await nativeFixture();
   const controller = new AbortController();
   f.scope.assertCurrent = () => {
@@ -132,6 +136,87 @@ test('F04 operation cancellation preserves the first verified setter and stops t
     {status: string; committed: string[]};
   assert.deepEqual({nativeWrites: f.nativeWrites, status: result.status, committed: result.committed},
     {nativeWrites: ['first'], status: 'PARTIAL', committed: ['src/first']});
+});
+
+test('F04 cancellation after dispatch journal but before native invocation is known no-effect', async () => {
+  const f = await nativeFixture();
+  const controller = new AbortController();
+  f.scope.assertCurrent = () => {
+    if (controller.signal.aborted) throw new BrowserError('CANCELLED', 'Synthetic operation cancellation');
+  };
+  f.store.onDispatch = () => { controller.abort(); };
+  await assert.rejects(f.fs.run('write', {files: [newFile('src/asset')]}, f.scope), errorCode('CANCELLED'));
+  assert.equal(controller.signal.aborted, true);
+  assert.deepEqual(f.nativeWrites, []);
+  assert.deepEqual(await f.vfs.unresolved(), []);
+});
+
+test('F04 cancellation after private staging stops publication and leaves prior bytes intact', async () => {
+  const f = await nativeFixture();
+  await f.fs.run('write', {files: [newFile('scratch/original')]}, f.scope);
+  const before = await f.vfs.localView();
+  const controller = new AbortController();
+  f.scope.assertCurrent = () => {
+    if (controller.signal.aborted) throw new BrowserError('CANCELLED', 'Synthetic operation cancellation');
+  };
+  f.store.onStage = () => { controller.abort(); };
+  await assert.rejects(f.fs.run('write', {files: [newFile('scratch/new')]}, f.scope), errorCode('CANCELLED'));
+  assert.equal(controller.signal.aborted, true);
+  const after = await f.vfs.localView();
+  assert.deepEqual(after.revision, before.revision);
+  assert.deepEqual(after.files, before.files);
+  assert.deepEqual(await f.vfs.unresolved(), []);
+});
+
+test('F04 the running browser controller ignores a mismatched cancellation and aborts its exact operation',
+  {timeout: 5000}, async () => {
+  const f = await nativeFixture();
+  const phases: string[] = [];
+  let cancelRequestedOperationId = 'another-operation';
+  const lease = {contractVersion: 2 as const, workspaceId: tuple.workspaceId,
+    epoch: tuple.epoch, bindingRevision: 1, assignmentGeneration: 1, bindingGeneration: 1, connectorId: 'connector',
+    expiresAt: Date.now() + 30_000, permissions: ['READ_SOURCE', 'WRITE_SOURCE'], leaseCredential: 'synthetic-lease'};
+  const transport = {tab: async (path: string, body: Record<string, unknown>) => {
+    if (path === '/api/v1/tab/heartbeat') {
+      assert.equal(body.activeOperationId, 'operation');
+      return {expiresAt: lease.expiresAt, permissions: lease.permissions, cancelRequestedOperationId};
+    }
+    assert.equal(path, '/api/v1/tab/reply');
+    phases.push(String(body.phase));
+    if (body.phase === 'CANCELLED') assert.equal((body.result as {effectState: unknown}).effectState, 'NONE');
+    return {ok: true};
+  }} as unknown as GatewayTransport;
+  let acceptStart!: (signal: AbortSignal) => void;
+  const started = new Promise<AbortSignal>(resolve => { acceptStart = resolve; });
+  const controller = new BrowserController(f.adapter, f.store, transport, {supports: () => false,
+    call: async () => { throw new Error('Unexpected legacy call'); },
+    callDevelopment: async ({signal, assertCurrent}) => {
+      acceptStart(signal);
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), {once: true}));
+      await assertCurrent();
+      throw new Error('Expected operation assertion to stop');
+    }});
+  const bound = {...lease, tabInstanceId: controller.tabInstanceId};
+  const instance = controller as unknown as {
+    execute(operation: unknown, current: typeof bound): Promise<void>;
+    renew(current: typeof bound, controlOnly: boolean): Promise<void>;
+    vfs: VirtualFileSystem; lease: typeof bound; stopped: boolean;
+  };
+  instance.vfs = f.vfs;
+  instance.lease = bound;
+  instance.stopped = false;
+  const running = instance.execute({version: 2, target, workspaceId: tuple.workspaceId, tabInstanceId: bound.tabInstanceId,
+    operationId: 'operation', operationKey: operationKey(), grantId: 'grant', connectorId: 'connector',
+    bindingRevision: 1, assignmentGeneration: 1, bindingGeneration: 1, epoch: tuple.epoch,
+    policyRevision: 1, permissionRevision: 1, deadlineMs: Date.now() + 3000,
+    traceId: 'trace', tool: 'write', args: {files: [newFile('scratch/asset')]}, permissions: lease.permissions}, bound);
+  const signal = await started;
+  await instance.renew(bound, true);
+  assert.equal(signal.aborted, false);
+  cancelRequestedOperationId = 'operation';
+  await instance.renew(bound, true);
+  await running;
+  assert.deepEqual(phases, ['RUNNING', 'CANCELLED']);
 });
 
 test('F02 stale destination before transfer publication leaves a safely abortable transfer', offline, async () => {
@@ -197,7 +282,34 @@ async function callMcp(h: Harness, f: CapacityFixture, token: string, name: stri
   return body.result.structuredContent;
 }
 
-test('F01 invalid batch final action is rejected before durable admission through local SDK', offline, async () => {
+test('F04 actual workerd delivers cancellation only for the requested active Operation', {timeout: 30_000}, async () => {
+  const {h, f, token, target} = await gatewayFixture();
+  try {
+    const admitted = await callMcp(h, f, token, 'write', {target, operationKey: operationKey(),
+      files: [newFile('scratch/asset')]});
+    const operationId = String(admitted.operationId);
+    await h.browser(f, 'poll', {waitMs: 0});
+    await h.browser(f, 'reply', {operationId, phase: 'RUNNING'});
+    assert.equal((await h.browser(f, 'heartbeat', {activeOperationId: operationId})).cancelRequestedOperationId, undefined);
+    const cancellation = await callMcp(h, f, token, 'cancel_operation', {target, operationId});
+    assert.equal(cancellation.phase, 'RUNNING');
+    assert.equal(cancellation.cancelRequested, true);
+    assert.equal((await h.browser(f, 'heartbeat', {activeOperationId: crypto.randomUUID()})).cancelRequestedOperationId, undefined);
+    assert.equal((await h.browser(f, 'heartbeat', {activeOperationId: operationId})).cancelRequestedOperationId, operationId);
+    await assert.rejects(h.browser(f, 'segment', {operationId,
+      segment: {kind: 'source-publication', sequence: 0, digest: await digest('fixture')}}), /CANCELLED/);
+    await h.browser(f, 'reply', {operationId, phase: 'CANCELLED', result: {
+      operationId, status: 'CANCELLED', effectState: 'NONE', error: {code: 'CANCELLED',
+        message: 'Synthetic pre-dispatch cancellation', recovery: 'No publication occurred.', retryable: false},
+    }});
+    const terminal = await callMcp(h, f, token, 'operation_status', {target, operationId});
+    assert.equal(terminal.phase, 'CANCELLED');
+    assert.equal(terminal.effectState, 'NONE');
+    assert.equal((await h.browser(f, 'heartbeat', {activeOperationId: operationId})).cancelRequestedOperationId, undefined);
+  } finally { await h.close(); }
+});
+
+test('F01 invalid batch final action is rejected before durable admission through local SDK', {timeout: 30_000}, async () => {
   const {h, f, token, target} = await gatewayFixture();
   try {
     const result = await callMcp(h, f, token, 'batch', {target, operationKey: operationKey(), actions: [

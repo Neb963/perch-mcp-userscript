@@ -100,6 +100,27 @@ export function errorResponse(error: unknown, traceId = crypto.randomUUID()): Re
     e.status,
   );
 }
+
+/** Result delivery can fail independently of the operation's durable outcome. */
+export function omitDevelopmentResult(
+  receipt: Record<string, unknown>,
+  availability: "TOO_LARGE" | "EXPIRED" | "UNAVAILABLE",
+): Record<string, unknown> {
+  const {data: _data, result: _result, resolution: _resolution,
+    lateObservation: _observation, ...metadata} = receipt;
+  return {
+    ...metadata,
+    result: null,
+    resultAvailability: availability,
+    error: {
+      code: "RESULT_" + availability,
+      message: "The requested result bytes cannot be delivered.",
+      retryable: false,
+      recovery: "Inspect the retained operation receipt. Do not replay this intent to recover its result.",
+    },
+  };
+}
+
 export async function parseBody(
   request: Request,
   max = MAX_BODY,

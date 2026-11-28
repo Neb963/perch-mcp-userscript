@@ -2,13 +2,18 @@ import { ExecutionError } from './compute.js';
 
 export interface PreviewDiagnostics { consoleOutput: string[]; perchanceErrors: unknown[]; syntaxErrors: unknown[] }
 export interface PreviewReceipt extends PreviewDiagnostics { appliedRevision?: string; previewGeneration?: string; result?: unknown; warnings?:unknown[]; diagnosticsAvailability?:Record<string,string>; diagnosticChannels?:Record<string,string> }
+export interface PreviewEffectScope {
+  signal: AbortSignal;
+  assertCurrent(): Promise<void>;
+  onDispatch(): void;
+}
 export interface PreviewBridge {
   /** Live, zero-source-mutation native protocol probe before first use. */
   attest?(capability: 'evaluate' | 'refresh' | 'preamble'): Promise<boolean>;
   /** Boolean-only readiness evidence; no frame URL, source or private IDs. */
   status?(): Record<string, boolean>;
-  refresh(preambleJs?: string): Promise<PreviewReceipt>;
-  evaluate(js: string, timeoutMs: number): Promise<PreviewReceipt>;
+  refresh(preambleJs?: string, effect?: PreviewEffectScope): Promise<PreviewReceipt>;
+  evaluate(js: string, timeoutMs: number, effect?: PreviewEffectScope): Promise<PreviewReceipt>;
   diagnostics?(): Promise<PreviewReceipt>;
   measureViewport?(timeoutMs: number): Promise<unknown>;
   capture?(): Promise<{ dataUrl: string; width: number; height: number }>;
@@ -36,10 +41,21 @@ function checkedReceipt(value: unknown): PreviewReceipt {
     ?{diagnosticChannels:r.diagnosticChannels as Record<string,string>}:{}),...(Object.hasOwn(r, 'result') ? { result: JSON.parse(JSON.stringify(r.result ?? null)) as unknown } : {}) };
 }
 function body(args: Record<string, unknown>, key: string): string | undefined { const v = args[key]; if (v === undefined) return undefined; if (typeof v !== 'string' || new TextEncoder().encode(v).byteLength > 262_144) throw new ExecutionError('INVALID_INPUT', `${key} must be text no larger than 256 KiB.`); return v; }
-async function deadline<T>(promise: Promise<T>, timeout: number): Promise<T> {
+async function deadline<T>(promise: Promise<T>, timeout: number, signal?: AbortSignal): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  try { return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new ExecutionError('TIMEOUT', 'Preview execution timed out. A blocked preview main thread may require a manual reload.', 'UNKNOWN')), timeout); })]); }
-  finally { clearTimeout(timer); }
+  let abort: (() => void) | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ExecutionError('TIMEOUT', 'Preview execution timed out. A blocked preview main thread may require a manual reload.', 'UNKNOWN')), timeout);
+    abort = () => reject(new ExecutionError(signal?.reason?.code === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED',
+      'Preview observation stopped. Reconcile any dispatched effect before retrying.', 'UNKNOWN'));
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, {once: true});
+  });
+  try { return await Promise.race([promise, limit]); }
+  finally {
+    clearTimeout(timer);
+    if (abort) signal?.removeEventListener('abort', abort);
+  }
 }
 /** No page message handler and no privileged JavaScript evaluation. All results remain untrusted generator data. */
 export class PreviewAdapter {
@@ -161,18 +177,18 @@ export class PreviewAdapter {
     },this.viewportIdleMs);
     (this.viewportResetTimer as unknown as {unref?:()=>void}).unref?.();
   }
-  async call(name: string, args: Record<string, unknown>): Promise<unknown> {
+  async call(name: string, args: Record<string, unknown>, effect?: PreviewEffectScope): Promise<unknown> {
     if (name !== 'set_viewport_size' && this.viewport) this.armViewportReset();
     switch (name) {
-      case 'page_refresh': return this.whilePreviewBusy(()=>this.refresh(body(args, 'preambleJs')));
+      case 'page_refresh': return this.whilePreviewBusy(()=>this.refresh(body(args, 'preambleJs'), effect));
       case 'page_eval': {
         const js = body(args, 'js'), path = body(args, 'path');
         if ((js === undefined) === (path === undefined)) throw new ExecutionError('INVALID_INPUT', 'Provide exactly one of js or path.');
         const source = js ?? (this.options.readText ? await this.options.readText(path!) : undefined);
         if (source === undefined) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Workspace code-file access is unavailable.');
-        return this.whilePreviewBusy(()=>this.evaluate(source, { reload: args.reload === true, timeoutMs: args.timeoutMs as number | undefined, resultPath: body(args, 'resultPath') }));
+        return this.whilePreviewBusy(()=>this.evaluate(source, { reload: args.reload === true, timeoutMs: args.timeoutMs as number | undefined, resultPath: body(args, 'resultPath') }, effect));
       }
-      case 'set_viewport_size': return this.setViewport(args.width as number, args.height as number, args.reset === true);
+      case 'set_viewport_size': return this.setViewport(args.width as number, args.height as number, args.reset === true, effect);
       case 'preview_diagnostics': {
         if (!this.options.bridge?.diagnostics) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native diagnostics are not available.');
         const receipt = checkedReceipt(await deadline(this.options.bridge.diagnostics(), 10_000));
@@ -206,7 +222,7 @@ export class PreviewAdapter {
     this.syncAttestationFrame();
     return { pendingSrcChanges: this.appliedRevision !== undefined && current !== this.appliedRevision, pageFreshnessUnknown: this.appliedRevision === undefined, previewRevision: this.appliedRevision, previewGeneration: this.generation };
   }
-  async refresh(preambleJs?: string): Promise<unknown> {
+  async refresh(preambleJs?: string, effect?: PreviewEffectScope): Promise<unknown> {
     if (this.viewport) this.armViewportReset();
     if (!this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview bridge unavailable or not verified.');
     await this.requireCapability('refresh');
@@ -214,27 +230,28 @@ export class PreviewAdapter {
     const expected = await this.options.revision();
     this.appliedRevision = undefined;
     this.generation = undefined;
-    const receipt = checkedReceipt(await deadline(this.options.bridge.refresh(preambleJs), 30_000));
+    const receipt = checkedReceipt(await deadline(this.options.bridge.refresh(preambleJs, effect), 30_000, effect?.signal));
     const receiptEpoch = this.currentEpoch();
     if (receipt.appliedRevision !== expected || await this.options.revision() !== expected ||
         (this.options.requireDocumentProof && (!receipt.previewGeneration || receiptEpoch !== this.currentEpoch()))) throw new ExecutionError('NATIVE_CONFLICT', 'Source changed during refresh or the native frame did not attest the intended source revision. Refresh again after inspecting manual edits.', 'PARTIAL');
     this.syncAttestationFrame();
     this.appliedRevision = expected; this.generation = receipt.previewGeneration;
     this.attested.add('refresh');
-    if (this.viewport) await this.setViewport(this.viewport.width, this.viewport.height);
+    if (this.viewport) await this.setViewport(this.viewport.width, this.viewport.height, false, effect);
     return { ...receipt, ...await this.freshness() };
   }
-  async evaluate(js: string, options: { reload?: boolean; timeoutMs?: number; resultPath?: string } = {}): Promise<unknown> {
+  async evaluate(js: string, options: { reload?: boolean; timeoutMs?: number; resultPath?: string } = {},
+      effect?: PreviewEffectScope): Promise<unknown> {
     if (this.viewport) this.armViewportReset();
     if (!this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview bridge unavailable or not verified.');
     await this.requireCapability('evaluate');
     const timeout = options.timeoutMs ?? 120_000;
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > 500_000 || new TextEncoder().encode(js).byteLength > 262_144) throw new ExecutionError('INVALID_INPUT', 'Preview code or timeout exceeds its limit.');
-    if (options.reload) await this.refresh();
+    if (options.reload) await this.refresh(undefined, effect);
     const before = await this.options.revision();
     const epoch = this.currentEpoch();
     const expectedGeneration = this.generation;
-    const receipt = checkedReceipt(await deadline(this.options.bridge.evaluate(js, timeout), timeout));
+    const receipt = checkedReceipt(await deadline(this.options.bridge.evaluate(js, timeout, effect), timeout, effect?.signal));
     if (epoch !== this.currentEpoch() || (expectedGeneration &&
         (this.options.requireDocumentProof || receipt.previewGeneration) && receipt.previewGeneration !== expectedGeneration)) throw new ExecutionError('STALE_EPOCH', 'Preview document changed during evaluation. Inspect diagnostics before another call.', 'UNKNOWN');
     let savedTo: string | undefined;
@@ -340,10 +357,13 @@ export class PreviewAdapter {
     } finally { frame.removeEventListener('load', loaded); }
   }
 
-  async setViewport(width: number, height: number, reset = false): Promise<unknown> {
+  async setViewport(width: number, height: number, reset = false, effect?: PreviewEffectScope): Promise<unknown> {
     const frame = this.options.frame(), max = this.options.maxViewport ?? 16384;
     if (!frame) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native output frame is unavailable.');
     if (reset) {
+      if (effect) await effect.assertCurrent();
+      if (this.options.frame() !== frame) throw new ExecutionError('STALE_EPOCH', 'Native iframe changed before viewport reset.');
+      effect?.onDispatch();
       if (this.viewportResetTimer) clearTimeout(this.viewportResetTimer);
       this.viewportResetTimer=undefined;
       const before = this.original?.frame === frame ? this.nativeBaseline : undefined;
@@ -370,8 +390,10 @@ export class PreviewAdapter {
         width > Math.min(131072,max) || height > Math.min(131072,max))
       throw new ExecutionError('LIMIT_EXCEEDED', `Viewport must be 200–${max} by 150–${max}.`);
     await this.requireCapability('evaluate');
+    if (effect) await effect.assertCurrent();
     if (this.options.frame() !== frame)
       throw new ExecutionError('NATIVE_CONFLICT', 'Native iframe changed before viewport mutation.');
+    effect?.onDispatch();
     if (!this.original || this.original.frame !== frame) {
       this.restoreViewport();
       this.nativeBaseline = {
@@ -512,11 +534,14 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
     if(await this.options.revision()!==before)throw new ExecutionError('STALE_REVISION','Native source changed during preview preflight.');
     return {revision:before,panelHash,srcHash,pending:p.srcState.hasPending()===true};
   }
-  private request(js:string,timeoutMs:number):Promise<unknown> {
+  private async request(js:string,timeoutMs:number,effect?:PreviewEffectScope):Promise<unknown> {
+    if (effect) await effect.assertCurrent();
     const {frame,view,origin}=this.target(),callerId=`perch-${crypto.randomUUID()}`;
     return new Promise((resolve,reject)=>{
       let settled=false;
-      const finish=(error?:ExecutionError,result?:unknown)=>{if(settled)return;settled=true;clearTimeout(timer);this.options.host.removeEventListener('message',message as EventListener);frame.removeEventListener('load',loaded);error?reject(error):resolve(result)};
+      const finish=(error?:ExecutionError,result?:unknown)=>{if(settled)return;settled=true;clearTimeout(timer);effect?.signal.removeEventListener('abort',aborted);this.options.host.removeEventListener('message',message as EventListener);frame.removeEventListener('load',loaded);error?reject(error):resolve(result)};
+      const aborted=()=>finish(new ExecutionError(effect?.signal.reason?.code==='TIMEOUT'?'TIMEOUT':'CANCELLED',
+        'Preview reply observation was cancelled after dispatch. Reconcile before retrying.', 'UNKNOWN'));
       const loaded=()=>finish(new ExecutionError('STALE_EPOCH','Native preview document reloaded during evaluation.','UNKNOWN'));
       const timer=setTimeout(()=>finish(new ExecutionError('TIMEOUT','Native preview did not answer. Reload a frozen preview manually; do not replay uncertain effects.','UNKNOWN')),timeoutMs);
       const message=(event:MessageEvent)=>{
@@ -533,6 +558,12 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
         }catch(error){finish(error instanceof ExecutionError?error:new ExecutionError('UNSUPPORTED_INTERFACE','Native evaluation reply changed shape.','UNKNOWN'))}
       };
       this.options.host.addEventListener('message',message as EventListener);frame.addEventListener('load',loaded,{once:true});
+      if (effect?.signal.aborted) {
+        finish(new ExecutionError(effect.signal.reason?.code==='TIMEOUT'?'TIMEOUT':'CANCELLED', 'Preview stopped before dispatch.'));
+        return;
+      }
+      effect?.signal.addEventListener('abort',aborted,{once:true});
+      effect?.onDispatch();
       try{view.postMessage({command:'evaluateJs',callerId,js},origin)}catch{finish(new ExecutionError('UNSUPPORTED_INTERFACE','Browser refused the fixed native preview command.'))}
     });
   }
@@ -626,16 +657,21 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
     if(this.previousGeneration&&generation!==this.previousGeneration)throw new ExecutionError('STALE_EPOCH','Native preview generation changed; refresh explicitly.');
     return {consoleOutput:d.consoleOutput,perchanceErrors:d.errors,syntaxErrors:[],...(applied?{appliedRevision:applied}:{}),...(generation?{previewGeneration:generation}:{}),...(arguments.length>1?{result}:{}),warnings:d.warnings,diagnosticsAvailability:{console:d.generation?'captured':'unavailable',runtimeErrors:d.generation?'captured':'partial',syntax:'unavailable',warnings:'native'}} as PreviewReceipt;
   }
-  async refresh(preambleJs?:string):Promise<PreviewReceipt> {
+  async refresh(preambleJs?:string,effect?:PreviewEffectScope):Promise<PreviewReceipt> {
     if(this.busy)throw new ExecutionError('TAB_BUSY','A native preview operation is already active.');
     if(typeof this.page.hardReloadOutputIframe!=='function')throw new ExecutionError('UNSUPPORTED_INTERFACE','Native hardReloadOutputIframe is unavailable.');
     if(this.page.currentlyReloadingOutputIframePromise)throw new ExecutionError('TAB_BUSY','A native preview reload is already pending.');
+    if(this.page.__aiAgentPreambleJs)throw new ExecutionError('TAB_BUSY','A native preamble is already installed. Wait for its owner to finish.');
+    const before=await this.source(),generation=crypto.randomUUID();
+    if (effect) await effect.assertCurrent();
+    this.target();
+    if (this.busy || this.page.currentlyReloadingOutputIframePromise || this.page.__aiAgentPreambleJs)
+      throw new ExecutionError('TAB_BUSY','Native preview ownership changed before reload.');
     const previous=Object.getOwnPropertyDescriptor(this.page,'__aiAgentPreambleJs');
     if(previous&&('value' in previous?previous.writable===false:!previous.set))throw new ExecutionError('UNSUPPORTED_INTERFACE','Native preamble hook is not writable.');
-    if(this.page.__aiAgentPreambleJs)throw new ExecutionError('TAB_BUSY','A native preamble is already installed. Wait for its owner to finish.');
-    const before=await this.source(),generation=crypto.randomUUID();this.target();
     this.busy=true;
     try{
+      effect?.onDispatch();
       this.page.__aiAgentPreambleJs=diagnosticPreamble(generation)+(preambleJs===undefined?'':`\n${preambleJs}\n`);
       await deadline(Promise.resolve((this.page.hardReloadOutputIframe as ()=>unknown).call(this.page)),30000);
       let d:NativeDiagnosticSnapshot|undefined;
@@ -653,13 +689,13 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
       this.busy=false;
     }
   }
-  async evaluate(js:string,timeoutMs:number):Promise<PreviewReceipt> {
+  async evaluate(js:string,timeoutMs:number,effect?:PreviewEffectScope):Promise<PreviewReceipt> {
     if(this.busy)throw new ExecutionError('TAB_BUSY','A native preview operation is already active.');
     this.busy=true;
     try{
       const before=nativeDiagnostics(await this.request(nativeDiagnosticRead,Math.min(timeoutMs,5000)));
       if(this.previousGeneration)this.receipt(before);
-      const result=await this.request(js,timeoutMs);
+      const result=await this.request(js,timeoutMs,effect);
       const after=nativeDiagnostics(await this.request(nativeDiagnosticRead,Math.min(timeoutMs,5000)));
       if(before.generation!==after.generation||before.receipt?.epoch!==after.receipt?.epoch)throw new ExecutionError('STALE_EPOCH','Native preview changed during evaluation.','UNKNOWN');
       return this.withEditorSyntax(this.receipt(after,result));

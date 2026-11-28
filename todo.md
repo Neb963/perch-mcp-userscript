@@ -8,11 +8,13 @@ Baseline `298f3b9619335364c668a69b6f04570ae530fcab` (tree `c07b3e7e25ea0e4d063ee
 | Phase | Verification gate | State |
 | --- | --- | --- |
 | R00 | Pin authority and baseline, build an atomic requirement inventory, rerun the offline suite, replay the P0 reports, and record measured baselines. | Baseline verified |
-| R01 | Preflight full batches, fence execution at effect boundaries, preserve receipt uncertainty, and bind operator actions and consent to exact intent. | In progress |
-| R02 | Recover transfers and historical local state, deduplicate immutable storage, and exercise publication faults. | Pending |
+| R01 | Preflight full batches, fence execution at effect boundaries, preserve receipt uncertainty, and bind operator actions and consent to exact intent. | Regressions verified |
+| R02 | Recover transfers and historical local state, deduplicate immutable storage, and exercise publication faults. | Next |
 | R03 | Qualify permanent OAuth, clean installation, all feasible development behavior, and the local-first manager. | Pending |
 | R04 | Meter comparable workflows and quotas, calibrate admission, and qualify long finite access lifetimes. | Pending |
 | R05 | Rebuild and test the exact candidate, reconcile every requirement, and verify artifact bytes and the unmerged PR. | Pending |
+
+R01 local verification passed strict TypeScript, 615 tests with zero failures and four phase-gated probes, and the final focused renderer detected zero external requests. [R01 evidence](docs/verification/v0.3-remediation/r01/README.md).
 
 Local Chromium and workerd fixtures use synthetic data. Production, provider, live OAuth and browser acceptance, deployment, preview, and merge are reserved for the operator.
 

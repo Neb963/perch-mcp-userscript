@@ -1,4 +1,5 @@
 import { BrowserError, digest, equalIdentity, type NativeSnapshot } from './native-types.js';
+import { NativeEffectNotInvoked } from './adapter.js';
 import type { DevelopmentContext } from './development-v2.js';
 import { SavedSourceReader } from './lifecycle.js';
 
@@ -67,8 +68,10 @@ export async function saveDevelopment(args: Record<string,unknown>, context: Dev
     return {...result,sourceRevision:{value:intended.revision,verified:true},
       savedRevision:{value:result.status==='SUCCEEDED'?result.revision:null,verified:result.status==='SUCCEEDED'}};
   } catch (error) {
-    await context.vfs.store.set(journalKey,{...row,state:dispatched?'UNKNOWN':'REJECTED'}).catch(()=>undefined);
-    if (!dispatched) throw error;
-    throw new BrowserError('EFFECT_UNKNOWN','Native Save crossed the dispatch journal boundary. Inspect independent saved source before retrying.');
+    const noNativeEffect = error instanceof NativeEffectNotInvoked || !dispatched;
+    const persisted = await context.vfs.store.set(journalKey,{...row,state:noNativeEffect?'REJECTED':'UNKNOWN'})
+      .then(() => true, () => false);
+    if (noNativeEffect && persisted) throw error instanceof NativeEffectNotInvoked ? error.cause : error;
+    throw new BrowserError('EFFECT_UNKNOWN','Native Save could not persist a conclusive observation. Inspect independent saved source before retrying.');
   }
 }

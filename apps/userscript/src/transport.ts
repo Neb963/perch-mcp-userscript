@@ -143,10 +143,11 @@ export class GatewayTransport {
       this.pairing = stored;
     }
   }
-  configuration(): { origin: string; paired: boolean } {
+  configuration(): { origin: string; paired: boolean; browserInstallationId?: string } {
     return {
       origin: this.pairing?.origin ?? this.suggestedOrigin,
       paired: !!this.pairing,
+      ...(this.pairing ? { browserInstallationId: this.pairing.browserInstallationId } : {}),
     };
   }
   async installationId(): Promise<string> {

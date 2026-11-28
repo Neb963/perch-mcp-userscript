@@ -10,6 +10,7 @@ import {
   errorResponse,
   id,
   json,
+  omitDevelopmentResult,
   parseBody,
   operationTimeoutMs,
   randomSecret,
@@ -77,6 +78,7 @@ interface Operation {
   terminalAt?: number;
   terminalNotified?: boolean;
   terminalErrorCode?: string;
+  terminalEffectState?: 'NONE' | 'KNOWN';
   resolution?: unknown;
   lateObservation?: unknown;
   terminalResultDigest?: string;
@@ -404,6 +406,8 @@ export class Workspace {
       op.result !== undefined
     ) {
       op.terminalResultDigest ??= operationReceiptDigest(op.result);
+      if (op.target && op.phase === 'SUCCEEDED')
+        op.terminalEffectState ??= this.successfulEffect(op);
       delete op.result;
       this.operations.put("operation/" + op.operationId, op);
     }
@@ -464,13 +468,26 @@ export class Workspace {
       props, agentId: op.agentId, target: op.target, permissions: op.requiredPermissions, resultAccess: true,
     });
   }
+  private successfulEffect(op: Operation): 'NONE' | 'KNOWN' {
+    const retained = op.result as {effectState?: unknown} | undefined;
+    return op.terminalEffectState ?? (op.mutating && retained?.effectState !== 'NONE' ? 'KNOWN' : 'NONE');
+  }
   private summary(op: Operation): Record<string, unknown> {
+    const now = Date.now();
+    const expiredResult = op.terminalAt !== undefined && op.terminalAt + 600_000 <= now;
+    const result = op.result as {data?: {resultAvailability?: unknown}} | undefined;
+    const inFlightEffect = op.mutating && op.terminalAt === undefined &&
+      (op.phase === 'DISPATCHED' || op.phase === 'RUNNING' || op.dispatchAttempt !== undefined);
+    const resultAvailability = expiredResult ? 'EXPIRED'
+      : op.terminalAt !== undefined && (result === undefined || result?.data?.resultAvailability === 'TOO_LARGE')
+        ? 'TOO_LARGE' : undefined;
     return {
       operationId: op.operationId,
       ...(op.target ? {contractVersion: 2, target: op.target, operationKey: op.operationKey,
-        traceId: op.traceId, serverTimeMs: Date.now(), phase: op.phase,
-        effectState: op.phase === 'UNKNOWN' ? 'UNKNOWN' : op.phase === 'PARTIAL' ? 'PARTIAL' :
-          op.phase === 'SUCCEEDED' && op.mutating ? 'KNOWN' : 'NONE',
+        traceId: op.traceId, serverTimeMs: now, phase: op.phase,
+        effectState: op.phase === 'UNKNOWN' || inFlightEffect ? 'UNKNOWN' : op.phase === 'PARTIAL' ? 'PARTIAL' :
+          op.phase === 'SUCCEEDED' ? this.successfulEffect(op) : 'NONE',
+        ...(resultAvailability ? {resultAvailability} : {}),
         ...(op.cancelRequested ? {cancelRequested: true} : {})} : {}),
       status: op.phase,
       workspaceId: op.workspaceId,
@@ -481,7 +498,7 @@ export class Workspace {
       bindingRevision: op.bindingRevision,
       ...(op.resolution ? { resolution: op.resolution } : {}),
       ...(op.lateObservation ? { lateObservation: op.lateObservation } : {}),
-      ...(op.result === undefined || (op.terminalAt!==undefined&&op.terminalAt+600000<=Date.now())
+      ...(op.result === undefined || expiredResult
         ? op.terminalAt
           ? {
               error: {
@@ -672,7 +689,7 @@ export class Workspace {
           throw new ApiError('IDEMPOTENCY_CONFLICT', 'Operation key was used for a different request.', 409);
         const retained = this.operations.get('operation/' + found.operationId);
         if (!retained) return {contractVersion: 2, target, operationKey, operationId: found.operationId,
-          serverTimeMs: Date.now(), resultAvailability: 'EXPIRED',
+          serverTimeMs: Date.now(), phase: 'UNKNOWN', effectState: 'UNKNOWN', resultAvailability: 'EXPIRED',
           error: {code: 'RESULT_EXPIRED', message: 'Operation receipt retention expired. Do not replay the intent.'}};
         return this.summary(retained);
       };
@@ -854,10 +871,18 @@ export class Workspace {
       // A pending receipt still gets the normal durable retry path. Clean
       // active/already-notified status reads do not enumerate outbox/history.
       maintenance.settled = !op.terminalAt || op.terminalNotified === true;
-      const data = path === '/internal/status' && typeof b.agentId === 'string' && typeof b.bindingRevision === 'number'
-        ? await this.images.hydrate(summary, {workspaceId: op.workspaceId, operationId,
-            agentId: b.agentId, bindingRevision: b.bindingRevision})
-        : summary;
+      let data: unknown = summary;
+      if (path === '/internal/status' && typeof b.agentId === 'string' && typeof b.bindingRevision === 'number') {
+        try {
+          data = await this.images.hydrate(summary, {workspaceId: op.workspaceId, operationId,
+            agentId: b.agentId, bindingRevision: b.bindingRevision});
+        } catch (error) {
+          if (!scoped) throw error;
+          const code = error instanceof ApiError ? error.code : undefined;
+          data = omitDevelopmentResult(summary,
+            code === 'RESULT_EXPIRED' ? 'EXPIRED' : code === 'LIMIT_EXCEEDED' ? 'TOO_LARGE' : 'UNAVAILABLE');
+        }
+      }
       if (scoped) await this.authorizeScopedResult(op, b);
       return json(data);
     }
@@ -1063,9 +1088,19 @@ export class Workspace {
       if (renewalDue) current.expiresAt = Date.now() + 180000;
       current.permissions = valid.permissions;
       if (renewalDue || permissionsChanged) this.db.put("lease", current);
+      const controlled = current.contractVersion === 2 && typeof b.activeOperationId === 'string'
+        ? this.operations.get('operation/' + id(b.activeOperationId)) : undefined;
+      const cancellation = controlled?.cancelRequested === true && controlled.target &&
+        ['DISPATCHED', 'RUNNING'].includes(controlled.phase) && controlled.workspaceId === current.workspaceId &&
+        controlled.epoch === current.epoch && controlled.bindingRevision === current.bindingRevision &&
+        controlled.tabInstanceId === current.tabInstanceId && controlled.target === encodeTarget({
+          workspaceId: current.workspaceId, assignmentGeneration: current.assignmentGeneration!,
+          bindingGeneration: current.bindingGeneration!,
+        });
       return json({
         expiresAt: current.expiresAt,
         permissions: current.permissions,
+        ...(cancellation ? {cancelRequestedOperationId: controlled.operationId} : {}),
         ...(this.push.enabled?{workAvailable:this.journal.workAvailable()}:{}),
       });
     }
@@ -1366,7 +1401,9 @@ export class Workspace {
         }
         if (!["DISPATCHED", "RUNNING"].includes(op.phase))
           throw new ApiError("CONFLICT", "Operation not dispatched.", 409);
-        if (phase === "CANCELLED" && op.phase === "RUNNING" && op.mutating)
+        // Scoped controllers can attest a known pre-effect stop. The parsed
+        // terminal receipt already requires effectState NONE for CANCELLED.
+        if (!op.target && phase === "CANCELLED" && op.phase === "RUNNING" && op.mutating)
           throw new ApiError(
             "EFFECT_UNKNOWN",
             "Running mutation cannot be reported cancelled.",
@@ -1374,6 +1411,12 @@ export class Workspace {
           );
         if (phase === "RUNNING" && op.phase === "RUNNING") return;
         op.phase = phase;
+        if (op.target && phase === "SUCCEEDED") {
+          const verifiedEffect = (b.result as {effectState: unknown}).effectState;
+          if (verifiedEffect !== 'NONE' && verifiedEffect !== 'VERIFIED')
+            throw new ApiError('INVALID_INPUT', 'A successful operation requires a verified effect state.');
+          op.terminalEffectState = op.mutating && verifiedEffect === 'VERIFIED' ? 'KNOWN' : 'NONE';
+        }
         if (phase !== "RUNNING") {
           op.terminalResultDigest=operationReceiptDigest(b.result);
           const errorCode=(b.result as {error?:{code?:unknown}})?.error?.code;

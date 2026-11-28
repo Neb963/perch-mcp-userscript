@@ -45,6 +45,7 @@ class FixtureObject {
   private readonly state:DurableObjectState;
   private inner:Inner;
   private cumulativeMetrics:Record<string,number>={};
+  private grantRevocation?: {beforeAuthorization: number; grantId: string; revision: number; adminCredential: string};
   constructor(state:DurableObjectState,private readonly env:Env,private readonly kind:'registry'|'workspace') {
     this.state=stateWithFaults(state,this.plan);
     this.inner=this.create();
@@ -90,6 +91,27 @@ class FixtureObject {
     if(path==='/__fixture_alarm') {
       try {await this.alarm();return Response.json({ok:true});}
       catch{return Response.json({ok:false},{status:503});}
+    }
+    if (path === '/__fixture_revoke_before_authorization' && this.kind === 'registry') {
+      if (request.method === 'POST') {
+        this.grantRevocation = await request.json() as NonNullable<FixtureObject['grantRevocation']>;
+      }
+      return Response.json({armed: this.grantRevocation !== undefined});
+    }
+    const revocation = this.grantRevocation;
+    if (path === '/internal/authorize' && revocation && --revocation.beforeAuthorization === 0) {
+      this.grantRevocation = undefined;
+      const revoke = await this.inner.fetch(new Request(
+        'https://internal/api/v1/admin/grants/' + revocation.grantId + '/revoke', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json', Authorization: 'Bearer ' + revocation.adminCredential,
+            'Idempotency-Key': crypto.randomUUID(),
+          },
+          body: JSON.stringify({expectedRevision: revocation.revision}),
+        },
+      ));
+      if (!revoke.ok) throw new Error('Synthetic Registry revocation failed.');
     }
     const run=()=>this.inner.fetch(request);
     const response=await (this.plan.now===undefined?run():clocks.run(this.plan.now,run));

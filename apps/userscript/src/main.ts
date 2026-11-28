@@ -6,6 +6,7 @@ import { resolveNativePageRealm } from "./page-context.js";
 import { reconnectCandidate } from "./autoconnect.js";
 import { isRetryableGatewayFailure } from "./connection-failures.js";
 import { GMStore } from "./storage.js";
+import { digest } from "./native-types.js";
 import { GatewayTransport, TransportError, gatewayOrigin } from "./transport.js";
 import { BrowserController } from "./controller.js";
 import { DocumentDraftStore } from "./resource-drafts.js";
@@ -14,6 +15,7 @@ import {
   mountManager,
   type ManagerClient,
   type ManagerHandle,
+  type WorkspaceTransitionReceipt,
 } from "./manager.js";
 
 declare const unsafeWindow: Window;
@@ -49,6 +51,19 @@ async function start(): Promise<void> {
     listValues: GM_listValues,
   });
   const transport = new GatewayTransport(store);
+  const receiptId = /^[0-9a-f-]{36}$/;
+  const transitionActions = new Set(["assign", "detach", "rebind", "transfer", "unassign"]);
+  async function transitionPrefix() {
+    const config = transport.configuration();
+    if (!config.paired || !config.browserInstallationId)
+      throw new Error("Pairing identity is unavailable.");
+    return "perch:manager-transition:" + await digest(JSON.stringify([config.origin, config.browserInstallationId])) + ":";
+  }
+  async function transitionKeys(prefix: string) {
+    const keys = (await store.list()).filter(key => key.startsWith(prefix)).sort();
+    if (keys.length > 100) throw new Error("Retained transition records exceed the inspection limit.");
+    return keys;
+  }
   let initializationError = false;
   try {
     await transport.initialize();
@@ -254,6 +269,33 @@ async function start(): Promise<void> {
       await transport.recover(origin, secret);
     },
     configuration: () => transport.configuration(),
+    transitionReceipts: {
+      async list() {
+        const prefix = await transitionPrefix();
+        const keys = await transitionKeys(prefix);
+        return await Promise.all(keys.map(async key => {
+          const receipt = await store.get<WorkspaceTransitionReceipt>(key);
+          if (!receipt || key !== prefix + receipt.key || !receiptId.test(receipt.key) ||
+              !/^[A-Za-z0-9_-]{1,128}$/.test(receipt.workspaceId) || !transitionActions.has(receipt.action))
+            throw new Error("A retained Workspace transition record could not be verified.");
+          return receipt;
+        }));
+      },
+      async retain(receipt) {
+        const prefix = await transitionPrefix();
+        if ((await transitionKeys(prefix)).length >= 100)
+          throw new Error("Inspect retained Workspace transitions before submitting another.");
+        const key = prefix + receipt.key;
+        await store.set(key, receipt);
+        const verified = await store.get<WorkspaceTransitionReceipt>(key);
+        if (verified?.key !== receipt.key || verified.workspaceId !== receipt.workspaceId || verified.action !== receipt.action)
+          throw new Error("The Workspace transition locator could not be read back.");
+      },
+      async retire(key) {
+        if (!receiptId.test(key)) throw new Error("Invalid transition receipt ID.");
+        await store.delete((await transitionPrefix()) + key);
+      },
+    },
     currentIdentity: async () => ({
       ...(await adapter.identity()),
       browserInstallationId: await transport.installationId(),

@@ -99,17 +99,27 @@ export class DevelopmentPreview {
     const local = args.resultPath ? await context.vfs.localView() : null;
     const inputDigest = await digest(JSON.stringify([name,callArgs,expected.revision,initialEpoch]));
     await context.permit('preview-effect',inputDigest);
-    await context.assertCurrent();
-    if (name!=='page_refresh' && initialEpoch!==this.observeEpoch())
-      throw new BrowserError('STALE_EPOCH','Preview document changed before dispatch.');
-    if ((await context.vfs.adapter.snapshot()).revision !== expected.revision)
-      throw new BrowserError('STALE_REVISION','Native draft changed before preview dispatch.');
+    let dispatched = false;
     let result: Record<string,unknown>;
     try {
-      result = await this.preview.call(name,{...callArgs,resultPath:undefined}) as Record<string,unknown>;
+      result = await this.preview.call(name,{...callArgs,resultPath:undefined},{
+        signal: context.signal,
+        assertCurrent: async () => {
+          await context.assertCurrent();
+          if ((await context.vfs.adapter.snapshot()).revision !== expected.revision)
+            throw new BrowserError('STALE_REVISION','Native draft changed before preview dispatch.');
+          await context.assertCurrent();
+          if (name!=='page_refresh' && initialEpoch!==this.observeEpoch())
+            throw new BrowserError('STALE_EPOCH','Preview document changed before dispatch.');
+        },
+        onDispatch: () => { dispatched = true; },
+      }) as Record<string,unknown>;
     } catch (error) {
-      if (error instanceof ExecutionError &&
-          ['UNSUPPORTED_INTERFACE','STALE_REVISION','INVALID_INPUT'].includes(error.code) && error.effectState==='NONE') throw error;
+      if (!dispatched) {
+        if (error instanceof ExecutionError && error.effectState !== 'NONE')
+          throw new ExecutionError(error.code,error.message);
+        throw error;
+      }
       if (error instanceof ExecutionError && error.effectState!=='NONE') throw error;
       throw new ExecutionError('EFFECT_UNKNOWN','Preview call requires read-only reconciliation.','UNKNOWN');
     }

@@ -1,5 +1,6 @@
 import { browserToolSchemas, developmentToolArgs, type BatchArgumentsV2, type BrowserToolArgs,
-  type BrowserToolV2, hasEffectV2, requiredPermissionsV2 } from '../../../packages/contracts/src/development-v2.js';
+  type BrowserToolV2, batchEvidenceReserve, batchResultBudget, hasEffectV2, pathMatchesRules, preflightDevelopmentBatch, requiredPermissionsV2 } from '../../../packages/contracts/src/development-v2.js';
+import { ToolError } from '../../../packages/contracts/src/errors.js';
 import type { BrowserEnvelopeV2, SegmentRequest } from '../../../packages/contracts/src/operations-v2.js';
 import { filesystemV2Schemas, type FilesystemToolV2 } from '../../../packages/contracts/src/filesystem-v2.js';
 import { ExecutionError, type ComputeWorkerClient } from './compute.js';
@@ -15,12 +16,10 @@ export interface DevelopmentContext {
   signal: AbortSignal;
   assertCurrent: () => Promise<void>;
   permit(kind: SegmentRequest['kind'], digest: string): Promise<void>;
-  recordStep(step: {index: number; tool: string; status: string; effectState: string}): Promise<void>;
+  recordStep(step: Omit<BatchStep, 'result'>): Promise<void>;
   additional(name: BrowserToolV2, args: Record<string, unknown>, scope: FilesystemCallScope): Promise<unknown>;
 }
 const utf8 = new TextEncoder();
-const fileInside = (path: string, rules: readonly string[]) => rules.some(rule =>
-  rule.endsWith('/') ? path.startsWith(rule) : path === rule);
 const native = (path: string) => !path.startsWith('scratch/') && !path.startsWith('imports/');
 const effectError = (code: string, message: string, effect: 'NONE' | 'PARTIAL' | 'UNKNOWN') => new ExecutionError(code,message,effect);
 
@@ -40,7 +39,7 @@ async function scopedCompute(args: BrowserToolArgs<'execute_js'>, context: Devel
   const read = async (path: string) => {
     await context.assertCurrent();
     canonicalPath(path);
-    if (!fileInside(path, readRules)) throw new BrowserError('SCOPE_DENIED','Guest read is outside declared access.');
+    if (!pathMatchesRules(path, readRules)) throw new BrowserError('SCOPE_DENIED','Guest read is outside declared access.');
     if (++readCount > (args.access.maxReads ?? 256)) throw new BrowserError('LIMIT_EXCEEDED','Guest read count exceeded.');
     let value = reads.get(path);
     if (!value) {
@@ -73,14 +72,14 @@ async function scopedCompute(args: BrowserToolArgs<'execute_js'>, context: Devel
       list: async () => {
         await context.assertCurrent();
         if (++readCount > (args.access.maxReads ?? 256)) throw new BrowserError('LIMIT_EXCEEDED','Guest read count exceeded.');
-        return list.filter(path=>fileInside(path,readRules));
+        return list.filter(path=>pathMatchesRules(path,readRules));
       },
       writeBatch: async (writes, expectedRevision) => {
         await context.assertCurrent();
         if (expectedRevision !== revision || !writes.length || writes.length > (args.access.maxWrites ?? 64))
           throw effectError('LIMIT_EXCEEDED','Guest write set is outside its declared bounds.','NONE');
         for (const entry of writes)
-          if (!fileInside(canonicalPath(entry.path),writeRules)) throw effectError('SCOPE_DENIED','Guest write is outside declared access.','NONE');
+          if (!pathMatchesRules(canonicalPath(entry.path),writeRules)) throw effectError('SCOPE_DENIED','Guest write is outside declared access.','NONE');
         const writesHash = await digest(JSON.stringify(await Promise.all(writes.map(async entry=>[
           entry.path, entry.bytes ? await digest(entry.bytes) : null,
         ]))));
@@ -96,12 +95,12 @@ async function scopedCompute(args: BrowserToolArgs<'execute_js'>, context: Devel
           if (!pre || observed.revision !== pre.revision)
             throw effectError('STALE_REVISION','Source changed during guest computation.','NONE');
           await authorize();
-          const result = await context.vfs.writeBatch(writes, pre.revision, context.envelope.operationId);
+          const result = await context.vfs.writeBatch(writes, pre.revision, context.envelope.operationId, context.assertCurrent);
           if (result.status!=='SUCCEEDED') throw effectError('EFFECT_UNKNOWN','Guest publication requires reconciliation.',result.status);
           return {revision: result.revision};
         }
         await authorize();
-        const result = await context.vfs.writeLocalBatch(writes, localView.revision.value, context.envelope.operationId);
+        const result = await context.vfs.writeLocalBatch(writes, localView.revision.value, context.envelope.operationId, context.assertCurrent);
         return {revision: result.value};
       },
     },
@@ -175,7 +174,8 @@ async function importPublic(args: BrowserToolArgs<'fetch_generator'>, context: D
     revisions.push({slug:generator.slug,generatorId:first.generatorId,revision:first.revision,paths});
   }
   await context.permit('source-publication', await digest(JSON.stringify(revisions)));
-  const revision = await context.vfs.publishImportedFiles(names, imports, local.revision.value, context.envelope.operationId);
+  const revision = await context.vfs.publishImportedFiles(names, imports, local.revision.value,
+    context.envelope.operationId, context.assertCurrent);
   return {imports:revisions,localRevision:revision};
 }
 
@@ -198,6 +198,18 @@ export async function executeDevelopment(context: DevelopmentContext, engine?: C
   const args = validated.data as Record<string,unknown>;
   if (!requiredPermissionsV2(tool,args).every(permission=>operation.permissions.some(grant=>grant===permission)))
     throw new BrowserError('SCOPE_DENIED','Operation exceeds its immutable permission ceiling.');
+  if (tool === 'batch') {
+    const batch = validated.data as BatchArgumentsV2;
+    const approvedHosts = batch.actions.some(step => step.tool === 'fetch_url')
+      ? await context.vfs.store.get<string[]>('perch:fetch-approved-hosts') ?? []
+      : undefined;
+    try {
+      preflightDevelopmentBatch(batch, approvedHosts);
+    } catch (error) {
+      if (error instanceof ToolError) throw new BrowserError(error.code, error.message, error.recovery);
+      throw error;
+    }
+  }
   const fs = new FilesystemV2(context.vfs);
   const scope: FilesystemCallScope = {
     target:operation.target,grantId:operation.grantId,operationId:operation.operationId,
@@ -216,63 +228,182 @@ export async function executeDevelopment(context: DevelopmentContext, engine?: C
     return context.additional(name,args,scope);
   };
   if (tool !== 'batch') return run(tool,args);
-  const actions = (args as unknown as BatchArgumentsV2).actions;
-  const steps: Record<string,unknown>[] = [];
-  let committed = false;
-  const isMutation=(action:BatchArgumentsV2['actions'][number]):action is Extract<BatchArgumentsV2['actions'][number],{tool:'write'|'delete'|'rename'}> =>
-    action.tool==='write'||action.tool==='delete'||action.tool==='rename';
-  for (let index=0;index<actions.length;index++) {
-    const action=actions[index]!;
-    try {
-      if (isMutation(action)) {
-        const begin=index;
-        const group=[action];
-        for (let scan=index+1;scan<actions.length;scan++) {
-          const candidate=actions[scan]!;
-          if (!isMutation(candidate)) break;
-          group.push(candidate);
-        }
-        if (group.length>1) {
-          await context.recordStep({index:begin,tool:action.tool,status:'RUNNING',effectState:'NONE'});
-          const publication=await fs.publishCoherent(group,scope);
-          const status=publication.result.status;
-          for (const [offset,step] of group.entries()) {
-            const position=begin+offset;
-            const effectState=status==='SUCCEEDED'?'KNOWN':status;
-            await context.recordStep({index:position,tool:step.tool,status,effectState});
-            steps.push({index:position,id:step.id,tool:step.tool,status,
-              ...(status==='SUCCEEDED'?{staged:publication.perAction[offset]}:{committedPaths:publication.result.committed})});
-          }
-          index+=group.length-1;
-          if (status!=='SUCCEEDED') return {status:committed?'PARTIAL':status,steps,skipped:actions.length-index-1};
-          committed=true;
-          continue;
-        }
-      }
-      await context.recordStep({index,tool:action.tool,status:'RUNNING',effectState:'NONE'});
-      const result = await run(action.tool,action.args);
-      const current = result as {status?: string} | null;
-      if (current?.status === 'UNKNOWN' || current?.status === 'PARTIAL') {
-        await context.recordStep({index,tool:action.tool,status:current.status,effectState:current.status});
-        steps.push({index,id:action.id,tool:action.tool,status:current.status,result});
-        return {status:committed?'PARTIAL':current.status,steps,skipped:actions.length - index - 1};
-      }
-      const effect = hasEffectV2(action.tool,action.args);
-      committed ||= effect;
-      await context.recordStep({index,tool:action.tool,status:'SUCCEEDED',effectState:effect?'KNOWN':'NONE'});
-      steps.push({index,id:action.id,tool:action.tool,status:'SUCCEEDED',
-        result:utf8.encode(JSON.stringify(result)).length <= 8192 ? result : {resultAvailability:'TOO_LARGE'}});
-    } catch (error) {
-      const known = error instanceof BrowserError || error instanceof ExecutionError;
-      const unknown = error instanceof ExecutionError && error.effectState === 'UNKNOWN' ||
-        error instanceof BrowserError && error.code === 'EFFECT_UNKNOWN';
-      const partial = error instanceof ExecutionError && error.effectState === 'PARTIAL';
-      const status = committed || partial ? 'PARTIAL' : unknown ? 'UNKNOWN' :
-        known && error.code==='CANCELLED'?'CANCELLED':'REJECTED';
-      await context.recordStep({index,tool:action.tool,status,effectState:status==='REJECTED'||status==='CANCELLED'?'NONE':status});
-      steps.push({index,id:action.id,tool:action.tool,status,code:known?error.code:'PROVIDER_REJECTED'});
-      return {status,steps,skipped:actions.length - index - 1};
-    }
+  return executeBatch(args as unknown as BatchArgumentsV2, context, fs, scope, run);
+}
+
+type BatchAction = BatchArgumentsV2['actions'][number];
+type MutationAction = Extract<BatchAction, {tool: 'write' | 'delete' | 'rename'}>;
+type StepStatus = 'RUNNING' | 'STAGED' | 'SUCCEEDED' | 'REJECTED' | 'CANCELLED' |
+  'UNKNOWN' | 'PARTIAL' | 'DISCARDED' | 'SKIPPED';
+type StepEffect = 'NONE' | 'KNOWN' | 'UNKNOWN' | 'PARTIAL';
+
+interface BatchStep {
+  index: number;
+  stepId: string;
+  id?: string;
+  tool: BrowserToolV2;
+  status: StepStatus;
+  effectState: StepEffect;
+  code?: string;
+  paths?: {path: string; outcome: 'STAGED' | 'COMMITTED' | 'UNCERTAIN' | 'DISCARDED' | 'SKIPPED'}[];
+  revision?: string;
+  result?: unknown;
+}
+
+function isMutation(action: BatchAction): action is MutationAction {
+  return action.tool === 'write' || action.tool === 'delete' || action.tool === 'rename';
+}
+
+function stepFailure(error: unknown, effectCapable = false): Pick<BatchStep, 'status' | 'effectState' | 'code'> {
+  const typed = error instanceof BrowserError || error instanceof ExecutionError;
+  const code = typed ? error.code : 'PROVIDER_REJECTED';
+  if (error instanceof ExecutionError && error.effectState === 'PARTIAL') {
+    return {status: 'PARTIAL', effectState: 'PARTIAL', code};
   }
-  return {status:'SUCCEEDED',steps};
+  if (error instanceof ExecutionError && error.effectState === 'UNKNOWN' ||
+      code === 'EFFECT_UNKNOWN' || !typed && effectCapable) {
+    return {status: 'UNKNOWN', effectState: 'UNKNOWN', code};
+  }
+  return {status: code === 'CANCELLED' ? 'CANCELLED' : 'REJECTED', effectState: 'NONE', code};
+}
+
+function compactRead(result: Awaited<ReturnType<FilesystemV2['read']>>) {
+  return {...result, files: result.files.map(file => {
+    if (!('content' in file) || !file.content) return file;
+    const {content: _content, ...metadata} = file;
+    return {...metadata, returnedBytes: 0, resultAvailability: 'CONTINUATION_REQUIRED',
+      next: {unit: 'bytes', offset: file.offset, length: file.returnedBytes,
+        ifSha256: file.sha256}};
+  })};
+}
+
+async function executeBatch(batch: BatchArgumentsV2, context: DevelopmentContext, fs: FilesystemV2,
+    scope: FilesystemCallScope, run: (tool: BrowserToolV2, args: Record<string, unknown>) => Promise<unknown>) {
+  const actions = batch.actions;
+  const steps: BatchStep[] = [];
+  let known = false;
+  let uncertain = false;
+  let available = batchResultBudget - batchEvidenceReserve(batch);
+  const base = (index: number, status: StepStatus, effectState: StepEffect): BatchStep => ({
+    index, stepId: context.envelope.operationId + ':' + index, id: actions[index]!.id,
+    tool: actions[index]!.tool, status, effectState,
+  });
+  const persist = async (step: Omit<BatchStep, 'result'>) => {
+    try {
+      await context.recordStep(step);
+    } catch (error) {
+      if (known || uncertain || step.effectState !== 'NONE') {
+        throw effectError('EFFECT_UNKNOWN', 'Batch ledger acknowledgement was unavailable after an effect.',
+          known || step.effectState === 'KNOWN' || step.effectState === 'PARTIAL' ? 'PARTIAL' : 'UNKNOWN');
+      }
+      throw error;
+    }
+  };
+  const append = async (step: BatchStep) => {
+    const {result: _result, ...evidence} = step;
+    await persist(evidence);
+    known ||= step.effectState === 'KNOWN' || step.effectState === 'PARTIAL';
+    uncertain ||= step.effectState === 'UNKNOWN';
+    steps.push(step);
+  };
+  const stop = async (failure: Pick<BatchStep, 'status' | 'effectState' | 'code'>, next: number, groupStart?: number) => {
+    for (let index = next; index < actions.length; index++) await append(base(index, 'SKIPPED', 'NONE'));
+    const status = known ? 'PARTIAL' : uncertain ? 'UNKNOWN' : failure.status;
+    const effectState = known ? 'PARTIAL' : uncertain ? 'UNKNOWN' : failure.effectState;
+    return {status, effectState, steps, skipped: actions.length - next,
+      ...(groupStart === undefined ? {} : {publicationError: {...failure, groupStart}})};
+  };
+  const boundedResult = (tool: BrowserToolV2, result: unknown) => {
+    try {
+      const size = utf8.encode(JSON.stringify(result)).byteLength;
+      if (size <= available) {
+        available -= size;
+        return result;
+      }
+      if (tool === 'read') return compactRead(result as Awaited<ReturnType<FilesystemV2['read']>>);
+    } catch { /* Keep the terminal effect separate from projection. */ }
+    return {resultAvailability: 'TOO_LARGE'};
+  };
+
+  for (let index = 0; index < actions.length; index++) {
+    const action = actions[index]!;
+    if (isMutation(action)) {
+      const begin = index;
+      const group = [action];
+      for (let scan = index + 1; scan < actions.length; scan++) {
+        const candidate = actions[scan]!;
+        if (!isMutation(candidate)) break;
+        group.push(candidate);
+      }
+      // The same staged publication path gives even one mutation exact
+      // per-path evidence while preserving batch stop-on-error semantics.
+      const publication = await fs.publishCoherent(group, scope, async (offset, paths) => {
+        await context.recordStep({...base(begin + offset, 'STAGED', 'NONE'),
+          paths: paths.map(path => ({path, outcome: 'STAGED'}))});
+      });
+      if (publication.kind === 'staging-failed') {
+        for (const [offset, paths] of publication.stagedPaths.entries()) {
+          await append({...base(begin + offset, 'DISCARDED', 'NONE'),
+            paths: paths.map(path => ({path, outcome: 'DISCARDED'}))});
+        }
+        const failure = stepFailure(publication.error);
+        const failedIndex = begin + publication.failedOffset;
+        await append({...base(failedIndex, failure.status, failure.effectState), code: failure.code});
+        return stop(failure, failedIndex + 1);
+      }
+      const owners = new Map<string, number>();
+      for (const [offset, paths] of publication.stagedPaths.entries()) {
+        for (const path of paths) owners.set(path, offset);
+      }
+      const final = new Set(publication.finalPaths);
+      const result = publication.kind === 'published' ? publication.result : undefined;
+      const fault = publication.kind === 'publication-failed' ? stepFailure(publication.error, true) : undefined;
+      const committed = new Set(result?.committed ?? []);
+      const uncertain = new Set(result && 'uncertainPaths' in result && result.uncertainPaths
+        ? result.uncertainPaths : fault?.effectState === 'UNKNOWN' ? publication.finalPaths : []);
+      const resultCode: string | undefined = result && 'error' in result ? result.error?.code : fault?.code;
+      const revision = result && 'revision' in result ? result.revision : undefined;
+      for (const [offset, paths] of publication.stagedPaths.entries()) {
+        const outcomes: NonNullable<BatchStep['paths']> = paths.map(path => ({
+          path,
+          outcome: !final.has(path) || owners.get(path) !== offset ? 'DISCARDED'
+            : committed.has(path) ? 'COMMITTED' : uncertain.has(path) ? 'UNCERTAIN' : 'SKIPPED',
+        }));
+        const hasCommit = outcomes.some(path => path.outcome === 'COMMITTED');
+        const hasUncertainty = outcomes.some(path => path.outcome === 'UNCERTAIN');
+        const hasSkipped = outcomes.some(path => path.outcome === 'SKIPPED');
+        const status = hasCommit
+          ? hasUncertainty || hasSkipped ? 'PARTIAL' : 'SUCCEEDED'
+          : hasUncertainty ? 'UNKNOWN' : hasSkipped ? 'SKIPPED' : 'DISCARDED';
+        const effect = status === 'PARTIAL' ? 'PARTIAL' : hasCommit ? 'KNOWN' : hasUncertainty ? 'UNKNOWN' : 'NONE';
+        await append({...base(begin + offset, status, effect), paths: outcomes, revision,
+          ...(status === 'UNKNOWN' || status === 'PARTIAL' || status === 'SKIPPED' ? {code: resultCode} : {})});
+      }
+      index += group.length - 1;
+      if (fault) return stop(fault, index + 1, begin);
+      if (result?.status === 'PARTIAL' || result?.status === 'UNKNOWN') {
+        return stop({status: result.status, effectState: result.status, code: resultCode}, index + 1, begin);
+      }
+      continue;
+    }
+    const mayEffect = hasEffectV2(action.tool, action.args);
+    await persist(base(index, 'RUNNING', 'NONE'));
+    let result: unknown;
+    try {
+      result = await run(action.tool, action.args);
+    } catch (error) {
+      const failure = stepFailure(error, mayEffect);
+      await append({...base(index, failure.status, failure.effectState), code: failure.code});
+      return stop(failure, index + 1);
+    }
+    const reported = result as {status?: unknown} | null;
+    if (reported?.status === 'UNKNOWN' || reported?.status === 'PARTIAL') {
+      const failure = {status: reported.status, effectState: reported.status} as const;
+      await append({...base(index, failure.status, failure.effectState), result: boundedResult(action.tool, result)});
+      return stop(failure, index + 1);
+    }
+    await append({...base(index, 'SUCCEEDED', mayEffect ? 'KNOWN' : 'NONE'),
+      result: boundedResult(action.tool, result)});
+  }
+  return {status: 'SUCCEEDED', effectState: known ? 'KNOWN' : 'NONE', steps};
 }

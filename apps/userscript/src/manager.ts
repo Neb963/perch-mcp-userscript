@@ -13,11 +13,21 @@ export interface ManagerConfiguration {
   paired: boolean;
   browserInstallationId?: string;
 }
+export interface WorkspaceTransitionReceipt {
+  workspaceId: string;
+  action: string;
+  key: string;
+}
 export interface ManagerClient {
   /** Adds management credential, JSON type and a fresh Idempotency-Key for writes. Never redirects credentials. */
   request(method: string, path: string, body?: unknown,
     options?: {signal?: AbortSignal; idempotencyKey?: string}): Promise<unknown>;
   bindingProof?(workspace: Record<string,unknown>, binding: ManagerIdentity): Promise<unknown>;
+  transitionReceipts?: {
+    list(): Promise<WorkspaceTransitionReceipt[]>;
+    retain(receipt: WorkspaceTransitionReceipt): Promise<void>;
+    retire(key: string): Promise<void>;
+  };
   health(origin?: string): Promise<unknown>;
   /** Read-only, bounded redacted local request outcomes; never returns credentials. */
   diagnostics?(): unknown;
@@ -461,8 +471,11 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     tab: Tab = client.configuration().paired ? "Workspaces" : "Settings";
   let resourceLoad = 0;
   let viewAbort: AbortController | undefined;
-  const v2Requests = new Map<string, {path:string; key:string; body:Record<string,unknown>}>();
+  const v2Requests = new Map<string, WorkspaceTransitionReceipt>();
+  let receiptInstallation = "";
   const mutationPending = new Set<string>();
+  let authority: { generation: number; installation: string } | undefined;
+  let remoteAction: { generation: number; installation: string } | undefined;
   let approvalRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   function stopApprovalRefresh() {
     if (approvalRefreshTimer !== undefined) clearTimeout(approvalRefreshTimer);
@@ -484,8 +497,8 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   let recoveryWorkspaceId = "";
   let sortField = "label",
     sortDirection = 1,
-    filterValue = "",
-    confirmedAction: (() => Promise<void>) | undefined;
+    filterValue = "";
+  let confirmation: { box: HTMLElement; trigger: HTMLElement | null } | undefined;
   const buttons = new Map<Tab, HTMLButtonElement>();
   function fitTextarea(area: HTMLTextAreaElement, minimum = 100) {
     if (!area.isConnected || !area.getClientRects().length) return;
@@ -518,7 +531,10 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     } catch (e) {
       if (view===generation || state.assignmentContractVersion!==2) report(e);
     } finally {
-      if (target?.isConnected) target.disabled = false;
+      if (target?.isConnected) {
+        if (target.hasAttribute("data-remote-mutation")) refreshRemoteButtons();
+        else target.disabled = false;
+      }
     }
   }
   function on<K extends keyof HTMLElementEventMap>(
@@ -541,6 +557,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     () => Promise<void> | void
   >();
   function activateButton(button: HTMLButtonElement) {
+    if (button.disabled || !button.isConnected || !opened) return;
     const action = buttonActions.get(button);
     if (action)
       void run(async () => {
@@ -609,28 +626,79 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     parent.append(r);
     return r;
   }
-  function confirmAction(message: string, action: () => Promise<void>) {
-    confirmedAction = action;
+  function installation() {
+    const config = client.configuration();
+    return JSON.stringify([config.paired, config.origin, config.browserInstallationId]);
+  }
+  function requireAuthority(own: number) {
+    if (!opened || destroyed || own !== generation ||
+        authority?.generation !== own || authority.installation !== installation())
+      throw new Error("Gateway authority changed. Refresh this view before taking action.");
+  }
+  function refreshRemoteButtons() {
+    const active = authority?.generation === generation && authority.installation === installation() && !remoteAction;
+    for (const control of body.querySelectorAll<HTMLButtonElement>("[data-remote-mutation]")) {
+      control.disabled = !active || control.dataset.unavailable === "true";
+    }
+  }
+  async function runRemoteAction(own: number, action: () => Promise<void>) {
+    requireAuthority(own);
+    if (remoteAction || confirmation) throw new Error("A management action or confirmation is already pending.");
+    const current = { generation: own, installation: installation() };
+    remoteAction = current;
+    refreshRemoteButtons();
+    try {
+      await action();
+    } finally {
+      if (remoteAction === current) remoteAction = undefined;
+      refreshRemoteButtons();
+    }
+  }
+  function markRemote(control: HTMLButtonElement, unavailable = false) {
+    control.dataset.remoteMutation = "";
+    control.dataset.unavailable = String(unavailable);
+    control.disabled = unavailable || remoteAction !== undefined || authority?.generation !== generation;
+    return control;
+  }
+  function remoteButton(label: string, own: number, action: () => Promise<void>, cls?: string) {
+    return markRemote(button(label, () => runRemoteAction(own, action), cls));
+  }
+  function dismissConfirmation(restoreFocus = false) {
+    const current = confirmation;
+    if (!current) return;
+    confirmation = undefined;
+    current.box.remove();
+    if (restoreFocus && current.trigger?.isConnected) current.trigger.focus();
+  }
+  function confirmAction(message: string, action: () => Promise<void>, remote = false,
+      confirmLabel = "Confirm", parent = body) {
+    if (confirmation) {
+      confirmation.box.focus();
+      return;
+    }
+    const own = generation;
+    if (remote) requireAuthority(own);
     const box = el("div", undefined, "confirm");
     box.setAttribute("role", "alert");
+    box.tabIndex = -1;
+    const selected = shadow.activeElement;
+    const current = { box, trigger: selected && "focus" in selected ? selected as HTMLElement : null };
+    confirmation = current;
     p(message, box);
+    const confirm = button(confirmLabel, async () => {
+      if (confirmation !== current || own !== generation || !opened || destroyed) return;
+      dismissConfirmation(true);
+      if (remote) await runRemoteAction(own, action);
+      else await action();
+    }, "danger");
     box.append(
-      button(
-        "Confirm",
-        async () => {
-          const current = confirmedAction;
-          confirmedAction = undefined;
-          box.remove();
-          await current?.();
-        },
-        "danger",
-      ),
+      remote ? markRemote(confirm) : confirm,
       button("Cancel", () => {
-        confirmedAction = undefined;
-        box.remove();
+        if (confirmation === current) dismissConfirmation(true);
       }),
     );
-    body.prepend(box);
+    if (parent === body) body.prepend(box);
+    else parent.append(box);
     box.querySelector("button")?.focus();
   }
   function copy(label: string, value: string) {
@@ -640,7 +708,19 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     });
   }
   function setStatus(next: ManagerStatus) {
+    const oldConnection = status.connection;
     status = next;
+    if (next.connection === "degraded" || next.connection === "unpaired") {
+      authority = undefined;
+      dismissConfirmation();
+      refreshRemoteButtons();
+      if (opened && oldConnection !== next.connection) {
+        ++generation;
+        viewAbort?.abort();
+        stopApprovalRefresh();
+        renderViewShell("Gateway state is unverified. Refresh to check availability.");
+      }
+    }
     statusNode.textContent = [
       next.workspace,
       next.agent,
@@ -756,17 +836,29 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     const a = await loadList(`${ADMIN}/${s.assignmentContractVersion===2?'connectors':'agents'}`,signal);
     return {s,w,a};
   }
+  function tabLabel() {
+    return tab === "Agents" && state.assignmentContractVersion === 2 ? "Connectors" : tab;
+  }
+  function renderViewShell(message: string) {
+    body.replaceChildren();
+    if (tab === "Settings") renderSettings();
+    else {
+      heading(tabLabel());
+      p(message, body, "muted");
+    }
+  }
   async function refresh() {
     stopApprovalRefresh();
+    dismissConfirmation();
     const own = ++generation;
+    authority = undefined;
     viewAbort?.abort();
     viewAbort = new AbortController();
     if (!opened || destroyed) return;
+    const scope = installation();
+    updateTabs();
+    renderViewShell("Loading management state…");
     announce("Loading…");
-    if (tab === "Settings") {
-      body.replaceChildren();
-      renderSettings();
-    }
     try {
       if (!client.configuration().paired) {
         if (own !== generation) return;
@@ -778,10 +870,14 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         return;
       }
       const base = await baseData(viewAbort.signal);
-      if (own !== generation || destroyed) return;
+      if (own !== generation || destroyed || scope !== installation()) return;
+      if (!Number.isSafeInteger(base.s.revision) ||
+          base.s.assignmentContractVersion === 2 && !Number.isSafeInteger(base.s.policyRevision))
+        throw new Error("Gateway returned invalid management revisions.");
       state = base.s;
       workspaces = base.w;
       agents = base.a;
+      authority = { generation: own, installation: scope };
       body.replaceChildren();
       if (state.assignmentContractVersion===2 && tab==='Library') tab='Settings';
       updateTabs();
@@ -801,29 +897,21 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             client.download('perch-resource-archive.zip',bytes,'application/zip');
           }));
       }
-      if (own === generation) announce("Updated.");
+      if (own === generation) {
+        refreshRemoteButtons();
+        announce("Updated.");
+      }
     } catch (e) {
       if (own !== generation) return;
+      authority = undefined;
+      dismissConfirmation();
+      renderViewShell("Gateway unavailable. Remote actions require a fresh connection.");
       report(e);
-      if (!body.children.length) {
-        heading("Gateway unavailable");
-        p(
-          "Normal Perchance editing remains available. Close this manager to continue. Reconnect from Settings.",
-        );
-        body.append(
-          button("Settings", async () => {
-            tab = "Settings";
-            updateTabs();
-            body.replaceChildren();
-            renderSettings();
-          }),
-        );
-      }
     }
   }
   function updateTabs() {
     body.setAttribute("role", "tabpanel");
-    body.setAttribute("aria-label", tab);
+    body.setAttribute("aria-label", tabLabel());
     for (const [name, b] of buttons) {
       b.setAttribute("aria-selected", String(name === tab));
       if (name==='Agents') b.textContent=state.assignmentContractVersion===2?'Connectors':'Agents';
@@ -851,10 +939,13 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   /** One explicit connection action; remote pause changes use readback and are
    * never replayed after a lost acknowledgement. */
   async function connectWorkspace(w: Row): Promise<void> {
+    const own = generation;
+    requireAuthority(own);
     const id=str(w.id);
     if(!id)throw new Error('Choose a Workspace first.');
     const current=record(await client.request('GET',`${ADMIN}/workspaces/${encodeURIComponent(id)}`));
     if(str(current.id)!==id)throw new Error('Workspace changed; refresh the list.');
+    requireAuthority(own);
     if(state.paused===true){
       // The button explicitly says that all Workspaces will be resumed.
       try{await client.request('POST',`${ADMIN}/pause`,{
@@ -866,6 +957,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     }
     let ready=current;
     if(current.paused===true){
+      requireAuthority(own);
       try{await client.request('PATCH',`${ADMIN}/workspaces/${encodeURIComponent(id)}`,{
         expectedRevision:num(current.revision),paused:false,
       });}catch(error){
@@ -877,6 +969,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     }
     try {
       if(!client.attach)throw new Error('The native browser connection is unavailable.');
+      requireAuthority(own);
       await client.attach(ready);
       await refresh();
       announce('Editor connected. The agent can continue.');
@@ -910,38 +1003,65 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     await connectWorkspace({...live,...result});
   }
   async function transitionWorkspace(w: Row, action: string, args: Row, own: number) {
+    requireAuthority(own);
     const id = str(w.id);
     if (mutationPending.has(id)) throw new Error('A change is pending for this Workspace.');
     const path = `${ADMIN}/workspaces/${encodeURIComponent(id)}/${action}`;
     const current = agents.items.find(item=>item.id===w.connectorId);
     const cached = v2Requests.get(id);
-    if (cached && cached.path!==path) throw new Error('Inspect or resume the pending Workspace transition.');
-    const request = cached ?? {path,key:crypto.randomUUID(),body:{
-      expectedRevision:w.revision,...(current ? {expectedConnectorRevision:current.revision} : {}),...args,
-    }};
+    if (cached && cached.action!==action) throw new Error('Inspect the original Workspace transition first.');
+    const request = cached ?? {workspaceId:id,action,key:crypto.randomUUID()};
+    const scope = installation();
+    const retire = async () => {
+      if (installation() !== scope) return;
+      await client.transitionReceipts?.retire(request.key);
+      v2Requests.delete(id);
+    };
     v2Requests.set(id,request);
     mutationPending.add(id);
     try {
       let next: Row;
+      const reconcile = async () => {
+        const receipt=record(await client.request('GET',`${ADMIN}/receipts/${request.key}`));
+        const result=record(receipt.result);
+        if (result.id!==id)
+          throw new Error('Receipt did not identify the requested Workspace.');
+        return result;
+      };
+      if (!cached) {
+        try {
+          await client.transitionReceipts?.retain(request);
+          requireAuthority(own);
+        } catch (error) {
+          await retire();
+          throw error;
+        }
+      }
       try {
-        next=record(await client.request('POST',request.path,request.body,{idempotencyKey:request.key}));
+        if (cached) {
+          next = await reconcile();
+        } else {
+          next=record(await client.request('POST',path,{
+            expectedRevision:w.revision,...(current ? {expectedConnectorRevision:current.revision} : {}),...args,
+          },{idempotencyKey:request.key}));
+          if (next.id !== id) throw new Error("Response did not identify the requested Workspace.");
+        }
       } catch (error) {
+        if (cached) throw new Error('The original Workspace transition is unresolved. Inspect its receipt before making a new change.');
         const code = error && typeof error==='object' && 'code' in error ? String(error.code) : '';
         if (['STALE_REVISION','APPROVAL_REQUIRED','SCOPE_DENIED','BINDING_MISMATCH','TAB_BUSY','INVALID_INPUT','CONFLICT'].includes(code)) {
-          v2Requests.delete(id);
+          await retire();
           throw error;
         }
         try {
-          const receipt=record(await client.request('GET',`${ADMIN}/receipts/${request.key}`));
-          next=record(receipt.result);
-          if (next.id!==id) throw new Error('Receipt did not identify the requested Workspace.');
+          next=await reconcile();
         } catch {
-          throw new Error('Transition may still be pending. Inspect the exact Workspace and retry the same action.');
+          throw new Error('Transition outcome is unknown. Inspect the original Workspace receipt.');
         }
       }
-      v2Requests.delete(id);
-      if (action==='rebind' && next.binding && client.attach && own===generation) {
-        try { await client.attach(next); }
+      await retire();
+      if (!cached && action==='rebind' && next.binding && client.attach && own===generation) {
+        try { requireAuthority(own); await client.attach(next); }
         catch { if (own===generation) announce('Binding committed. Reconnect this verified editor to acquire its lease.',true); return; }
       }
       if (own===generation) await refresh();
@@ -950,13 +1070,22 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   async function renderDevelopmentWorkspaces(own: number) {
     heading('Workspaces');
     const create = field('Workspace name');
-    actions(body,create.label,button('Create Workspace',async()=>{
+    actions(body,create.label,remoteButton('Create Workspace',own,async()=>{
       if (!create.input.value.trim()) throw new Error('Enter a Workspace name.');
       await client.request('POST',`${ADMIN}/workspaces`,{contractVersion:2,label:create.input.value.trim()});
       if (own===generation) await refresh();
     }));
-    const nextIdentity = await client.currentIdentity().catch(()=>undefined);
-    if (own!==generation || destroyed) return;
+    const scope = installation();
+    const [nextIdentity, pending] = await Promise.all([
+      client.currentIdentity().catch(()=>undefined),
+      client.transitionReceipts?.list() ?? [],
+    ]);
+    if (own!==generation || destroyed || scope!==installation()) return;
+    if (receiptInstallation !== scope) {
+      receiptInstallation = scope;
+      v2Requests.clear();
+    }
+    for (const receipt of pending) v2Requests.set(receipt.workspaceId, receipt);
     const choices = agents.items.filter(item=>item.contractVersion===2 && item.suspended!==true);
     search();
     table([
@@ -980,44 +1109,66 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           td.append(button('Reconnect legacy Workspace',async()=>connectWorkspace(w)));
           return;
         }
-        const id=str(w.id),wd=w.binding!==null && w.binding!==undefined;
+        const intent: Row = {...w, binding: w.binding ? {...record(w.binding)} : w.binding,
+          transition: w.transition ? {...record(w.transition)} : w.transition};
+        const id=str(intent.id),wd=intent.binding!==null && intent.binding!==undefined;
+        const pending = v2Requests.get(id);
+        if (pending) {
+          p(`Transition outcome unknown · ${pending.key}`, td, "muted");
+          td.append(remoteButton("Inspect original transition", own, () =>
+            transitionWorkspace(intent, pending.action, {}, own)));
+          return;
+        }
+        const previous = record(intent.binding);
+        const owningConnector = agents.items.find(item => item.id === intent.connectorId);
+        const scope = `${str(intent.label, id)} (${id}) · ${str(owningConnector?.label, 'Unassigned')}`;
+        const oldDraft = `${str(previous.generatorId, 'Unbound')} · draft ${str(previous.draftId) || '(default)'}`;
         const observation=record(w.observation);
         const dirty=wd && !(observation.epoch===w.epoch && observation.dirty===false &&
           num(observation.observedAt)+60000>Date.now());
         if (nextIdentity && client.bindingProof) {
-          p(`This tab · ${nextIdentity.slug} · ${nextIdentity.generatorId} · draft ${nextIdentity.draftId||'(default)'}`,td,'muted');
-          td.append(button(wd?'Reassign to this tab':'Assign this tab',async()=>{
+          const destination = {...nextIdentity};
+          p(`This tab · ${destination.slug} · ${destination.generatorId} · draft ${destination.draftId||'(default)'}`,td,'muted');
+          td.append(markRemote(button(wd?'Reassign to this tab':'Assign this tab',async()=>{
             const rebind=async()=>{
               const cached=v2Requests.get(id);
-              if (cached) return transitionWorkspace(w,'rebind',{},own);
+              if (cached) return transitionWorkspace(intent,'rebind',{},own);
               const exact=await client.currentIdentity();
-              if (JSON.stringify(exact)!==JSON.stringify(nextIdentity))
+              if (exact.generatorId !== destination.generatorId || exact.slug !== destination.slug ||
+                  exact.draftId !== destination.draftId || exact.browserInstallationId !== destination.browserInstallationId)
                 throw new Error('This editor changed after the actions were shown. Refresh Workspaces.');
+              requireAuthority(own);
               const probe=client.probe ? record(await client.probe()) : null;
               if (probe && probe.ready!==true) throw new Error('This editor is not ready.');
-              const proof=record(await client.bindingProof!(w,exact));
-              await transitionWorkspace(w,'rebind',{binding:exact,bindingProof:proof.proof,acknowledgeDirty:dirty},own);
+              const latest = await client.currentIdentity();
+              if (latest.generatorId !== destination.generatorId || latest.draftId !== destination.draftId ||
+                  latest.browserInstallationId !== destination.browserInstallationId)
+                throw new Error('This editor changed during confirmation. Refresh Workspaces.');
+              requireAuthority(own);
+              const proof=record(await client.bindingProof!(intent,destination));
+              await transitionWorkspace(intent,'rebind',{binding:destination,bindingProof:proof.proof,acknowledgeDirty:dirty},own);
             };
-            if (dirty && !v2Requests.has(id)) confirmAction('Leave the previous native draft in its current state and reassign?',rebind);
-            else await rebind();
-          }));
+            if (dirty && !v2Requests.has(id))
+              confirmAction(`Reassign ${scope} from ${oldDraft} to ${destination.generatorId} · draft ${destination.draftId || '(default)'}? The previous draft will remain in place.`,rebind,true);
+            else await runRemoteAction(own, rebind);
+          })));
         }
         if (wd) {
-          td.append(button('Reconnect',async()=>connectWorkspace(w)),
-            button('Detach',()=>confirmAction('Detach this Binding and preserve the native draft?',async()=>
-              transitionWorkspace(w,'detach',{acknowledgeDirty:true},own))));
+          td.append(remoteButton('Reconnect',own,async()=>connectWorkspace(intent)),
+            markRemote(button('Detach',()=>confirmAction(`Detach ${scope} from ${oldDraft} and preserve the native draft?`,async()=>
+              transitionWorkspace(intent,'detach',{acknowledgeDirty:true},own),true))));
         }
-        td.append(button(w.paused?'Resume':'Pause',async()=>{
+        td.append(remoteButton(intent.paused?'Resume':'Pause',own,async()=>{
           await client.request('PATCH',`${ADMIN}/workspaces/${encodeURIComponent(id)}`,
-            {expectedRevision:w.revision,paused:!w.paused});
+            {expectedRevision:intent.revision,paused:!intent.paused});
           if (own===generation) await refresh();
         }));
         const policies=el('details');
         policies.append(el('summary','Permissions'));
         const values=permissionEditor(policies,Array.isArray(w.permissions)?w.permissions as string[]:[],v2Permissions);
-        policies.append(button('Save Workspace permissions',async()=>{
+        policies.append(remoteButton('Save Workspace permissions',own,async()=>{
           await client.request('PATCH',`${ADMIN}/workspaces/${encodeURIComponent(id)}`,{
-            expectedRevision:w.revision,permissions:values(),
+            expectedRevision:intent.revision,permissions:values(),
           });
           if (own===generation) await refresh();
         }));
@@ -1025,25 +1176,25 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         const other=choices.filter(item=>item.id!==w.connectorId);
         if (other.length) {
           const chosen=select('Destination Connector',other.map(item=>({value:str(item.id),label:str(item.label)})));
-          td.append(chosen.label,button(w.connectorId?'Transfer':'Assign Connector',async()=>{
+          td.append(chosen.label,markRemote(button(intent.connectorId?'Transfer':'Assign Connector',async()=>{
             const selected=other.find(item=>item.id===chosen.input.value);
             if (!selected) throw new Error('Choose a Connector.');
             const args={connectorId:selected.id,expectedDestinationConnectorRevision:selected.revision,acknowledgeDirty:dirty};
-            if (w.connectorId) confirmAction('Transfer to the selected Connector and leave the old native draft in place?',async()=>
-              transitionWorkspace(w,'transfer',args,own));
-            else if (dirty) confirmAction('Assign this Connector while preserving the previous draft?',async()=>transitionWorkspace(w,'assign',args,own));
-            else await transitionWorkspace(w,'assign',args,own);
-          }));
+            if (intent.connectorId) confirmAction(`Transfer ${scope} to ${str(selected.label, str(selected.id))} and preserve ${oldDraft}?`,async()=>
+              transitionWorkspace(intent,'transfer',args,own),true);
+            else if (dirty) confirmAction(`Assign ${scope} to ${str(selected.label, str(selected.id))} and preserve ${oldDraft}?`,async()=>transitionWorkspace(intent,'assign',args,own),true);
+            else await runRemoteAction(own, () => transitionWorkspace(intent,'assign',args,own));
+          })));
         }
-        if (w.connectorId) td.append(button('Unassign',()=>confirmAction('Remove this Connector assignment and preserve the draft?',async()=>
-          transitionWorkspace(w,'unassign',{acknowledgeDirty:true},own))));
-        if (w.transition && !mutationPending.has(id)) td.append(button('Cancel pending transition',()=>
-          confirmAction('Cancel this transition only after pending effects settle?',async()=>{
+        if (intent.connectorId) td.append(markRemote(button('Unassign',()=>confirmAction(`Unassign ${scope} and preserve ${oldDraft}?`,async()=>
+          transitionWorkspace(intent,'unassign',{acknowledgeDirty:true},own),true))));
+        if (intent.transition && !mutationPending.has(id)) td.append(markRemote(button('Cancel pending transition',()=>
+          confirmAction(`Cancel the pending transition for ${scope} after pending effects settle?`,async()=>{
             await client.request('POST',`${ADMIN}/workspaces/${encodeURIComponent(id)}/abort-transition`,
-              {expectedRevision:w.revision,transitionId:record(w.transition).id},{idempotencyKey:crypto.randomUUID()});
+              {expectedRevision:intent.revision,transitionId:record(intent.transition).id},{idempotencyKey:crypto.randomUUID()});
             v2Requests.delete(id);
             if (own===generation) await refresh();
-          })));
+          },true))));
       }},
     ],workspaces.items);
   }
@@ -1330,7 +1481,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     row.append(
       name.label,
       ...(v2 ? [ceilingPanel] : [target.label]),
-      button(v2?"Create Connector":"Create Agent", async () => {
+      remoteButton(v2?"Create Connector":"Create Agent", own, async () => {
         if (!name.input.value.trim() || !v2 && !target.input.value)
           throw new Error(v2?"Enter a Connector name.":"Enter a name and select an unassigned Workspace.");
         await client.request("POST", `${ADMIN}/${v2?'connectors':'agents'}`, {
@@ -1354,7 +1505,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
               const settings=el('details');
               settings.append(el('summary','Permission ceiling'));
               const permissions=permissionEditor(settings,Array.isArray(a.permissionCeiling)?a.permissionCeiling as string[]:[],v2Permissions);
-              settings.append(button('Save Connector ceiling',async()=>{
+              settings.append(remoteButton('Save Connector ceiling',own,async()=>{
                 await client.request('PATCH',`${ADMIN}/connectors/${encodeURIComponent(str(a.id))}`,{
                   expectedRevision:a.revision,permissionCeiling:permissions(),
                 });
@@ -1364,12 +1515,13 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             }
             const legacyWorkspace=workspaces.items.find(w=>w.id===a.workspaceId);
             if (v2 && a.contractVersion===1 && legacyWorkspace?.binding)
-              td.append(button('Upgrade to v2',()=>confirmAction('Preserve this Binding and require new OAuth consent on the same endpoint?',async()=>{
+              td.append(markRemote(button('Upgrade to v2',()=>confirmAction(
+                `Upgrade Connector ${str(a.label, str(a.id))} on Workspace ${str(legacyWorkspace.label, str(legacyWorkspace.id))}? Fresh consent is required for ${str(a.endpoint)}.`,async()=>{
                 await client.request('POST',`${ADMIN}/connectors/${encodeURIComponent(str(a.id))}/upgrade`,{
                   expectedRevision:a.revision,expectedWorkspaceRevision:legacyWorkspace.revision,acknowledgeReauthorization:true,
                 },{idempotencyKey:crypto.randomUUID()});
                 if (own===generation) await refresh();
-              })));
+              },true))));
           },
         },
         {
@@ -1404,7 +1556,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             td.append(label.label);
             actions(
               td,
-              button("Rename", async () => {
+              remoteButton("Rename", own, async () => {
                 await client.request(
                   "PATCH",
                   `${ADMIN}/${a.contractVersion===2?'connectors':'agents'}/${encodeURIComponent(str(a.id))}`,
@@ -1415,8 +1567,9 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
                 );
                 await refresh();
               }),
-              button(
+              remoteButton(
                 a.suspended ? "Resume Agent" : "Suspend Agent",
+                own,
                 async () => {
                   await client.request(
                     "PATCH",
@@ -1456,7 +1609,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       approvalPanel.replaceChildren();
       heading("Pending approvals", approvalPanel);
       p(
-        "This list refreshes automatically while Agents is open. Match the code, Client and callback before approving.",
+        "Verify the code, Connector, audience, client, callback and application permissions before approving.",
         approvalPanel,
         "muted",
       );
@@ -1466,10 +1619,12 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             key: "code",
             label: "Request",
             render(a, td) {
+              const connector = agents.items.find(item => item.id === a.agentId);
               p(`${str(a.kind)} · ${str(a.code)}`, td);
-              p(`Agent ${str(a.agentId)} · Workspace ${str(a.workspaceId)}`, td);
+              p(`Connector ${str(connector?.label, str(a.agentId, "Unknown"))} · ${str(a.agentId)}`, td);
+              if (a.workspaceId) p(`Workspace ${str(a.workspaceId)}`, td);
               p(
-                `Client ${str(a.clientId)} · expires ${str(a.expiresAt)}`,
+                `Client ${str(a.clientId, "Unknown")} · expires ${new Date(num(a.expiresAt)).toLocaleString()}`,
                 td,
                 "muted",
               );
@@ -1479,9 +1634,14 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             key: "digest",
             label: "Exact authorization",
             render(a, td) {
+              if (a.kind === "oauth") {
+                p(`Audience: ${str(a.audience, "Unavailable")}`, td);
+                p(`Application permission ceiling: ${Array.isArray(a.permissionSnapshot)
+                  ? arrayStrings(a.permissionSnapshot).join(", ") || "None" : "Unavailable"}`, td);
+              }
               p(`Redirect: ${str(a.redirectUri)}`, td);
               p(
-                `Scope: ${Array.isArray(a.scope) ? arrayStrings(a.scope).join(", ") : str(a.scope)}`,
+                `OAuth scopes: ${Array.isArray(a.scope) ? arrayStrings(a.scope).join(", ") : str(a.scope)}`,
                 td,
               );
               p(`Digest: ${str(a.digest)}`, td);
@@ -1494,29 +1654,47 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             label: "Decision",
             render(a, td) {
               p(str(a.state), td);
+              const connector = agents.items.find(item => item.id === a.agentId);
+              const requiresExact = a.kind === "oauth" && v2;
+              const valid = !requiresExact || (
+                !!connector && connector.contractVersion === 2 &&
+                typeof a.audience === "string" && !!a.audience &&
+                a.audience === connector.endpoint && !!str(a.clientId) && !!str(a.redirectUri) &&
+                !!str(a.code) && Array.isArray(a.permissionSnapshot) &&
+                a.permissionSnapshot.every(permission => v2Permissions.some(accepted => accepted === permission)) &&
+                Number.isSafeInteger(a.revision) && /^[a-f0-9]{64}$/.test(str(a.digest))
+              );
+              if (!valid) p("Approval blocked because the exact authorization details could not be verified.", td);
+              const approval = {
+                id: str(a.id), expectedRevision: num(a.revision) || approvals.revision,
+                digest: str(a.digest), expiresAt: num(a.expiresAt),
+              };
               actions(
                 td,
-                button("Approve exact request", async () => {
+                markRemote(button("Approve exact request", () => runRemoteAction(own, async () => {
+                  if (!valid || approval.expiresAt <= Date.now()) throw new Error("Authorization request expired or changed.");
                   await client.request(
                     "POST",
-                    `${ADMIN}/approvals/${encodeURIComponent(str(a.id))}/decision`,
+                    `${ADMIN}/approvals/${encodeURIComponent(approval.id)}/decision`,
                     {
-                      expectedRevision: num(a.revision) || approvals.revision,
-                      digest: str(a.digest),
+                      expectedRevision: approval.expectedRevision,
+                      digest: approval.digest,
                       decision: "approve",
                     },
                   );
                   await refresh();
-                }),
-                button(
+                })), !valid),
+                remoteButton(
                   "Deny",
+                  own,
                   async () => {
+                    if (approval.expiresAt <= Date.now()) throw new Error("Authorization request expired.");
                     await client.request(
                       "POST",
-                      `${ADMIN}/approvals/${encodeURIComponent(str(a.id))}/decision`,
+                      `${ADMIN}/approvals/${encodeURIComponent(approval.id)}/decision`,
                       {
-                        expectedRevision: num(a.revision) || approvals.revision,
-                        digest: str(a.digest),
+                        expectedRevision: approval.expectedRevision,
+                        digest: approval.digest,
                         decision: "deny",
                       },
                     );
@@ -1530,6 +1708,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         ],
         pending,
         approvalPanel,
+        false,
       );
     };
     const showApprovalsFailure = (error: unknown) => {
@@ -1600,51 +1779,38 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
                   p("Revoked — no further authorization", td, "muted");
                   return;
                 }
-                const revoke = button("Revoke Grant", () => {
-                  const panel = el("div", undefined, "confirm");
-                  p(
-                    `Revoke this Client Grant for ${str(g.clientId)}? The connected MCP client loses access. This does not delete the Workspace or generator.`,
-                    panel,
+                const grant = { id: str(g.id), revision: num(g.revision),
+                  clientId: str(g.clientId), connectorId: str(g.agentId) };
+                const connector = agents.items.find(item => item.id === grant.connectorId);
+                const revoke = markRemote(button("Revoke Grant", () => {
+                  confirmAction(
+                    `Revoke Grant ${grant.id} for ${grant.clientId} on Connector ${str(connector?.label, grant.connectorId)}?`,
+                    async () => {
+                      const key = crypto.randomUUID();
+                      let uncertain: unknown;
+                      try {
+                        const outcome = record(await client.request("POST",
+                          `${ADMIN}/grants/${encodeURIComponent(grant.id)}/revoke`,
+                          { expectedRevision: grant.revision }, { idempotencyKey: key }));
+                        if (outcome.state !== "revoked") throw new Error("Gateway did not confirm Grant revocation.");
+                      } catch (error) {
+                        uncertain = error;
+                      }
+                      let current: Row | undefined;
+                      try {
+                        const latest = await loadList(`${ADMIN}/grants`);
+                        current = latest.items.find(item => item.id === grant.id);
+                      } catch {
+                        throw new Error(`Grant revocation unverified. Refresh Grants to inspect the original request ${key}.`);
+                      }
+                      if (current?.state !== "revoked")
+                        throw uncertain ?? new Error(`Grant revocation unverified. Inspect request ${key} before taking another action.`);
+                      if (own !== generation) return;
+                      await refresh();
+                      announce("Grant revoked and verified in the Registry. Reauthorize the connector to regain access.");
+                    }, true, "Confirm revoke", td,
                   );
-                  const confirm = button("Confirm revoke", async () => {
-                    confirm.disabled = true;
-                    const endpoint = `${ADMIN}/grants/${encodeURIComponent(str(g.id))}/revoke`;
-                    let uncertain: unknown;
-                    try {
-                      const outcome = record(await client.request("POST", endpoint, {
-                        expectedRevision: num(g.revision),
-                      }));
-                      if (outcome.state !== "revoked")
-                        throw new Error("Gateway did not confirm Grant revocation.");
-                    } catch (error) {
-                      // Reconcile a potentially committed POST by reading the
-                      // authoritative state. Never replay an uncertain write.
-                      uncertain = error;
-                    }
-                    let current: Row | undefined;
-                    try {
-                      const grants = await loadList(`${ADMIN}/grants`);
-                      current = grants.items.find((item) => item.id === g.id);
-                    } catch {
-                      panel.replaceChildren();
-                      p("Revocation outcome unknown: server readback failed. Refresh Grants to reconcile; do not submit the POST again.", panel);
-                      throw new Error("Grant revocation unverified. Refresh Grants; do not retry the uncertain write.");
-                    }
-                    if (current?.state !== "revoked") {
-                      panel.replaceChildren();
-                      p("Grant still appears active or has changed. Refresh Grants and inspect its revision before attempting another action.", panel);
-                      throw uncertain ?? new Error(
-                        "Grant revocation not verified. Do not repeat an uncertain write.",
-                      );
-                    }
-                    await refresh();
-                    announce("Grant revoked and verified in the Registry. Reauthorize the connector to regain access.");
-                  }, "danger");
-                  panel.append(confirm, button("Cancel", () => panel.remove()));
-                  td.append(panel);
-                  revoke.disabled = true;
-                  confirm.focus();
-                }, "danger");
+                }, "danger"));
                 td.append(revoke);
               },
             },
@@ -3135,6 +3301,8 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   function close() {
     if (!opened) return;
     stopApprovalRefresh();
+    dismissConfirmation();
+    authority = undefined;
     viewAbort?.abort();
     opened = false;
     ++generation;
@@ -3251,6 +3419,8 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     setStatus,
     destroy() {
       stopApprovalRefresh();
+      dismissConfirmation();
+      authority = undefined;
       destroyed = true;
       opened = false;
       ++generation;

@@ -1,11 +1,12 @@
 import { nextGeneration } from '../../../packages/contracts/src/target.js';
-import { NativeAdapter } from './adapter.js';
+import { NativeAdapter, NativeEffectNotInvoked } from './adapter.js';
 import { BoundObjectStore, resolveBindingStorage, type BindingStorageIdentity, type BindingStorageScope } from './binding-storage.js';
 import { ChunkStore } from './storage.js';
 import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, digest, equalIdentity, isUint8Array, snapshotRevision, utf8, type FileWrite, type KeyValueStore, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
 export interface WorkspaceSnapshot extends NativeSnapshot { nativeRevision: string; generation: number }
 interface StoredSource { version: 1; identity: NativeIdentity; files: Record<string, string>; revision: string; createdAt: number; label: string; pinned: boolean }
 interface LocalState { version: 1; files: Record<string, string>; lastHash: string; generation: number }
+type AssertOperationCurrent = () => void | Promise<void>;
 interface Journal { id: string; state: 'INTENT' | 'DISPATCHED' | 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN' | 'REJECTED'; paths: string[]; baseRevision: string; checkpointId?: string; kind?: 'SOURCE'|'IMPORT'|'SAVE'; createdAt: number; resolvedByOperator?: boolean; inspectedRevision?: string; resolvedAt?: number; operatorEvidence?: string;
   gatewayOperationId?: string; plannedHash?: string; plannedPaths?: Record<string,string|null>; identity?: NativeIdentity;
   resolvedByReadback?: boolean; resolutionMode?: 'VERIFIED_INTENDED_BYTES'|'ADOPTED_CURRENT_SAVED_SOURCE'|'ADOPTED_CURRENT_DRAFT'|'ADOPTED_CURRENT_IMPORT_CACHE'|'SUPERSEDED_BINDING';
@@ -92,11 +93,12 @@ export class VirtualFileSystem {
   getSnapshot(): Promise<WorkspaceSnapshot> { return this.snapshot(); }
   async list(path = ''): Promise<string[]> { if (path && !['src', 'scratch', 'imports'].includes(path)) canonicalPath(path); const files = Object.keys((await this.snapshot()).files).sort(); return path ? files.filter(name => name === path || name.startsWith(`${path.replace(/\/$/, '')}/`)) : files; }
   async read(path: string): Promise<Uint8Array> { canonicalPath(path); const bytes = (await this.snapshot()).files[path]; if (!bytes) throw new BrowserError('FILE_NOT_FOUND', 'File does not exist in assigned Workspace.'); return bytes.slice(); }
-  async writeLocalBatch(writes: FileWrite[], expectedLocalRevision: string, gatewayOperationId?: string) {
-    return this.writePrivateFiles(writes, expectedLocalRevision, gatewayOperationId, 'SOURCE');
+  async writeLocalBatch(writes: FileWrite[], expectedLocalRevision: string, gatewayOperationId?: string,
+      assertOperationCurrent?: AssertOperationCurrent) {
+    return this.writePrivateFiles(writes, expectedLocalRevision, gatewayOperationId, 'SOURCE', assertOperationCurrent);
   }
   async publishImportedFiles(slugs: readonly string[], files: Record<string,Uint8Array>, expectedLocalRevision: string,
-      gatewayOperationId: string) {
+      gatewayOperationId: string, assertOperationCurrent?: AssertOperationCurrent) {
     const prefixes = slugs.map(slug => {
       if (!/^[a-z0-9][a-z0-9-]{0,119}$/.test(slug)) throw new BrowserError('INVALID_INPUT', 'Invalid import Slug.');
       return 'imports/' + slug + '/';
@@ -110,14 +112,15 @@ export class VirtualFileSystem {
       if (!prefixes.some(prefix=>path.startsWith(prefix))) throw new BrowserError('PATH_DENIED', 'Import outside the requested public namespace.');
       writes.push({path,bytes});
     }
-    return this.writePrivateFiles(writes, expectedLocalRevision, gatewayOperationId, 'IMPORT');
+    return this.writePrivateFiles(writes, expectedLocalRevision, gatewayOperationId, 'IMPORT', assertOperationCurrent);
   }
   private writePrivateFiles(writes: FileWrite[], expectedLocalRevision: string, gatewayOperationId: string | undefined,
-      kind: 'SOURCE' | 'IMPORT') {
+      kind: 'SOURCE' | 'IMPORT', assertOperationCurrent?: AssertOperationCurrent) {
     return this.serial(async () => {
       await this.assertPublication();
       const scope = this.scope;
-      if (!scope) throw new BrowserError('INCOMPATIBLE_VERSION', 'Binding-local write requires a scoped store.');
+      if (!scope || !(this.chunks instanceof BoundObjectStore))
+        throw new BrowserError('INCOMPATIBLE_VERSION', 'Binding-local write requires a scoped store.');
       const old = await this.localView();
       if (old.revision.value !== expectedLocalRevision)
         throw new BrowserError('STALE_REVISION', 'Private files changed before publication.');
@@ -146,9 +149,10 @@ export class VirtualFileSystem {
       await this.store.set(key, journal);
       let started = false;
       try {
-        await this.assertPublication();
-        started = true;
-        await this.chunks.put('local', utf8.encode(JSON.stringify(local)));
+        await this.chunks.put('local', utf8.encode(JSON.stringify(local)), async () => {
+          await assertOperationCurrent?.();
+          started = true;
+        });
         const updated = await this.localView();
         for (const write of writes) {
           const file = updated.files.find(file => file.path === write.path);
@@ -159,16 +163,21 @@ export class VirtualFileSystem {
         void this.serial(() => this.trim()).catch(() => undefined);
         return updated.revision;
       } catch (error) {
-        const known = !started || error instanceof BrowserError && error.code === 'QUOTA_EXCEEDED';
-        await this.store.set(key, {...journal, state: known ? 'REJECTED' : 'UNKNOWN'}).catch(() => undefined);
-        if (known) throw error;
+        const known = !started;
+        const persisted = await this.store.set(key, {...journal, state: known ? 'REJECTED' : 'UNKNOWN'})
+          .then(() => true, () => false);
+        if (known && persisted) throw error;
         throw new BrowserError('EFFECT_UNKNOWN', 'Private file publication requires reconciliation.');
       }
     });
   }
-  async writeBatch(writes: FileWrite[], expectedRevision?: string, gatewayOperationId?: string): Promise<MutationResult> { return this.serial(async () => this.commit(writes, expectedRevision, gatewayOperationId)); }
+  async writeBatch(writes: FileWrite[], expectedRevision?: string, gatewayOperationId?: string,
+      assertOperationCurrent?: AssertOperationCurrent): Promise<MutationResult> {
+    return this.serial(() => this.commit(writes, expectedRevision, gatewayOperationId, assertOperationCurrent));
+  }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const next = this.tail.then(fn, fn); this.tail = next.catch(() => undefined); return next; }
-  private async commit(writes: FileWrite[], expectedRevision?: string, gatewayOperationId?: string): Promise<MutationResult> {
+  private async commit(writes: FileWrite[], expectedRevision?: string, gatewayOperationId?: string,
+      assertOperationCurrent?: AssertOperationCurrent): Promise<MutationResult> {
     await this.assertPublication();
     await this.reconcileRetainedUnlocked();
     // An old uncertain operation is *not* a Workspace-wide lock. The current
@@ -210,17 +219,28 @@ export class VirtualFileSystem {
     const nativeWrites = writes.filter(w => !w.path.startsWith('scratch/'));
     let nativeResult: MutationResult = { status: 'SUCCEEDED', revision: before.nativeRevision, committed: [] };
     let dispatched = false;
+    const assertNativeEffect = this.scope || assertOperationCurrent ? async () => {
+      await this.assertPublication();
+      await assertOperationCurrent?.();
+    } : undefined;
     try {
       if (nativeWrites.length) nativeResult = await this.adapter.applyFiles(nativeWrites, before.nativeRevision, async () => {
         // A failed durable dispatch marker prevents *all* native effects.
+        await assertNativeEffect?.();
         await this.store.set(key,{...journal,state:'DISPATCHED'});
         journal.state='DISPATCHED'; dispatched = true;
-      }, this.scope ? () => this.assertPublication() : undefined);
+      }, assertNativeEffect);
     } catch (error) {
-      journal.state = dispatched ? 'UNKNOWN' : 'REJECTED';
-      await this.store.set(key,journal);
-      if (!dispatched) throw error;
+      const noNativeEffect = error instanceof NativeEffectNotInvoked || !dispatched;
+      journal.state = noNativeEffect ? 'REJECTED' : 'UNKNOWN';
+      try { await this.store.set(key,journal); }
+      catch {
+        if (!dispatched) throw error;
+        throw new BrowserError('EFFECT_UNKNOWN','Native dispatch journal could not be verified after failed publication.');
+      }
+      if (noNativeEffect) throw error instanceof NativeEffectNotInvoked ? error.cause : error;
       nativeResult = {status:'UNKNOWN',revision:before.nativeRevision,committed:[],
+        uncertainPaths: nativeWrites.map(write => write.path),
         error:{code:'EFFECT_UNKNOWN',message:'Native effect was dispatched; inspect current bytes before retrying.',
           recovery:'No automatic repeat. Readback will reconcile exact intended bytes.'}};
     }
@@ -242,11 +262,14 @@ export class VirtualFileSystem {
         } catch { /* Retain the original UNKNOWN/PARTIAL without losing the journal. */ }
       }
       journal.state=nativeResult.status;
-      await this.store.set(key,journal);
+      await this.store.set(key,journal).catch(() => undefined);
       let currentRevision=before.revision;
       try { currentRevision=(await this.snapshot()).revision; } catch { /* Readback unavailable. */ }
       return {...nativeResult,revision:currentRevision};
     }
+    const privatePaths = writes.filter(write => write.path.startsWith('scratch/')).map(write => write.path);
+    let privatePublicationAttempted = false;
+    let privatePublicationVerified = false;
     try {
       const afterNative = await this.adapter.snapshot();
       const expectedNative = { ...before.files };
@@ -259,11 +282,21 @@ export class VirtualFileSystem {
         for (const w of writes.filter(w => w.path.startsWith('scratch/')))
           if (w.bytes === null) delete local.files[w.path]; else local.files[w.path] = bytesToBase64(w.bytes);
         if (this.scope) local.generation = nextGeneration(local.generation);
-        await this.chunks.put('local', utf8.encode(JSON.stringify(local)));
+        const expectedLocal = utf8.encode(JSON.stringify(local));
+        if (this.chunks instanceof BoundObjectStore) {
+          await this.chunks.put('local', expectedLocal, async () => {
+            await assertOperationCurrent?.();
+            privatePublicationAttempted = true;
+          });
+        } else {
+          privatePublicationAttempted = true;
+          await this.chunks.put('local', expectedLocal);
+        }
       }
       const after = await this.snapshot();
       if (after.revision.split(':')[1] !== plannedHash || !(await this.matchesPlannedPaths(after,journal)))
         throw new BrowserError('STALE_REVISION', 'Workspace readback differs from planned complete source.');
+      privatePublicationVerified = true;
       journal.state = 'SUCCEEDED'; journal.resolvedByReadback=true;
       journal.resolutionMode='VERIFIED_INTENDED_BYTES'; journal.inspectedRevision=after.revision;
       journal.resolvedAt=Date.now();
@@ -273,8 +306,10 @@ export class VirtualFileSystem {
         ...(this.scope?{nativeRevision:after.nativeRevision}:{}) };
     } catch (error) {
       journal.state = nativeWrites.length ? 'PARTIAL' : 'UNKNOWN';
-      await this.store.set(key,journal);
-      return { status: journal.state, revision: before.revision, committed: nativeResult.committed,
+      await this.store.set(key,journal).catch(() => undefined);
+      return { status: journal.state, revision: before.revision,
+        committed: privatePublicationVerified ? [...nativeResult.committed, ...privatePaths] : nativeResult.committed,
+        ...(privatePublicationAttempted && !privatePublicationVerified ? {uncertainPaths: privatePaths} : {}),
         error: { code: 'PARTIAL_EFFECT', message: 'Native bytes or durable terminal record could not be verified.',
           recovery: 'The journal retains planned byte hashes. Read-only reconciliation can settle an exact match.' } };
     }
