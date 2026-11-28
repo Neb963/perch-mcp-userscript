@@ -1,5 +1,21 @@
 # Implementation ledger
 
+
+## R00–R05 v0.3 conformance remediation
+
+Baseline `298f3b9619335364c668a69b6f04570ae530fcab` (tree `c07b3e7e25ea0e4d063ee11435cc58e3d524059b`), same tree as audited PR #24 head. Work on `repair/v0.3-conformance`. [Authority](docs/v0.3/REMEDIATION-AUTHORITY.md) and [verification index](docs/verification/v0.3-remediation/REQUIREMENT-TRACEABILITY.md).
+
+| Phase | Verification gate | State |
+| --- | --- | --- |
+| R00 | Pin authority and baseline, build an atomic requirement inventory, rerun the offline suite, replay the P0 reports, and record measured baselines. | Baseline verified |
+| R01 | Preflight full batches, fence execution at effect boundaries, preserve receipt uncertainty, and bind operator actions and consent to exact intent. | In progress |
+| R02 | Recover transfers and historical local state, deduplicate immutable storage, and exercise publication faults. | Pending |
+| R03 | Qualify permanent OAuth, clean installation, all feasible development behavior, and the local-first manager. | Pending |
+| R04 | Meter comparable workflows and quotas, calibrate admission, and qualify long finite access lifetimes. | Pending |
+| R05 | Rebuild and test the exact candidate, reconcile every requirement, and verify artifact bytes and the unmerged PR. | Pending |
+
+Local Chromium and workerd fixtures use synthetic data. Production, provider, live OAuth and browser acceptance, deployment, preview, and merge are reserved for the operator.
+
 ## V00–V10 development contract (2026-11-27)
 
 Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179db13df0112c15f7e7942dca198e7d0486dbe`, equal to the merged v0.2.0 qualification head `3fd1e48630737a1defd96484a3af3d3d881c84a1`. The working branch is `development/v0.3.0`. Use local synthetic fixtures and local workerd. Production and preview calls, deployment, real browser/provider tests, production readiness dispatch and merging are operator-only.

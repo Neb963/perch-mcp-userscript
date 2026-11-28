@@ -1,0 +1,428 @@
+▶ F01 malformed later actions are rejected at ingress and browser preflight before effects
+  ✖ invalid base64 (18.156383ms)
+  ✖ invalid Unicode (4.415199ms)
+  ✖ mutually exclusive preconditions (2.119386ms)
+  ✖ missing precondition (1.802629ms)
+  ✖ duplicate pathname (1.481705ms)
+  ✖ case collision (1.337147ms)
+  ✖ prefix collision (1.705372ms)
+  ✖ cross-namespace rename (3.478747ms)
+  ✖ unsupported URL scheme (10.823554ms)
+✖ F01 malformed later actions are rejected at ingress and browser preflight before effects (47.962829ms)
+✖ F04 deadline crossing during durable checkpoint stops the first native setter (20.411645ms)
+✖ F04 operation cancellation preserves the first verified setter and stops the next (6.513013ms)
+✖ F02 stale destination before transfer publication leaves a safely abortable transfer (3.72638ms)
+✖ F03 an earlier local-only Epoch Hold is discoverable from ordinary recovery after failed adoption (3.743466ms)
+✖ F01 invalid batch final action is rejected before durable admission through local SDK (1183.767979ms)
+✖ F05 an issued receipt survives lost admission and status responses through local SDK (1137.712202ms)
+ℹ tests 16
+ℹ suites 0
+ℹ pass 0
+ℹ fail 16
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3421.845441
+
+✖ failing tests:
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:4421
+✖ invalid base64 (18.156383ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+  +   ingressAccepted: true,
+  +   observed: [
+  +     'page_eval'
+  +   ],
+  +   status: 'PARTIAL'
+  -   ingressAccepted: false,
+  -   observed: [],
+  -   status: 'REJECTED'
+    }
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:107:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:83:52)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { ingressAccepted: true, observed: [ 'page_eval' ], status: 'PARTIAL' },
+    expected: { ingressAccepted: false, observed: [], status: 'REJECTED' },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:4421
+✖ invalid Unicode (4.415199ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+  +   ingressAccepted: true,
+  +   observed: [
+  +     'page_eval'
+  +   ],
+  +   status: 'PARTIAL'
+  -   ingressAccepted: false,
+  -   observed: [],
+  -   status: 'REJECTED'
+    }
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:107:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:83:52)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { ingressAccepted: true, observed: [ 'page_eval' ], status: 'PARTIAL' },
+    expected: { ingressAccepted: false, observed: [], status: 'REJECTED' },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:4421
+✖ mutually exclusive preconditions (2.119386ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+  +   ingressAccepted: true,
+  +   observed: [
+  +     'page_eval'
+  +   ],
+  +   status: 'PARTIAL'
+  -   ingressAccepted: false,
+  -   observed: [],
+  -   status: 'REJECTED'
+    }
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:107:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:83:52)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { ingressAccepted: true, observed: [ 'page_eval' ], status: 'PARTIAL' },
+    expected: { ingressAccepted: false, observed: [], status: 'REJECTED' },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:4421
+✖ missing precondition (1.802629ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+  +   ingressAccepted: true,
+  +   observed: [
+  +     'page_eval'
+  +   ],
+  +   status: 'PARTIAL'
+  -   ingressAccepted: false,
+  -   observed: [],
+  -   status: 'REJECTED'
+    }
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:107:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:83:52)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { ingressAccepted: true, observed: [ 'page_eval' ], status: 'PARTIAL' },
+    expected: { ingressAccepted: false, observed: [], status: 'REJECTED' },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:4421
+✖ duplicate pathname (1.481705ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+  +   ingressAccepted: true,
+  +   observed: [
+  +     'page_eval'
+  +   ],
+  +   status: 'PARTIAL'
+  -   ingressAccepted: false,
+  -   observed: [],
+  -   status: 'REJECTED'
+    }
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:107:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:83:52)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { ingressAccepted: true, observed: [ 'page_eval' ], status: 'PARTIAL' },
+    expected: { ingressAccepted: false, observed: [], status: 'REJECTED' },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:4421
+✖ case collision (1.337147ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+  +   ingressAccepted: true,
+  +   observed: [
+  +     'page_eval'
+  +   ],
+  +   status: 'PARTIAL'
+  -   ingressAccepted: false,
+  -   observed: [],
+  -   status: 'REJECTED'
+    }
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:107:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:83:52)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { ingressAccepted: true, observed: [ 'page_eval' ], status: 'PARTIAL' },
+    expected: { ingressAccepted: false, observed: [], status: 'REJECTED' },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:4421
+✖ prefix collision (1.705372ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+  +   ingressAccepted: true,
+  +   observed: [
+  +     'page_eval'
+  +   ],
+  +   status: 'PARTIAL'
+  -   ingressAccepted: false,
+  -   observed: [],
+  -   status: 'REJECTED'
+    }
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:107:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:83:52)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { ingressAccepted: true, observed: [ 'page_eval' ], status: 'PARTIAL' },
+    expected: { ingressAccepted: false, observed: [], status: 'REJECTED' },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:4421
+✖ cross-namespace rename (3.478747ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+  +   ingressAccepted: true,
+  +   observed: [
+  +     'page_eval'
+  +   ],
+  +   status: 'PARTIAL'
+  -   ingressAccepted: false,
+  -   observed: [],
+  -   status: 'REJECTED'
+    }
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:107:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:83:52)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { ingressAccepted: true, observed: [ 'page_eval' ], status: 'PARTIAL' },
+    expected: { ingressAccepted: false, observed: [], status: 'REJECTED' },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:4421
+✖ unsupported URL scheme (10.823554ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+  +   ingressAccepted: true,
+  +   observed: [
+  +     'page_eval'
+  +   ],
+  +   status: 'PARTIAL'
+  -   ingressAccepted: false,
+  -   observed: [],
+  -   status: 'REJECTED'
+    }
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:107:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:83:52)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { ingressAccepted: true, observed: [ 'page_eval' ], status: 'PARTIAL' },
+    expected: { ingressAccepted: false, observed: [], status: 'REJECTED' },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:5724
+✖ F04 deadline crossing during durable checkpoint stops the first native setter (20.411645ms)
+  AssertionError [ERR_ASSERTION]: {"status":"SUCCEEDED","revision":"2:8d8462d02dce5a6187bcd37d7cc0f115492180ce8fad8248b52ce7524b80324e","committed":["src/asset"],"nativeRevision":"8d8462d02dce5a6187bcd37d7cc0f115492180ce8fad8248b52ce7524b80324e","sourceRevision":{"value":"8d8462d02dce5a6187bcd37d7cc0f115492180ce8fad8248b52ce7524b80324e","verified":true},"localRevision":{"value":"0:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","verified":true}}
+  + actual - expected
+  
+  + [
+  +   'asset'
+  + ]
+  - []
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:120:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: [ 'asset' ],
+    expected: [],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:6366
+✖ F04 operation cancellation preserves the first verified setter and stops the next (6.513013ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+      committed: [
+        'src/first',
+  +     'src/second'
+      ],
+      nativeWrites: [
+        'first',
+  +     'second'
+      ],
+  +   status: 'SUCCEEDED'
+  -   status: 'PARTIAL'
+    }
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:133:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { nativeWrites: [ 'first', 'second' ], status: 'SUCCEEDED', committed: [ 'src/first', 'src/second' ] },
+    expected: { nativeWrites: [ 'first' ], status: 'PARTIAL', committed: [ 'src/first' ] },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:6973
+✖ F02 stale destination before transfer publication leaves a safely abortable transfer (3.72638ms)
+  Error [BrowserError]: Transfer commit requires reconciliation.
+      at FilesystemV2.transfer (./apps/userscript/src/filesystem-v2.ts:348:45) {
+    code: 'EFFECT_UNKNOWN',
+    recovery: 'Inspect workspace_status and reconcile before retrying.'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:7716
+✖ F03 an earlier local-only Epoch Hold is discoverable from ordinary recovery after failed adoption (3.743466ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+  + []
+  - [
+  -   'held'
+  - ]
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:164:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [],
+    expected: [ 'held' ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:10199
+✖ F01 invalid batch final action is rejected before durable admission through local SDK (1183.767979ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+      effectState: 'NONE',
+  +   operationId: '712379e0-35f6-43e9-b229-85bbb6f62b6e',
+  +   phase: 'ADMITTED'
+  -   operationId: null,
+  -   phase: 'REJECTED'
+    }
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:206:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { phase: 'ADMITTED', effectState: 'NONE', operationId: '712379e0-35f6-43e9-b229-85bbb6f62b6e' },
+    expected: { phase: 'REJECTED', effectState: 'NONE', operationId: null },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/remediation-execution-baseline.test.ts:1:10771
+✖ F05 an issued receipt survives lost admission and status responses through local SDK (1137.712202ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+      admission: [
+  +     'REJECTED',
+  +     'NONE',
+  +     undefined
+  -     'UNKNOWN',
+  -     'UNKNOWN',
+  -     'k2.1795824274301.6b759653-8eff-4b32-9204-e6bebea898ce'
+      ],
+      status: [
+  +     'REJECTED',
+  +     'NONE',
+  +     null
+  -     'UNKNOWN',
+  -     'UNKNOWN',
+  -     'c5ccd7aa-81b5-4cf5-9e3a-af98313255ab'
+      ]
+    }
+  
+      at TestContext.<anonymous> (./tests/unit/remediation-execution-baseline.test.ts:233:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { admission: [ 'REJECTED', 'NONE', undefined ], status: [ 'REJECTED', 'NONE', null ] },
+    expected: { admission: [ 'UNKNOWN', 'UNKNOWN', 'k2.1795824274301.6b759653-8eff-4b32-9204-e6bebea898ce' ], status: [ 'UNKNOWN', 'UNKNOWN', 'c5ccd7aa-81b5-4cf5-9e3a-af98313255ab' ] },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }

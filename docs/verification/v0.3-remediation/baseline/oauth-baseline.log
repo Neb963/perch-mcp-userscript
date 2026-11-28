@@ -1,0 +1,10 @@
+{"kind":"F16-baseline","accessTTL":900,"registryGrantTTL":2592000,"sdkGrantTTL":2592000,"dynamicClientTTL":7776000,"suspendRefresh":"invalid_grant","resumeRefresh":"OK"}
+✔ F16 baseline: idle credential expiry and suspension classified as invalid_grant (1327.699312ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2013.897639
