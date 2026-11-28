@@ -1,5 +1,8 @@
 import { newQuickJSWASMModuleFromVariant, type QuickJSHandle, type QuickJSDeferredPromise } from 'quickjs-emscripten-core';
 import variant from '@jitl/quickjs-singlefile-browser-release-sync';
+import { moduleSpecifierPattern } from '../../../packages/contracts/src/compute.js';
+import { pathMatchesRules } from '../../../packages/contracts/src/paths.js';
+import { BrowserError } from './native-types.js';
 
 export interface ComputeWrite { path: string; bytes: Uint8Array | null }
 export interface ComputeFileBroker {
@@ -11,11 +14,18 @@ export interface ComputeFileBroker {
 export interface ComputeToolBroker {
   call(name: string, args: Record<string, unknown>, context: { signal: AbortSignal; deadline: number }): Promise<unknown>;
 }
+interface ComputeFileAccess {
+  readonly read: readonly string[];
+  readonly write: readonly string[];
+  readonly maxReads: number;
+  readonly maxWrites: number;
+}
 export interface ComputeOptions {
   js: string;
   timeoutMs?: number;
   signal?: AbortSignal;
   files: ComputeFileBroker;
+  fileAccess?: ComputeFileAccess;
   tools?: ComputeToolBroker;
   /** Only already inspected, version-pinned modules. No ambient module networking. */
   modules?: Readonly<Record<string, string>>;
@@ -46,11 +56,18 @@ function json(value: unknown): string {
 }
 function knownNoEffect(error: unknown): boolean {
   const e = error as { code?: unknown; effectState?: unknown } | null;
-  if (e?.effectState === 'NONE') return true;
+  if (e?.effectState !== undefined) return e.effectState === 'NONE';
   return ['STALE_REVISION', 'SCOPE_DENIED', 'PATH_DENIED', 'INVALID_INPUT', 'LIMIT_EXCEEDED', 'TAB_BUSY', 'BINDING_MISMATCH', 'STALE_EPOCH', 'TAB_OFFLINE', 'UNSUPPORTED_INTERFACE'].includes(String(e?.code));
 }
-function safeError(error: unknown): { code: string; message: string } {
-  return error instanceof ExecutionError ? { code: error.code, message: error.message.slice(0, 500) } : { code: 'PROVIDER_REJECTED', message: 'The bounded Workspace broker rejected this operation.' };
+function safeError(error: unknown, effectCapable = false): {
+  code: string; message: string; effectState: ExecutionError['effectState'];
+} {
+  if (error instanceof ExecutionError)
+    return {code:error.code, message:error.message.slice(0, 500), effectState:error.effectState};
+  const code = error instanceof BrowserError ? error.code : 'PROVIDER_REJECTED';
+  const effectState = code === 'PARTIAL_EFFECT' ? 'PARTIAL' : code === 'EFFECT_UNKNOWN' ||
+    effectCapable && !knownNoEffect(error) ? 'UNKNOWN' : 'NONE';
+  return {code, message:'The bounded Workspace broker rejected this operation.', effectState};
 }
 function bytes(value: unknown): Uint8Array {
   if (!Array.isArray(value) || value.length > MAX_MESSAGE_BYTES || value.some(x => !Number.isInteger(x) || x < 0 || x > 255)) throw new ExecutionError('INVALID_INPUT', 'File bytes must be an array of integers from 0 to 255.');
@@ -67,7 +84,7 @@ const bootstrap = `
   globalThis.fs = Object.freeze({
     readTextFile: p => invoke('fs','readTextFile',[p]), readFile: async p => new Uint8Array(await invoke('fs','readFile',[p])),
     writeTextFile: (p,t) => invoke('fs','writeTextFile',[p,t]), writeFile: (p,b) => invoke('fs','writeFile',[p,Array.from(b)]),
-    list: p => invoke('fs','list',[p]), stat: p => invoke('fs','stat',[p]),
+    list: p => invoke('fs','list',[p]), deleteFile: p => invoke('fs','deleteFile',[p]), stat: p => invoke('fs','stat',[p]),
     rename: (a,b) => invoke('fs','rename',[a,b]), delete: p => invoke('fs','delete',[p])
   });
   globalThis.tools = Object.freeze(Object.fromEntries(${JSON.stringify([...CHILD_TOOLS])}.map(name => [name, args => invoke('tool',name,[args])])));
@@ -84,7 +101,9 @@ export async function executeCompute(options: ComputeOptions): Promise<ComputeRe
   const maxStaged = options.maxStagedBytes ?? 2 * 1024 * 1024;
   if (!Number.isInteger(maxStaged) || maxStaged < 1 || maxStaged > 16 * 1024 * 1024) throw new ExecutionError('INVALID_INPUT', 'Compute staging budget must be 1 byte–16 MiB.');
   const modules = options.modules ?? {};
-  if (Object.keys(modules).length > 32 || Object.entries(modules).some(([id, source]) => !/^[A-Za-z0-9@/_.-]+@[0-9]+\.[0-9]+\.[0-9]+$/.test(id) || typeof source !== 'string' || textEncoder.encode(source).byteLength > MAX_MESSAGE_BYTES)) throw new ExecutionError('INVALID_INPUT', 'Compute modules must be explicit, version-pinned, and bounded.');
+  const access = options.fileAccess;
+  let reads = 0;
+  if (Object.keys(modules).length > 32 || Object.entries(modules).some(([id, source]) => !moduleSpecifierPattern.test(id) || typeof source !== 'string' || textEncoder.encode(source).byteLength > MAX_MESSAGE_BYTES)) throw new ExecutionError('INVALID_INPUT', 'Compute modules must be explicit, version-pinned, and bounded.');
   const initialRevision = await options.files.revision();
   const controller = new AbortController();
   const onAbort = () => controller.abort();
@@ -119,12 +138,22 @@ export async function executeCompute(options: ComputeOptions): Promise<ComputeRe
     staged.clear();
   }
   function stage(p: string, value: Uint8Array | null) {
+    if (access && !pathMatchesRules(p, access.write))
+      throw new ExecutionError('SCOPE_DENIED', 'Guest write is outside declared access.');
+    const maxFiles = access?.maxWrites ?? 500;
     let total = value?.byteLength ?? 0;
     for (const [other, b] of staged) if (other !== p) total += b?.byteLength ?? 0;
-    if (total > maxStaged || staged.size >= 500 && !staged.has(p)) throw new ExecutionError('LIMIT_EXCEEDED', 'Compute staged files exceed the 2 MiB/500-file budget.');
+    if (total > maxStaged || staged.size >= maxFiles && !staged.has(p)) throw new ExecutionError('LIMIT_EXCEEDED', 'Compute staging exceeds its byte or file limit.');
     staged.set(p, value);
   }
+  function countRead() {
+    if (access && ++reads > access.maxReads)
+      throw new ExecutionError('LIMIT_EXCEEDED', 'Guest read count exceeded.');
+  }
   async function read(p: string): Promise<Uint8Array> {
+    countRead();
+    if (access && !pathMatchesRules(p, access.read))
+      throw new ExecutionError('SCOPE_DENIED', 'Guest read is outside declared access.');
     if (staged.has(p)) { const b = staged.get(p); if (b === null) throw new ExecutionError('INVALID_INPUT', 'File does not exist.'); return b!.slice(); }
     const b = await options.files.read(p);
     if (b.byteLength > MAX_MESSAGE_BYTES) throw new ExecutionError('LIMIT_EXCEEDED', 'Use paged file tools for files larger than 256 KiB.');
@@ -158,16 +187,16 @@ export async function executeCompute(options: ComputeOptions): Promise<ComputeRe
     }
     if (request.kind !== 'fs') throw new ExecutionError('SCOPE_DENIED', 'Unknown compute broker capability.');
     let value: unknown;
-    const p = request.name === 'list' && (args[0] === undefined || args[0] === null || args[0] === '') ? '' : request.name === 'list' && typeof args[0] === 'string' && ['src', 'scratch', 'imports'].includes(args[0]) ? args[0] : path(args[0], ['writeTextFile', 'writeFile', 'rename', 'delete'].includes(request.name));
+    const p = request.name === 'list' && (args[0] === undefined || args[0] === null || args[0] === '') ? '' : request.name === 'list' && typeof args[0] === 'string' && ['src', 'scratch', 'imports'].includes(args[0]) ? args[0] : path(args[0], ['writeTextFile', 'writeFile', 'rename', 'delete', 'deleteFile'].includes(request.name));
     switch (request.name) {
       case 'readTextFile': value = textDecoder.decode(await read(p)); break;
       case 'readFile': value = Array.from(await read(p)); break;
       case 'writeTextFile': if (typeof args[1] !== 'string') throw new ExecutionError('INVALID_INPUT', 'Text file content must be a string.'); stage(p, textEncoder.encode(args[1])); value = { path: p, staged: true }; break;
       case 'writeFile': stage(p, bytes(args[1])); value = { path: p, staged: true }; break;
-      case 'delete': stage(p, null); value = { path: p, staged: true }; break;
+      case 'deleteFile': case 'delete': stage(p, null); value = { path: p, staged: true }; break;
       case 'rename': { const target = path(args[1], true); if (target === p) throw new ExecutionError('INVALID_INPUT', 'Rename requires two different paths.'); if ((staged.has(target) ? staged.get(target) !== null : (await options.files.list()).includes(target))) throw new ExecutionError('INVALID_INPUT', 'Rename target already exists.'); const content = await read(p); const prior = new Map(staged); try { stage(target, content); stage(p, null); } catch (error) { staged.clear(); for (const entry of prior) staged.set(...entry); throw error; } value = { path: target, staged: true }; break; }
       case 'stat': { const content = await read(p); value = { path: p, size: content.byteLength }; break; }
-      case 'list': { const all = new Set(await options.files.list()); for (const [s, b] of staged) b === null ? all.delete(s) : all.add(s); value = [...all].filter(s => !p || s === p || s.startsWith(p + '/')).sort(); break; }
+      case 'list': { countRead(); const all = new Set(await options.files.list()); for (const [s, b] of staged) { if (!access || pathMatchesRules(s, access.read)) b === null ? all.delete(s) : all.add(s); } value = [...all].filter(s => !p || s === p || s.startsWith(p + '/')).sort(); break; }
       default: throw new ExecutionError('SCOPE_DENIED', 'Unknown compute file capability.');
     }
     return json({ ok: true, value });
@@ -241,7 +270,8 @@ export async function executeCompute(options: ComputeOptions): Promise<ComputeRe
     controller.abort();
     const info = error instanceof ExecutionError ? error : new ExecutionError('PROVIDER_REJECTED', 'Compute could not complete.');
     if (activeTool) effects.push({ kind: 'tool', tool: activeTool, outcome: 'unknown' });
-    const state = info.effectState === 'UNKNOWN' || effects.some(e => e.outcome === 'unknown') ? 'UNKNOWN' : info.effectState === 'PARTIAL' || effects.length ? 'PARTIAL' : 'NONE';
+    const state = info.effectState !== 'NONE' ? info.effectState
+      : effects.some(e => e.outcome === 'unknown') ? 'UNKNOWN' : effects.length ? 'PARTIAL' : 'NONE';
     throw new ExecutionError(info.code, info.message, state, effects);
   } finally {
     closed = true;
@@ -268,7 +298,8 @@ export function runComputeWorker(endpoint: ComputeWorkerEndpoint): void {
       const entry = pending.get(Number(message.id));
       if (!entry) return;
       pending.delete(Number(message.id));
-      message.ok ? entry.resolve(message.value) : entry.reject(new ExecutionError(String(message.code ?? 'PROVIDER_REJECTED'), String(message.message ?? 'Broker rejected.')));
+      message.ok ? entry.resolve(message.value) : entry.reject(new ExecutionError(String(message.code ?? 'PROVIDER_REJECTED'), String(message.message ?? 'Broker rejected.'),
+        message.effectState as ExecutionError['effectState'] | undefined));
       return;
     }
     if (message.type !== 'start' || started) return;
@@ -280,7 +311,9 @@ export function runComputeWorker(endpoint: ComputeWorkerEndpoint): void {
       writeBatch: (writes, revision) => request('fs', 'writeBatch', [writes.map(w => ({ path: w.path, bytes: w.bytes === null ? null : Array.from(w.bytes) })), revision]) as Promise<{ revision: string }>,
     };
     const tools: ComputeToolBroker = { call: (name, args) => request('tool', name, [args]) };
-    executeCompute({ js: String(message.js), timeoutMs: Number(message.timeoutMs), files, tools, modules: message.modules as Record<string, string> | undefined, memoryLimitBytes: Number(message.memoryLimitBytes), maxStagedBytes: Number(message.maxStagedBytes) })
+    executeCompute({ js: String(message.js), timeoutMs: Number(message.timeoutMs), files,
+      ...(message.allowTools === true ? {tools} : {}),
+      fileAccess: message.fileAccess as ComputeFileAccess | undefined, modules: message.modules as Record<string, string> | undefined, memoryLimitBytes: Number(message.memoryLimitBytes), maxStagedBytes: Number(message.maxStagedBytes) })
       .then(result => endpoint.postMessage({ type: 'result', result }))
       .catch(error => endpoint.postMessage({ type: 'error', code: error instanceof ExecutionError ? error.code : 'PROVIDER_REJECTED', message: error instanceof ExecutionError ? error.message : 'Compute failed.', effectState: error instanceof ExecutionError ? error.effectState : 'NONE', effects: error instanceof ExecutionError ? error.effects : [] }));
   };
@@ -324,7 +357,8 @@ export function createComputeWorkerClient(source: string, createWorker?: (source
       if (message.type !== 'broker' || !Number.isSafeInteger(message.id) || typeof message.name !== 'string' || !Array.isArray(message.args)) { stop('INVALID_INPUT', 'Compute Worker sent a malformed broker request.'); return; }
       const id = Number(message.id), name = message.name, args = message.args;
       const key = `${message.kind}:${name}:${id}`;
-      active.add(key);
+      const effectCapable = message.kind === 'tool' || message.kind === 'fs' && name === 'writeBatch';
+      if (effectCapable) active.add(key);
       Promise.resolve().then(async () => {
         let value: unknown;
         if (message.kind === 'fs') {
@@ -347,8 +381,8 @@ export function createComputeWorkerClient(source: string, createWorker?: (source
           effects.push({ kind: 'tool', tool: name, outcome: 'verified' });
         }
         if (!done) worker.postMessage({ type: 'reply', id, ok: true, value });
-      }).catch(error => { if (!done) worker.postMessage({ type: 'reply', id, ok: false, ...safeError(error) }); }).finally(() => active.delete(key));
+      }).catch(error => { if (!done) worker.postMessage({ type: 'reply', id, ok: false, ...safeError(error, effectCapable) }); }).finally(() => active.delete(key));
     };
-    worker.postMessage({ type: 'start', js: options.js, timeoutMs: options.timeoutMs ?? 120_000, modules: options.modules ?? {}, memoryLimitBytes: options.memoryLimitBytes ?? 32 * 1024 * 1024, maxStagedBytes: options.maxStagedBytes ?? 2 * 1024 * 1024 });
+    worker.postMessage({ type: 'start', js: options.js, timeoutMs: options.timeoutMs ?? 120_000, modules: options.modules ?? {}, allowTools: !!options.tools, fileAccess: options.fileAccess, memoryLimitBytes: options.memoryLimitBytes ?? 32 * 1024 * 1024, maxStagedBytes: options.maxStagedBytes ?? 2 * 1024 * 1024 });
   }) };
 }

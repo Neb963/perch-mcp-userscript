@@ -15,7 +15,7 @@ export interface PreviewBridge {
   refresh(preambleJs?: string, effect?: PreviewEffectScope): Promise<PreviewReceipt>;
   evaluate(js: string, timeoutMs: number, effect?: PreviewEffectScope): Promise<PreviewReceipt>;
   diagnostics?(): Promise<PreviewReceipt>;
-  measureViewport?(timeoutMs: number): Promise<unknown>;
+  measureViewport?(timeoutMs: number, signal?: AbortSignal): Promise<unknown>;
   capture?(): Promise<{ dataUrl: string; width: number; height: number }>;
 }
 export interface PreviewOptions {
@@ -46,7 +46,7 @@ async function deadline<T>(promise: Promise<T>, timeout: number, signal?: AbortS
   let abort: (() => void) | undefined;
   const limit = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new ExecutionError('TIMEOUT', 'Preview execution timed out. A blocked preview main thread may require a manual reload.', 'UNKNOWN')), timeout);
-    abort = () => reject(new ExecutionError(signal?.reason?.code === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED',
+    abort = () => reject(new ExecutionError((signal?.reason?.code === 'TIMEOUT' || signal?.reason?.name === 'TimeoutError') ? 'TIMEOUT' : 'CANCELLED',
       'Preview observation stopped. Reconcile any dispatched effect before retrying.', 'UNKNOWN'));
     if (signal?.aborted) abort();
     else signal?.addEventListener('abort', abort, {once: true});
@@ -58,6 +58,13 @@ async function deadline<T>(promise: Promise<T>, timeout: number, signal?: AbortS
   }
 }
 /** No page message handler and no privileged JavaScript evaluation. All results remain untrusted generator data. */
+interface MeasuredViewport {
+  width: number;
+  height: number;
+  devicePixelRatio: number | null;
+  visualViewportScale: number | null;
+}
+
 export class PreviewAdapter {
   private appliedRevision: string | undefined;
   private generation: string | undefined;
@@ -180,7 +187,8 @@ export class PreviewAdapter {
   async call(name: string, args: Record<string, unknown>, effect?: PreviewEffectScope): Promise<unknown> {
     if (name !== 'set_viewport_size' && this.viewport) this.armViewportReset();
     switch (name) {
-      case 'page_refresh': return this.whilePreviewBusy(()=>this.refresh(body(args, 'preambleJs'), effect));
+      case 'page_refresh': return this.whilePreviewBusy(() => this.refresh(
+        body(args, 'preambleJs'), effect, args.timeoutMs as number | undefined));
       case 'page_eval': {
         const js = body(args, 'js'), path = body(args, 'path');
         if ((js === undefined) === (path === undefined)) throw new ExecutionError('INVALID_INPUT', 'Provide exactly one of js or path.');
@@ -188,7 +196,8 @@ export class PreviewAdapter {
         if (source === undefined) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Workspace code-file access is unavailable.');
         return this.whilePreviewBusy(()=>this.evaluate(source, { reload: args.reload === true, timeoutMs: args.timeoutMs as number | undefined, resultPath: body(args, 'resultPath') }, effect));
       }
-      case 'set_viewport_size': return this.setViewport(args.width as number, args.height as number, args.reset === true, effect);
+      case 'set_viewport_size': return this.setViewport(
+        args.width as number, args.height as number, args.reset === true, effect, args.timeoutMs as number | undefined);
       case 'preview_diagnostics': {
         if (!this.options.bridge?.diagnostics) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native diagnostics are not available.');
         const receipt = checkedReceipt(await deadline(this.options.bridge.diagnostics(), 10_000));
@@ -217,12 +226,12 @@ export class PreviewAdapter {
       default: throw new ExecutionError('UNSUPPORTED_INTERFACE', 'This is not a preview tool.');
     }
   }
-  async freshness(): Promise<{ pendingSrcChanges: boolean; pageFreshnessUnknown: boolean; previewRevision?: string; previewGeneration?: string }> {
+  async freshness(): Promise<{ pendingSrcChanges: boolean; pageFreshnessUnknown: boolean; sourceRevision: string; previewRevision?: string; previewGeneration?: string }> {
     const current = await this.options.revision();
     this.syncAttestationFrame();
-    return { pendingSrcChanges: this.appliedRevision !== undefined && current !== this.appliedRevision, pageFreshnessUnknown: this.appliedRevision === undefined, previewRevision: this.appliedRevision, previewGeneration: this.generation };
+    return { sourceRevision: current, pendingSrcChanges: this.appliedRevision !== undefined && current !== this.appliedRevision, pageFreshnessUnknown: this.appliedRevision === undefined, previewRevision: this.appliedRevision, previewGeneration: this.generation };
   }
-  async refresh(preambleJs?: string, effect?: PreviewEffectScope): Promise<unknown> {
+  async refresh(preambleJs?: string, effect?: PreviewEffectScope, timeoutMs = 30_000): Promise<unknown> {
     if (this.viewport) this.armViewportReset();
     if (!this.options.bridge) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native preview bridge unavailable or not verified.');
     await this.requireCapability('refresh');
@@ -230,7 +239,7 @@ export class PreviewAdapter {
     const expected = await this.options.revision();
     this.appliedRevision = undefined;
     this.generation = undefined;
-    const receipt = checkedReceipt(await deadline(this.options.bridge.refresh(preambleJs, effect), 30_000, effect?.signal));
+    const receipt = checkedReceipt(await deadline(this.options.bridge.refresh(preambleJs, effect), Math.min(timeoutMs, 30_000), effect?.signal));
     const receiptEpoch = this.currentEpoch();
     if (receipt.appliedRevision !== expected || await this.options.revision() !== expected ||
         (this.options.requireDocumentProof && (!receipt.previewGeneration || receiptEpoch !== this.currentEpoch()))) throw new ExecutionError('NATIVE_CONFLICT', 'Source changed during refresh or the native frame did not attest the intended source revision. Refresh again after inspecting manual edits.', 'PARTIAL');
@@ -272,25 +281,28 @@ export class PreviewAdapter {
    * exact-frame native evaluateJs reply measures the actual child innerWidth
    * and innerHeight after layout. We never claim success on a CSS-only change.
    */
-  private async measuredViewport(timeoutMs: number): Promise<{width:number;height:number}> {
+  private async measuredViewport(timeoutMs: number, signal?: AbortSignal): Promise<MeasuredViewport> {
     if (!this.options.bridge)
       throw new ExecutionError('UNSUPPORTED_INTERFACE',
         'Native preview viewport verification is unavailable.', 'PARTIAL');
     const bridge = this.options.bridge;
     const value = bridge.measureViewport
-      ? await deadline(bridge.measureViewport(timeoutMs), timeoutMs)
+      ? await deadline(bridge.measureViewport(timeoutMs, signal), timeoutMs, signal)
       : checkedReceipt(await deadline(bridge.evaluate(
-          'return ({width: window.innerWidth, height: window.innerHeight});', timeoutMs), timeoutMs)).result;
+          'return ({width: window.innerWidth, height: window.innerHeight, devicePixelRatio: window.devicePixelRatio, visualViewportScale: window.visualViewport?.scale});', timeoutMs), timeoutMs, signal)).result;
     if (!value || typeof value !== 'object' || Array.isArray(value))
       throw new ExecutionError('UNSUPPORTED_INTERFACE',
         'Native preview did not provide viewport dimensions.', 'PARTIAL');
-    const r=value as {width?:unknown;height?:unknown};
+    const r = value as Partial<Record<keyof MeasuredViewport, unknown>>;
     if (typeof r.width !== 'number' || typeof r.height !== 'number' ||
         !Number.isInteger(r.width) || !Number.isInteger(r.height) ||
         r.width<1 || r.height<1 || r.width>131072 || r.height>131072)
       throw new ExecutionError('UNSUPPORTED_INTERFACE',
         'Native viewport measurement has an invalid shape.', 'PARTIAL');
-    return {width:r.width,height:r.height};
+    const positive = (entry: unknown) =>
+      typeof entry === 'number' && Number.isFinite(entry) && entry > 0 ? entry : null;
+    return {width:r.width, height:r.height, devicePixelRatio:positive(r.devicePixelRatio),
+      visualViewportScale:positive(r.visualViewportScale)};
   }
 
   /** Let CSS layout and the frame viewport settle without depending on a
@@ -317,10 +329,12 @@ export class PreviewAdapter {
     frame: HTMLIFrameElement,
     expected: () => {width:number;height:number},
     action: 'set' | 'reset',
-  ): Promise<{width:number;height:number;attempts:number}> {
-    const stop = performance.now() + 5000;
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<MeasuredViewport & {attempts:number}> {
+    const stop = performance.now() + Math.min(timeoutMs, 5000);
     let changed = false, attempts = 0, stable = 0;
-    let actual: {width:number;height:number} | undefined;
+    let actual: MeasuredViewport | undefined;
     let previousTarget: {width:number;height:number} | undefined;
     const loaded = () => { changed = true; };
     frame.addEventListener('load', loaded);
@@ -328,14 +342,15 @@ export class PreviewAdapter {
     const conflict = () => new ExecutionError('NATIVE_CONFLICT',
       `Viewport ${action}: preview iframe changed during layout verification; no stable dimensions verified. Persistent effects: none.`, 'PARTIAL');
     try {
-      await this.settleViewportLayout(frame);
+      await deadline(this.settleViewportLayout(frame), timeoutMs, signal);
       while (performance.now() < stop && attempts < 24) {
         if (!stillBound()) throw conflict();
         attempts++;
         const remaining = Math.max(1, Math.floor(stop - performance.now()));
-        try { actual = await this.measuredViewport(remaining); }
-        catch {
+        try { actual = await this.measuredViewport(remaining, signal); }
+        catch (error) {
           if (!stillBound()) throw conflict();
+          if (signal?.aborted) throw error;
           throw new ExecutionError('NATIVE_CONFLICT',
             `Viewport ${action}: native child dimensions could not be measured before the deadline. Persistent effects: none.`, 'PARTIAL');
         }
@@ -349,7 +364,7 @@ export class PreviewAdapter {
         previousTarget = target;
         if (stable >= 2) return {...actual, attempts};
         const wait = Math.min(250, 25 * 2 ** Math.min(attempts - 1, 4), stop - performance.now());
-        if (wait > 0) await new Promise<void>(resolve => setTimeout(resolve, wait));
+        if (wait > 0) await deadline(new Promise<void>(resolve => setTimeout(resolve, wait)), timeoutMs, signal);
       }
       const target = expected();
       throw new ExecutionError('NATIVE_CONFLICT',
@@ -357,7 +372,8 @@ export class PreviewAdapter {
     } finally { frame.removeEventListener('load', loaded); }
   }
 
-  async setViewport(width: number, height: number, reset = false, effect?: PreviewEffectScope): Promise<unknown> {
+  async setViewport(width: number, height: number, reset = false, effect?: PreviewEffectScope,
+      timeoutMs = 5000): Promise<unknown> {
     const frame = this.options.frame(), max = this.options.maxViewport ?? 16384;
     if (!frame) throw new ExecutionError('UNSUPPORTED_INTERFACE', 'Native output frame is unavailable.');
     if (reset) {
@@ -379,9 +395,9 @@ export class PreviewAdapter {
         height: frame.clientHeight || (before && before.parentHeight > 0 &&
           Math.abs((frame.parentElement?.clientHeight ?? 0) - before.parentHeight) <= 2 ? before.height : 0),
       });
-      const actual = await this.verifyViewport(frame, target, 'reset');
+      const actual = await this.verifyViewport(frame, target, 'reset', timeoutMs, effect?.signal);
       const expectedNative = target();
-      return {reset:true, emulationActive:false, width:actual.width, height:actual.height,
+      return {reset:true, emulationActive:false, ...this.viewportProjection(frame, actual),
         expectedNativeWidth:expectedNative.width, expectedNativeHeight:expectedNative.height,
         verifiedBy:'native-preview-innerWidth', frameClientWidth:frame.clientWidth||null,
         frameClientHeight:frame.clientHeight||null, measurementAttempts:actual.attempts};
@@ -394,6 +410,8 @@ export class PreviewAdapter {
     if (this.options.frame() !== frame)
       throw new ExecutionError('NATIVE_CONFLICT', 'Native iframe changed before viewport mutation.');
     effect?.onDispatch();
+    const priorStyle = frame.getAttribute('style');
+    const priorViewport = this.original?.frame === frame ? this.viewport : undefined;
     if (!this.original || this.original.frame !== frame) {
       this.restoreViewport();
       this.nativeBaseline = {
@@ -412,15 +430,31 @@ export class PreviewAdapter {
     this.viewport = {width,height};
     this.previewBusy++;
     try {
-      const actual = await this.verifyViewport(frame, () => ({width,height}), 'set');
-      return {width:actual.width,height:actual.height,scale,emulationActive:true,
+      const actual = await this.verifyViewport(frame, () => ({width,height}), 'set', timeoutMs, effect?.signal);
+      return {...this.viewportProjection(frame, actual),emulationActive:true,
         verifiedBy:'native-preview-innerWidth',measuredBrowserLimit:false,measurementAttempts:actual.attempts,
         autoResetAfterIdleMs:this.viewportIdleMs};
     } catch(error) {
       // A failed sizing request cannot leave the human editor looking broken.
-      this.restoreViewport();
+      if (priorViewport && this.options.frame() === frame) {
+        if (priorStyle === null) frame.removeAttribute('style');
+        else frame.setAttribute('style', priorStyle);
+        this.viewport = priorViewport;
+      } else this.restoreViewport();
       throw error;
     } finally { this.previewBusy--; this.armViewportReset(); }
+  }
+
+  private viewportProjection(frame: HTMLIFrameElement, actual: MeasuredViewport) {
+    const rect = frame.getBoundingClientRect();
+    const scaleX = frame.offsetWidth > 0 ? rect.width / frame.offsetWidth : 0;
+    const scaleY = frame.offsetHeight > 0 ? rect.height / frame.offsetHeight : 0;
+    const scale = Number.isFinite(scaleX) && Number.isFinite(scaleY)
+      && scaleX > 0 && Math.abs(scaleX - scaleY) <= 0.02 ? scaleX : null;
+    return {...actual, scale,
+      geometryUnverified: [actual.devicePixelRatio === null ? 'DEVICE_PIXEL_RATIO' : null,
+        actual.visualViewportScale === null ? 'VISUAL_VIEWPORT_SCALE' : null,
+        scale === null ? 'DISPLAY_SCALE' : null].filter(value => value !== null)};
   }
 
   restoreViewport(): void {
@@ -534,13 +568,13 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
     if(await this.options.revision()!==before)throw new ExecutionError('STALE_REVISION','Native source changed during preview preflight.');
     return {revision:before,panelHash,srcHash,pending:p.srcState.hasPending()===true};
   }
-  private async request(js:string,timeoutMs:number,effect?:PreviewEffectScope):Promise<unknown> {
+  private async request(js:string,timeoutMs:number,effect?:PreviewEffectScope,signal = effect?.signal):Promise<unknown> {
     if (effect) await effect.assertCurrent();
     const {frame,view,origin}=this.target(),callerId=`perch-${crypto.randomUUID()}`;
     return new Promise((resolve,reject)=>{
       let settled=false;
-      const finish=(error?:ExecutionError,result?:unknown)=>{if(settled)return;settled=true;clearTimeout(timer);effect?.signal.removeEventListener('abort',aborted);this.options.host.removeEventListener('message',message as EventListener);frame.removeEventListener('load',loaded);error?reject(error):resolve(result)};
-      const aborted=()=>finish(new ExecutionError(effect?.signal.reason?.code==='TIMEOUT'?'TIMEOUT':'CANCELLED',
+      const finish=(error?:ExecutionError,result?:unknown)=>{if(settled)return;settled=true;clearTimeout(timer);signal?.removeEventListener('abort',aborted);this.options.host.removeEventListener('message',message as EventListener);frame.removeEventListener('load',loaded);error?reject(error):resolve(result)};
+      const aborted=()=>finish(new ExecutionError((signal?.reason?.code==='TIMEOUT'||signal?.reason?.name==='TimeoutError')?'TIMEOUT':'CANCELLED',
         'Preview reply observation was cancelled after dispatch. Reconcile before retrying.', 'UNKNOWN'));
       const loaded=()=>finish(new ExecutionError('STALE_EPOCH','Native preview document reloaded during evaluation.','UNKNOWN'));
       const timer=setTimeout(()=>finish(new ExecutionError('TIMEOUT','Native preview did not answer. Reload a frozen preview manually; do not replay uncertain effects.','UNKNOWN')),timeoutMs);
@@ -558,11 +592,11 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
         }catch(error){finish(error instanceof ExecutionError?error:new ExecutionError('UNSUPPORTED_INTERFACE','Native evaluation reply changed shape.','UNKNOWN'))}
       };
       this.options.host.addEventListener('message',message as EventListener);frame.addEventListener('load',loaded,{once:true});
-      if (effect?.signal.aborted) {
-        finish(new ExecutionError(effect.signal.reason?.code==='TIMEOUT'?'TIMEOUT':'CANCELLED', 'Preview stopped before dispatch.'));
+      if (signal?.aborted) {
+        finish(new ExecutionError(signal.reason?.code==='TIMEOUT'||signal.reason?.name==='TimeoutError'?'TIMEOUT':'CANCELLED', 'Preview stopped before dispatch.'));
         return;
       }
-      effect?.signal.addEventListener('abort',aborted,{once:true});
+      signal?.addEventListener('abort',aborted,{once:true});
       effect?.onDispatch();
       try{view.postMessage({command:'evaluateJs',callerId,js},origin)}catch{finish(new ExecutionError('UNSUPPORTED_INTERFACE','Browser refused the fixed native preview command.'))}
     });
@@ -673,10 +707,10 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
     try{
       effect?.onDispatch();
       this.page.__aiAgentPreambleJs=diagnosticPreamble(generation)+(preambleJs===undefined?'':`\n${preambleJs}\n`);
-      await deadline(Promise.resolve((this.page.hardReloadOutputIframe as ()=>unknown).call(this.page)),30000);
+      await deadline(Promise.resolve((this.page.hardReloadOutputIframe as ()=>unknown).call(this.page)),30000,effect?.signal);
       let d:NativeDiagnosticSnapshot|undefined;
       for(let attempt=0;attempt<20;attempt++){
-        d=nativeDiagnostics(await this.request(nativeDiagnosticRead,1000));
+        d=nativeDiagnostics(await this.request(nativeDiagnosticRead,1000,undefined,effect?.signal));
         if(d.receipt&&d.generation===generation)break;
         await new Promise(resolve=>setTimeout(resolve,50));
       }
@@ -693,18 +727,18 @@ export class NativeProtocolPreviewBridge implements PreviewBridge {
     if(this.busy)throw new ExecutionError('TAB_BUSY','A native preview operation is already active.');
     this.busy=true;
     try{
-      const before=nativeDiagnostics(await this.request(nativeDiagnosticRead,Math.min(timeoutMs,5000)));
+      const before=nativeDiagnostics(await this.request(nativeDiagnosticRead,Math.min(timeoutMs,5000),undefined,effect?.signal));
       if(this.previousGeneration)this.receipt(before);
       const result=await this.request(js,timeoutMs,effect);
-      const after=nativeDiagnostics(await this.request(nativeDiagnosticRead,Math.min(timeoutMs,5000)));
+      const after=nativeDiagnostics(await this.request(nativeDiagnosticRead,Math.min(timeoutMs,5000),undefined,effect?.signal));
       if(before.generation!==after.generation||before.receipt?.epoch!==after.receipt?.epoch)throw new ExecutionError('STALE_EPOCH','Native preview changed during evaluation.','UNKNOWN');
       return this.withEditorSyntax(this.receipt(after,result));
     }finally{this.busy=false}
   }
-  async measureViewport(timeoutMs: number): Promise<unknown> {
+  async measureViewport(timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     // A geometry probe needs one fixed native request, not the general eval
     // pipeline (which performs extra diagnostics and editor syntax calls).
-    const result = await this.request(`return (()=>{const d=document.${NATIVE_DIAGNOSTIC_KEY},r=document.__perchanceInternal?.renderReceipt;return {width:window.innerWidth,height:window.innerHeight,generation:d?.generation&&r?d.generation+':'+r.epoch:null};})();`, timeoutMs);
+    const result = await this.request(`return (()=>{const d=document.${NATIVE_DIAGNOSTIC_KEY},r=document.__perchanceInternal?.renderReceipt;return {width:window.innerWidth,height:window.innerHeight,devicePixelRatio:window.devicePixelRatio,visualViewportScale:window.visualViewport?.scale??null,generation:d?.generation&&r?d.generation+':'+r.epoch:null};})();`, timeoutMs, undefined, signal);
     if (this.previousGeneration && (!result || typeof result !== 'object' ||
         (result as {generation?:unknown}).generation !== this.previousGeneration))
       throw new ExecutionError('STALE_EPOCH', 'Native preview generation changed during geometry verification.', 'PARTIAL');

@@ -60,3 +60,7 @@ export function assertNoFilePathConflicts(paths: readonly string[]): void {
     }
   }
 }
+
+export function pathMatchesRules(path: string, rules: readonly string[]): boolean {
+  return rules.some(rule => rule.endsWith('/') ? path.startsWith(rule) : path === rule);
+}

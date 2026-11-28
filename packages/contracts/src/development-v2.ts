@@ -5,12 +5,21 @@ import { assertNoFilePathConflicts, assertNoPathCollisions, canonicalPath } from
 import { LIMITS } from './envelopes.js';
 import { parsePublicFetchDestination } from './public-fetch.js';
 import { ToolError } from './errors.js';
+import { moduleSpecifierPattern } from './compute.js';
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
+const computeModule = z.strictObject({
+  specifier: z.string().max(200).regex(moduleSpecifierPattern),
+  path: z.string().min(1).max(512).refine((path) => {
+    try { return canonicalPath(path) === path; } catch { return false; }
+  }),
+  sha256: hash,
+});
 const file = z.string().min(1).max(512).refine((path) => {
   try { canonicalPath(path); return true; } catch { return false; }
 });
 const scratch = file.refine(path => path.startsWith('scratch/'));
+const effectDestination = file.refine(path => path.startsWith('scratch/') || path.startsWith('src/'));
 const script = z.string().min(1).max(131_072);
 const ms = z.number().int().min(1).max(3_600_000).optional();
 const browserMs = z.number().int().min(1).max(120_000).optional();
@@ -32,7 +41,7 @@ const postRequest = z.strictObject({method: z.literal('POST'), url: z.string().m
 export const browserToolSchemas = {
   ...filesystemV2Schemas,
   page_eval: z.strictObject({js: script.optional(), path: file.optional(), timeoutMs: browserMs,
-    requireFresh: z.boolean().optional(), resultPath: scratch.optional()})
+    requireFresh: z.boolean().optional(), resultPath: effectDestination.optional()})
     .refine(value => (value.js !== undefined) !== (value.path !== undefined)),
   page_refresh: z.strictObject({preambleJs: script.optional(), intendedSourceRevision: hash.optional(), timeoutMs: browserMs}),
   preview_diagnostics: z.strictObject({cursor: z.strictObject({previewEpoch: positive, lastSequence: z.number().int().min(0)}).optional(),
@@ -46,10 +55,13 @@ export const browserToolSchemas = {
     read: z.array(boundedPath).max(64).optional(), write: z.array(boundedPath).max(64).optional(),
     maxReads: z.number().int().min(0).max(256).optional(), maxWrites: z.number().int().min(0).max(64).optional(),
     maxBytes: z.number().int().min(1).max(16 * 1024 * 1024).optional(),
-  }), modules: z.array(z.strictObject({
-    specifier: z.string().regex(/^[A-Za-z0-9_-][A-Za-z0-9_.-]*@[0-9]+(?:\.[0-9]+){0,2}$/).max(128),
-    path: file, sha256: hash
-  })).max(16).optional()}),
+  }), modules: z.array(computeModule).max(16).optional()})
+    .refine(({access, modules = []}) => {
+      const uniqueSpecifiers = new Set(modules.map(module => module.specifier)).size === modules.length;
+      const uniquePaths = new Set(modules.map(module => module.path.toLowerCase())).size === modules.length;
+      return uniqueSpecifiers && uniquePaths && modules.length <= (access.maxReads ?? 256)
+        && !access.write?.some(path => path.startsWith('imports/'));
+    }),
   fetch_url: z.strictObject({requests: z.union([z.array(getRequest).min(1).max(8), z.tuple([postRequest])]), timeoutMs: ms}),
   fetch_generator: z.strictObject({generators: z.array(z.strictObject({
     slug, paths: z.array(file).min(1).max(64).optional(),
@@ -106,7 +118,9 @@ export function requiredPermissionsV2(name: keyof typeof developmentToolArgs, ar
   switch (name) {
     case 'batch':
       return [...new Set((args.actions as BatchArgumentsV2['actions']).flatMap(step => requiredPermissionsV2(step.tool, step.args)))];
-    case 'page_eval': return ['PREVIEW_EXECUTE', ...(args.path ? ['READ_SOURCE'] : []), ...(args.resultPath ? ['WRITE_SOURCE'] : [])];
+    case 'page_eval': return ['PREVIEW_EXECUTE',
+      ...(args.path || typeof args.resultPath === 'string' && args.resultPath.startsWith('src/') ? ['READ_SOURCE'] : []),
+      ...(args.resultPath ? ['WRITE_SOURCE'] : [])];
     case 'page_refresh': return ['PREVIEW_CONTROL', ...(args.preambleJs ? ['PREVIEW_EXECUTE'] : [])];
     case 'preview_diagnostics': case 'set_viewport_size': return ['PREVIEW_CONTROL'];
     case 'capture_page_image': return ['PREVIEW_CONTROL','CAPTURE_PREVIEW'];
@@ -149,10 +163,6 @@ export function batchEvidenceReserve(batch: BatchArgumentsV2): number {
   return batch.actions.reduce((size, step) => size + receiptPaths(step).reduce(
     (bytes, path) => bytes + utf8.encode(JSON.stringify(path)).byteLength + (step.tool === 'read' ? 400 : 96), 0),
   batchLedgerBaseBytes);
-}
-
-export function pathMatchesRules(path: string, rules: readonly string[]): boolean {
-  return rules.some(rule => rule.endsWith('/') ? path.startsWith(rule) : path === rule);
 }
 
 /**
@@ -237,22 +247,6 @@ export function preflightDevelopmentBatch(batch: BatchArgumentsV2, approvedHosts
           }
         }
         break;
-      case 'execute_js': {
-        const { access, modules = [] } = step.args;
-        if (access.write?.some(path => path.startsWith('imports/'))) {
-          throw new ToolError('PATH_DENIED', 'Imports are read-only.');
-        }
-        if (new Set(modules.map(module => module.specifier)).size !== modules.length) {
-          throw new ToolError('INVALID_INPUT', 'Duplicate pinned module.');
-        }
-        if (modules.some(module => !pathMatchesRules(module.path, access.read ?? []))) {
-          throw new ToolError('SCOPE_DENIED', 'Pinned module is outside declared read access.');
-        }
-        if (modules.length > (access.maxReads ?? 256)) {
-          throw new ToolError('LIMIT_EXCEEDED', 'Pinned module loads exceed the declared read count.');
-        }
-        break;
-      }
     }
   }
   if (decodedWriteBytes > LIMITS.transportBytes - batchEnvelopeReserve) {

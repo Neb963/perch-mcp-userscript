@@ -1,6 +1,7 @@
 import { browserToolSchemas, developmentToolArgs, type BatchArgumentsV2, type BrowserToolArgs,
-  type BrowserToolV2, batchEvidenceReserve, batchResultBudget, hasEffectV2, pathMatchesRules, preflightDevelopmentBatch, requiredPermissionsV2 } from '../../../packages/contracts/src/development-v2.js';
+  type BrowserToolV2, batchEvidenceReserve, batchResultBudget, hasEffectV2, preflightDevelopmentBatch, requiredPermissionsV2 } from '../../../packages/contracts/src/development-v2.js';
 import { ToolError } from '../../../packages/contracts/src/errors.js';
+import { assertNoFilePathConflicts, pathMatchesRules } from '../../../packages/contracts/src/paths.js';
 import type { BrowserEnvelopeV2, SegmentRequest } from '../../../packages/contracts/src/operations-v2.js';
 import { filesystemV2Schemas, type FilesystemToolV2 } from '../../../packages/contracts/src/filesystem-v2.js';
 import { ExecutionError, type ComputeWorkerClient } from './compute.js';
@@ -25,81 +26,128 @@ const effectError = (code: string, message: string, effect: 'NONE' | 'PARTIAL' |
 
 async function scopedCompute(args: BrowserToolArgs<'execute_js'>, context: DevelopmentContext,
   engine: ComputeWorkerClient) {
-  const readRules = args.access.read ?? [], writeRules = args.access.write ?? [];
-  if (writeRules.some(path => path.startsWith('imports/')))
-    throw new BrowserError('PATH_DENIED','Imports are read-only.');
-  const includesNative = [...readRules, ...writeRules].some(native);
-  if (readRules.length || writeRules.length || args.modules?.length)
-    await context.permit('read-view', await digest(JSON.stringify([context.envelope.target, readRules, writeRules])));
-  const localView = await context.vfs.localView();
-  const pre = includesNative ? await context.vfs.snapshot() : null;
-  const list = [...new Set([...Object.keys(pre?.files ?? {}), ...localView.files.map(file=>file.path)])].sort();
-  const reads = new Map<string, Uint8Array>();
+  const readRules = args.access.read ?? [];
+  const writeRules = args.access.write ?? [];
+  const pins = args.modules ?? [];
+  const viewRules = [...new Set([...readRules, ...writeRules, ...pins.map(pin => pin.path)])];
+  const nativeRules = viewRules.filter(native);
   const maxBytes = args.access.maxBytes ?? 16 * 1024 * 1024;
-  const read = async (path: string) => {
+  const maxReads = args.access.maxReads ?? 256;
+  const maxWrites = args.access.maxWrites ?? 64;
+  const readNative = () => context.vfs.adapter.readSourceView(
+    nativeRules.filter(rule => !rule.endsWith('/')), nativeRules.filter(rule => rule.endsWith('/')), 256, maxBytes);
+  if (viewRules.length)
+    await context.permit('read-view', await digest(JSON.stringify([context.envelope.target, args.access, pins])));
+  await context.assertCurrent();
+  const localView = await context.vfs.localView();
+  const nativeView = nativeRules.length ? await readNative() : new Map<string, Uint8Array | null>();
+  const readablePaths = [...nativeView].filter(([, bytes]) => bytes !== null).map(([path]) => path)
+    .concat(localView.files.map(file => file.path)).filter(path => pathMatchesRules(path, readRules)).sort();
+  const localCache = new Map<string, Uint8Array>();
+  let loadedBytes = [...nativeView.values()].reduce((sum, bytes) => sum + (bytes?.byteLength ?? 0), 0);
+  let readCount = 0;
+  const localFiles = new Map(localView.files.map(row => [row.path, row]));
+  const checkRead = async () => {
     await context.assertCurrent();
-    canonicalPath(path);
-    if (!pathMatchesRules(path, readRules)) throw new BrowserError('SCOPE_DENIED','Guest read is outside declared access.');
-    if (++readCount > (args.access.maxReads ?? 256)) throw new BrowserError('LIMIT_EXCEEDED','Guest read count exceeded.');
-    let value = reads.get(path);
-    if (!value) {
-      value = native(path) ? pre?.files[path] : await localView.read(path);
-      if (!value) throw new BrowserError('FILE_NOT_FOUND','Guest file does not exist.');
-      loadedBytes += value.length;
-      if (loadedBytes > maxBytes) throw new BrowserError('LIMIT_EXCEEDED','Guest read-view byte budget exceeded.');
-      reads.set(path,value);
-    }
-    return value.slice();
+    if (++readCount > maxReads) throw new ExecutionError('LIMIT_EXCEEDED', 'Guest read count exceeded.');
   };
-  let readCount = 0, loadedBytes = 0;
-  const revision = pre?.revision ?? localView.revision.value;
+  const read = async (path: string) => {
+    await checkRead();
+    if (native(path)) {
+      const bytes = nativeView.get(path);
+      if (!bytes) throw new ExecutionError('FILE_NOT_FOUND', 'Guest file does not exist.');
+      return bytes.slice();
+    }
+    const existing = localCache.get(path);
+    if (existing) return existing.slice();
+    const info = localFiles.get(path);
+    if (!info) throw new ExecutionError('FILE_NOT_FOUND', 'Guest file does not exist.');
+    if (loadedBytes + info.bytes > maxBytes)
+      throw new ExecutionError('LIMIT_EXCEEDED', 'Guest read-view byte budget exceeded.');
+    const bytes = await localView.read(path);
+    await context.assertCurrent();
+    loadedBytes += bytes.length;
+    if (loadedBytes > maxBytes)
+      throw new ExecutionError('LIMIT_EXCEEDED', 'Guest read-view byte budget exceeded.');
+    localCache.set(path, bytes);
+    return bytes.slice();
+  };
+  const filesBefore = await Promise.all([...nativeView].map(async ([path, bytes]) =>
+    [path, bytes === null ? null : await digest(bytes)]));
+  const version = 'view:' + await digest(JSON.stringify([context.envelope.target, localView.revision.value, filesBefore]));
+  const assertNativeUnchanged = (current: Map<string, Uint8Array | null>) => {
+    if (nativeView.size !== current.size || [...nativeView].some(([path, before]) => {
+      const after = current.get(path);
+      return before === null ? after !== null : !after || !equalBytes(before, after);
+    })) throw new ExecutionError('STALE_REVISION', 'Selected native source changed during guest computation.');
+  };
   const modules: Record<string, string> = Object.create(null);
   let moduleBytes = 0;
-  for (const module of args.modules ?? []) {
-    if (Object.hasOwn(modules, module.specifier)) throw new BrowserError('INVALID_INPUT','Duplicate pinned module.');
-    const bytes = await read(module.path);
+  for (const pin of pins) {
+    const bytes = await read(pin.path);
     moduleBytes += bytes.length;
-    if (bytes.length > 262_144 || moduleBytes > 524_288) throw new BrowserError('LIMIT_EXCEEDED','Pinned modules exceed their byte budget.');
-    if (await digest(bytes) !== module.sha256) throw new BrowserError('STALE_REVISION','Pinned module digest changed.');
-    modules[module.specifier] = new TextDecoder('utf-8',{fatal:true}).decode(bytes);
+    if (bytes.length > 262_144 || moduleBytes > 524_288)
+      throw new ExecutionError('LIMIT_EXCEEDED', 'Pinned modules exceed their byte budget.');
+    if (await digest(bytes) !== pin.sha256)
+      throw new ExecutionError('STALE_REVISION', 'Pinned module digest changed.');
+    try { modules[pin.specifier] = new TextDecoder('utf-8', {fatal:true}).decode(bytes); }
+    catch { throw new ExecutionError('INVALID_INPUT', 'Pinned module is not valid UTF-8.'); }
   }
+  const timeoutMs = Math.min(args.timeoutMs ?? 30_000, context.envelope.deadlineMs - Date.now());
+  if (timeoutMs < 1) throw new ExecutionError('TIMEOUT', 'Operation expired before computation.');
+  await context.assertCurrent();
   return engine.execute({
-    js: args.js, modules, signal: context.signal, maxStagedBytes: maxBytes,
-    timeoutMs: Math.min(args.timeoutMs ?? 30_000, context.envelope.deadlineMs - Date.now()),
+    js: args.js, modules, signal: context.signal, maxStagedBytes: maxBytes, timeoutMs,
+    fileAccess: {read: readRules, write: writeRules, maxReads: maxReads - pins.length, maxWrites},
     files: {
-      revision: async () => revision,
-      read,
+      revision: async () => version,
+      read: async path => {
+        if (!pathMatchesRules(canonicalPath(path), readRules))
+          throw new ExecutionError('SCOPE_DENIED', 'Guest read is outside declared access.');
+        return read(path);
+      },
       list: async () => {
-        await context.assertCurrent();
-        if (++readCount > (args.access.maxReads ?? 256)) throw new BrowserError('LIMIT_EXCEEDED','Guest read count exceeded.');
-        return list.filter(path=>pathMatchesRules(path,readRules));
+        await checkRead();
+        return readablePaths.slice();
       },
       writeBatch: async (writes, expectedRevision) => {
         await context.assertCurrent();
-        if (expectedRevision !== revision || !writes.length || writes.length > (args.access.maxWrites ?? 64))
-          throw effectError('LIMIT_EXCEEDED','Guest write set is outside its declared bounds.','NONE');
-        for (const entry of writes)
-          if (!pathMatchesRules(canonicalPath(entry.path),writeRules)) throw effectError('SCOPE_DENIED','Guest write is outside declared access.','NONE');
-        const writesHash = await digest(JSON.stringify(await Promise.all(writes.map(async entry=>[
-          entry.path, entry.bytes ? await digest(entry.bytes) : null,
-        ]))));
-        const authorize = async () => {
-          try { await context.permit('source-publication', writesHash); }
-          catch (error) {
-            const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'REVOKED';
-            throw effectError(code, 'Staged write publication was denied or unavailable.', 'NONE');
+        if (expectedRevision !== version || !writes.length || writes.length > maxWrites)
+          throw new ExecutionError('LIMIT_EXCEEDED', 'Guest write set is outside its declared bounds.');
+        try { assertNoFilePathConflicts(writes.map(entry => entry.path)); }
+        catch (error) {
+          if (error instanceof ToolError) throw new ExecutionError(error.code, error.message);
+          throw error;
+        }
+        if (writes.some(entry => !pathMatchesRules(entry.path, writeRules)))
+          throw new ExecutionError('SCOPE_DENIED', 'Guest write is outside declared access.');
+        const before = writes.some(entry => native(entry.path)) ? await context.vfs.snapshot() : null;
+        if (before) {
+          const observed = new Map<string, Uint8Array | null>(
+            nativeRules.filter(rule => !rule.endsWith('/')).map(path => [path, before.files[path] ?? null]));
+          for (const [path, bytes] of Object.entries(before.files)) {
+            if (native(path) && pathMatchesRules(path, nativeRules)) observed.set(path, bytes);
           }
-        };
-        if (writes.some(entry=>native(entry.path))) {
-          const observed = await context.vfs.snapshot();
-          if (!pre || observed.revision !== pre.revision)
-            throw effectError('STALE_REVISION','Source changed during guest computation.','NONE');
-          await authorize();
-          const result = await context.vfs.writeBatch(writes, pre.revision, context.envelope.operationId, context.assertCurrent);
-          if (result.status!=='SUCCEEDED') throw effectError('EFFECT_UNKNOWN','Guest publication requires reconciliation.',result.status);
+          assertNativeUnchanged(observed);
+        } else if (nativeRules.length) {
+          assertNativeUnchanged(await readNative());
+        }
+        if ((await context.vfs.localView()).revision.value !== localView.revision.value)
+          throw new ExecutionError('STALE_REVISION', 'Private source changed during guest computation.');
+        const writeSet = await Promise.all(writes.map(async entry =>
+          [entry.path, entry.bytes === null ? null : await digest(entry.bytes)]));
+        const publication = await digest(JSON.stringify([version, before?.nativeRevision ?? null, localView.revision.value, writeSet]));
+        try { await context.permit('source-publication', publication); }
+        catch (error) {
+          const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'REVOKED';
+          throw new ExecutionError(code, 'Staged write publication was denied or unavailable.');
+        }
+        if (before) {
+          const result = await context.vfs.writeBatch(writes, before.revision, context.envelope.operationId, context.assertCurrent);
+          if (result.status !== 'SUCCEEDED')
+            throw new ExecutionError(result.error?.code ?? 'EFFECT_UNKNOWN', 'Guest publication requires reconciliation.', result.status);
           return {revision: result.revision};
         }
-        await authorize();
         const result = await context.vfs.writeLocalBatch(writes, localView.revision.value, context.envelope.operationId, context.assertCurrent);
         return {revision: result.value};
       },

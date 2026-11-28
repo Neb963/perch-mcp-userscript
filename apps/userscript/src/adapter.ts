@@ -280,6 +280,9 @@ export class NativeAdapter {
   async readSelectedSource(paths: readonly string[]): Promise<Map<string, Uint8Array | null>> {
     if (paths.length < 1 || paths.length > 64)
       throw new BrowserError('LIMIT_EXCEEDED', 'Selected read requires 1 to 64 native files.');
+    return this.readSourceView(paths, [], 64, this.options.maxSnapshotBytes ?? 64 * 1024 * 1024);
+  }
+  async readSourceView(paths: readonly string[], prefixes: readonly string[], maxFiles: number, maxBytes: number) {
     const probe = await this.probe();
     if (!probe.ready) throw new BrowserError('TAB_BUSY', 'Native editor is not ready.');
     const identity = await this.assertIdentity();
@@ -288,26 +291,37 @@ export class NativeAdapter {
       if (path !== 'main.pjs' && path !== 'index.html' && !path.startsWith('src/'))
         throw new BrowserError('PATH_DENIED', 'Not a native source file.');
     }
+    for (const prefix of prefixes) {
+      if (!prefix.startsWith('src/') || !prefix.endsWith('/'))
+        throw new BrowserError('PATH_DENIED', 'Native source view requires a canonical src directory.');
+      if (prefix !== 'src/') canonicalPath(prefix.slice(0, -1));
+    }
     const src = this.page.srcState!;
-    const hasAssets = paths.some(path => path.startsWith('src/'));
+    const hasAssets = prefixes.length > 0 || paths.some(path => path.startsWith('src/'));
     if (hasAssets) {
       await src.ready();
       if (src.idle) await src.idle();
     }
     const rows = hasAssets ? await this.nativeManifest() : [];
     const listed = new Map(rows.map(row => [row.path, row.bytes]));
+    const selectedPaths = new Set([...paths, ...rows.filter(row => prefixes.some(prefix => row.path.startsWith(prefix))).map(row => row.path)]);
+    if (selectedPaths.size > maxFiles)
+      throw new BrowserError('LIMIT_EXCEEDED', 'Native source view exceeds its selected file limit.');
     const read = async (path: string): Promise<Uint8Array | null> => {
       if (path === 'main.pjs') return utf8.encode(boundedString(this.page.modelTextEditor!.getValue()));
       if (path === 'index.html') return utf8.encode(boundedString(this.page.outputTemplateEditor!.getValue()));
       if (!listed.has(path)) return null;
-      return nativeBytes(await src.readFile(path.slice(4)), this.page.Uint8Array, listed.get(path) ?? undefined);
+      const listedBytes = listed.get(path);
+      if (listedBytes != null && listedBytes > maxBytes)
+        throw new BrowserError('LIMIT_EXCEEDED', 'Selected source exceeded its byte limit.');
+      return nativeBytes(await src.readFile(path.slice(4)), this.page.Uint8Array, listedBytes ?? undefined);
     };
     const selected = new Map<string, Uint8Array | null>();
     let bytes = 0;
-    for (const path of paths) {
+    for (const path of selectedPaths) {
       const value = await read(path);
       bytes += value?.length ?? 0;
-      if ((value?.length ?? 0) > 16 * 1024 * 1024 || bytes > (this.options.maxSnapshotBytes ?? 64 * 1024 * 1024))
+      if ((value?.length ?? 0) > 16 * 1024 * 1024 || bytes > Math.min(maxBytes, this.options.maxSnapshotBytes ?? 64 * 1024 * 1024))
         throw new BrowserError('LIMIT_EXCEEDED', 'Selected source exceeded its byte limit.');
       selected.set(path, value);
     }

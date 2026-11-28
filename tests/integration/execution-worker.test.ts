@@ -15,6 +15,13 @@ test('real dedicated Worker runs the bundled engine and timeout cannot freeze th
     return adapter;
   });
   assert.deepEqual((await client.execute({js:'return Array.from(await fs.readFile("scratch/binary"));',files:broker})).result,[0,255]);
+  let publications = 0;
+  const limited = {...broker, writeBatch:async () => { publications++; return {revision:'r2'}; }};
+  await assert.rejects(client.execute({
+    js:'await fs.writeTextFile("scratch/staged","value"); await tools.page_eval({js:"return 1"});',
+    files:limited,fileAccess:{read:[],write:['scratch/staged'],maxReads:0,maxWrites:1},
+  }), (error:ExecutionError) => error.code==='SCOPE_DENIED' && error.effectState==='NONE');
+  assert.equal(publications,0,'denied v2 child call must occur before flushing staged writes');
   let controllerTicks=0;
   const timer=setInterval(()=>controllerTicks++,5);
   await assert.rejects(client.execute({js:'while(true){}',timeoutMs:100,files:broker}), (error:ExecutionError)=>error.code==='TIMEOUT');

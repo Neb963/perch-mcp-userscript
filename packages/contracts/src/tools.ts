@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ToolError } from './errors.js';
+import { moduleSpecifierPattern } from './compute.js';
 import { assertNoPathCollisions, canonicalPath, validateGlob } from './paths.js';
 
 export type JsonSchema = Record<string, unknown>;
@@ -27,7 +28,6 @@ const expectedRevision = optional(revision());
 const page = { limit: optional(integer(1, 100), 100), cursor: optional(text(2048, 1)) };
 const longTimeout = optional(integer(1, 3600000), 120000);
 const slug = (): Field => ({ json: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{0,119}$', maxLength: 120 }, zod: z.string().regex(/^[a-z0-9][a-z0-9-]{0,119}$/) });
-const moduleSpecifierPattern = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*@(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const moduleSpecifier = (): Field => ({ json: { type: 'string', maxLength: 200, pattern: moduleSpecifierPattern.source, description: 'Exact module name and core semver, e.g. math@1.2.3 or @scope/math@1.2.3. Ranges, tags, URLs and undeclared transitive imports are denied.' }, zod: z.string().max(200).regex(moduleSpecifierPattern) });
 const moduleDigest = (): Field => ({ json: { type: 'string', pattern: '^[a-f0-9]{64}$', minLength: 64, maxLength: 64, description: 'Lowercase SHA-256 of the exact UTF-8 module source bytes; verified before guest execution.' }, zod: z.string().regex(/^[a-f0-9]{64}$/) });
 const computeModules = (): Field => array(object({ specifier: moduleSpecifier(), path: path(), sha256: moduleDigest() }), 16);
