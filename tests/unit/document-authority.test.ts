@@ -24,7 +24,7 @@ test('S00-005 tools authority lists exactly 19 canonical v2 tools before histori
   const section=body.split('## Historical v1 tool catalog')[0]!;
   assert.ok(section.includes('The table describes the v2 contract during development'));
   assert.ok(body.includes('## Historical v1 tool catalog'));
-  assert.deepEqual([...section.matchAll(/^\\| `([a-z_]+)` \\|/gm)].map(match=>match[1]),[
+  assert.deepEqual(section.split('\n').filter(line=>line.startsWith('| `')).map(line=>line.split('`')[1]),[
     'read','write','delete','rename','list_files','page_eval','page_refresh',
     'preview_diagnostics','set_viewport_size','capture_page_image','execute_js',
     'fetch_url','fetch_generator','workspace_status','generator_info',
