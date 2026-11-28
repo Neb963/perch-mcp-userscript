@@ -1,6 +1,13 @@
 # Implementation ledger
 
 
+## R06 — bounded synchronous transaction read reuse (candidate; pending full workerd measurement)
+
+- **Authority and goal:** retain exact fail-closed Grant/Target scope, fresh authorization across requests/RPC awaits, durable terminal/recovery and old physical schemas. Starting verified code `0c4a44e`, 708 PASS/0 FAIL/1 historical skip, native lifecycle **187 reads / 44 writes**, objective ≤120/40. This candidate is not a claim that either target is met.
+- **Design:** SqlRecords caches only canonical JSON read by the same synchronous `transactionSync`; uses isolated defensive snapshots; invalidates the entire cache before every direct non-SELECT SQL statement, including failed writes; clears at transaction exit (success/rollback). Bound 32 entries, individual payload ≤16,384 UTF-16 units, total ≤65,536. No data cached across transaction boundary, RPC await or DO request; large archives bypass it.
+- **Pre-CI focused test:** five real SQLite checks passed locally (Node 22 built-in SQLite; independent of Cloudflare runtime): nested read reuse and alias isolation, direct SQL and put/delete invalidation, rollback/error, corrupt chunk fail-closed, large/over-capacity bypass. These do not prove Cloudflare billing or full compatibility.
+- **Exit criteria:** run exact-head locked offline CI/Miniflare, compare same native and legacy five-stage benchmarks to 187/44 and 251/74, verify no regressions and no inflated PASS statuses; revert if benefit insufficient or integrity tests fail. Keep draft PR unmerged and all external/live gates unqualified.
+
 ## R00–R05 v0.3 conformance remediation
 
 ### 2026-11-28 exact A01 and canonical-integrity qualification
