@@ -260,8 +260,10 @@ test('S03-028/029 selected local read bounds, ranges, consistency and READ_SOURC
 test('R15 guarded filesystem and compute authorization enforce exact capability ceilings',async()=>{
   const shaA=await digest(new Uint8Array([65]));
   const zeroSha=await digest(new Uint8Array());
-  const read=['READ_SOURCE'],write=['WRITE_SOURCE'],both=['READ_SOURCE','WRITE_SOURCE'];
-  const denied=async(tool:string,args:Record<string,unknown>,ceilings:string[])=>{
+  type Permissions=DevelopmentContext['envelope']['permissions'];
+  const read:Permissions=['READ_SOURCE'],write:Permissions=['WRITE_SOURCE'],
+    both:Permissions=['READ_SOURCE','WRITE_SOURCE'];
+  const denied=async(tool:string,args:Record<string,unknown>,ceilings:Permissions)=>{
     const f=await fixture(tool,args);
     f.context.envelope.permissions=ceilings;
     const original=(await f.vfs.localView()).revision.value;
