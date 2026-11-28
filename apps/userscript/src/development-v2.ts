@@ -34,28 +34,69 @@ async function scopedCompute(args: BrowserToolArgs<'execute_js'>, context: Devel
   const maxBytes = args.access.maxBytes ?? 16 * 1024 * 1024;
   const maxReads = args.access.maxReads ?? 256;
   const maxWrites = args.access.maxWrites ?? 64;
-  const readNative = () => context.vfs.adapter.readSourceView(
-    nativeRules.filter(rule => !rule.endsWith('/')), nativeRules.filter(rule => rule.endsWith('/')), 256, maxBytes);
   if (viewRules.length)
     await context.permit('read-view', await digest(JSON.stringify([context.envelope.target, args.access, pins])));
   await context.assertCurrent();
   const localView = await context.vfs.localView();
-  const nativeView = nativeRules.length ? await readNative() : new Map<string, Uint8Array | null>();
-  const readablePaths = [...nativeView].filter(([, bytes]) => bytes !== null).map(([path]) => path)
+  // Directory access grants visibility, not a request to hydrate every native
+  // asset. Enumerate metadata only, then read explicitly requested bytes.
+  const hasNativeAssets = nativeRules.some(rule => rule.startsWith('src/'));
+  const nativeManifest = hasNativeAssets
+    ? await context.vfs.adapter.listSourceMetadata()
+    : [{path:'main.pjs'}, {path:'index.html'}];
+  const nativePaths = nativeManifest.map(row => row.path)
+    .filter(path => pathMatchesRules(path, nativeRules)).sort();
+  const nativePathSet = new Set(nativePaths);
+  const nativeView = new Map<string, Uint8Array | null>();
+  const readablePaths = nativePaths.filter(path => pathMatchesRules(path, readRules))
     .concat(localView.files.map(file => file.path)).filter(path => pathMatchesRules(path, readRules)).sort();
   const localCache = new Map<string, Uint8Array>();
-  let loadedBytes = [...nativeView.values()].reduce((sum, bytes) => sum + (bytes?.byteLength ?? 0), 0);
+  let loadedBytes = 0;
   let readCount = 0;
   const localFiles = new Map(localView.files.map(row => [row.path, row]));
   const checkRead = async () => {
     await context.assertCurrent();
     if (++readCount > maxReads) throw new ExecutionError('LIMIT_EXCEEDED', 'Guest read count exceeded.');
   };
+  const assertNativeUnchanged = (current: Map<string, Uint8Array | null>) => {
+    if (nativeView.size !== current.size || [...nativeView].some(([path, before]) => {
+      const after = current.get(path);
+      return before === null ? after !== null : !after || !equalBytes(before, after);
+    })) throw new ExecutionError('STALE_REVISION', 'Selected native source changed during guest computation.');
+  };
+  const readNativeObserved = () => nativeView.size
+    ? context.vfs.adapter.readSourceView([...nativeView.keys()], [], nativeView.size, maxBytes)
+    : Promise.resolve(new Map<string, Uint8Array | null>());
+  const assertNativeManifestUnchanged = async () => {
+    if (!hasNativeAssets) return;
+    const current = (await context.vfs.adapter.listSourceMetadata()).map(row => row.path)
+      .filter(path => pathMatchesRules(path, nativeRules)).sort();
+    if (JSON.stringify(current) !== JSON.stringify(nativePaths))
+      throw new ExecutionError('STALE_REVISION', 'Native source paths changed during guest computation.');
+  };
   const read = async (path: string) => {
     await checkRead();
     if (native(path)) {
-      const bytes = nativeView.get(path);
-      if (!bytes) throw new ExecutionError('FILE_NOT_FOUND', 'Guest file does not exist.');
+      if (!nativePathSet.has(path)) throw new ExecutionError('FILE_NOT_FOUND', 'Guest file does not exist.');
+      const cached = nativeView.get(path);
+      if (cached) return cached.slice();
+      // Re-read earlier selected files inside the same bracketed native view.
+      // A new read cannot silently combine bytes from two known revisions.
+      const current = await context.vfs.adapter.readSourceView(
+        [...nativeView.keys(), path], [], Math.min(maxReads, nativeView.size + 1), maxBytes);
+      for (const [prior, expected] of nativeView) {
+        const observed = current.get(prior);
+        if (!expected || !observed || !equalBytes(expected, observed))
+          throw new ExecutionError('STALE_REVISION', 'Selected native source changed during guest computation.');
+      }
+      const bytes = current.get(path);
+      if (!bytes) throw new ExecutionError('STALE_REVISION', 'Native source disappeared during guest computation.');
+      if (loadedBytes + bytes.length > maxBytes)
+        throw new ExecutionError('LIMIT_EXCEEDED', 'Guest read-view byte budget exceeded.');
+      await assertNativeManifestUnchanged();
+      await context.assertCurrent();
+      loadedBytes += bytes.length;
+      nativeView.set(path, bytes.slice());
       return bytes.slice();
     }
     const existing = localCache.get(path);
@@ -72,15 +113,11 @@ async function scopedCompute(args: BrowserToolArgs<'execute_js'>, context: Devel
     localCache.set(path, bytes);
     return bytes.slice();
   };
-  const filesBefore = await Promise.all([...nativeView].map(async ([path, bytes]) =>
-    [path, bytes === null ? null : await digest(bytes)]));
-  const version = 'view:' + await digest(JSON.stringify([context.envelope.target, localView.revision.value, filesBefore]));
-  const assertNativeUnchanged = (current: Map<string, Uint8Array | null>) => {
-    if (nativeView.size !== current.size || [...nativeView].some(([path, before]) => {
-      const after = current.get(path);
-      return before === null ? after !== null : !after || !equalBytes(before, after);
-    })) throw new ExecutionError('STALE_REVISION', 'Selected native source changed during guest computation.');
-  };
+  // This token is an operation-local *selected view* identity, not a complete
+  // verified native SourceRevision. Publication independently verifies native
+  // state and the exact staged write set after the compute guest completes.
+  const version = 'view:' + await digest(JSON.stringify([
+    context.envelope.target, localView.revision.value, nativePaths]));
   const modules: Record<string, string> = Object.create(null);
   let moduleBytes = 0;
   for (const pin of pins) {
@@ -123,14 +160,13 @@ async function scopedCompute(args: BrowserToolArgs<'execute_js'>, context: Devel
           throw new ExecutionError('SCOPE_DENIED', 'Guest write is outside declared access.');
         const before = writes.some(entry => native(entry.path)) ? await context.vfs.snapshot() : null;
         if (before) {
+          await assertNativeManifestUnchanged();
           const observed = new Map<string, Uint8Array | null>(
-            nativeRules.filter(rule => !rule.endsWith('/')).map(path => [path, before.files[path] ?? null]));
-          for (const [path, bytes] of Object.entries(before.files)) {
-            if (native(path) && pathMatchesRules(path, nativeRules)) observed.set(path, bytes);
-          }
+            [...nativeView.keys()].map(path => [path, before.files[path] ?? null]));
           assertNativeUnchanged(observed);
         } else if (nativeRules.length) {
-          assertNativeUnchanged(await readNative());
+          await assertNativeManifestUnchanged();
+          assertNativeUnchanged(await readNativeObserved());
         }
         if ((await context.vfs.localView()).revision.value !== localView.revision.value)
           throw new ExecutionError('STALE_REVISION', 'Private source changed during guest computation.');
