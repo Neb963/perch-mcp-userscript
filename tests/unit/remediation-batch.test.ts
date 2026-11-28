@@ -15,6 +15,9 @@ const write = (path: string, content = 'fixture') => ({tool: 'write', args: {
 const evaluate = {tool: 'page_eval', args: {js: 'return 1;'}};
 
 async function fixture(actions: object[]) {
+  // The gateway serializes actions to JSON; distinct wire values cannot share
+  // JavaScript object identity even if a test reused its object constants.
+  actions = JSON.parse(JSON.stringify(actions)) as object[];
   const storage = new MemoryStore();
   const native = new Map<string, Uint8Array>([
     ['original', Uint8Array.of(1)], ['removed', Uint8Array.of(2)],

@@ -196,7 +196,8 @@ test('F09 lazy native read invalidates the view after a same-size edit to a prev
 test('Invalid batch tail has zero effects. Valid batch reports partial on a failing subsequent action.', async () => {
   const first={tool:'write',args:{files:[{path:'scratch/new',encoding:'utf8',content:'safe',ifAbsent:true}]}};
   const f=await fixture('batch',{actions:[first,{tool:'read',args:{files:[{path:'../../outside'}]}}]});
-  await assert.rejects(executeDevelopment(f.context),/Invalid v2/);
+  await assert.rejects(executeDevelopment(f.context),
+    (error:unknown)=>error instanceof BrowserError && error.code==='INVALID_INPUT');
   assert.deepEqual(f.permits,[]);
   const valid=await fixture('batch',{actions:[first,{tool:'read',args:{files:[{path:'scratch/new'}]}},
     {tool:'delete',args:{paths:[{path:'scratch/input',ifSha256:await digest('wrong')}]}}]});
