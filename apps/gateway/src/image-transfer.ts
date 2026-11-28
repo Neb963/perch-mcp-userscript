@@ -8,6 +8,9 @@ export const IMAGE_WORKSPACE_BYTES = 8 * IMAGE_MAX_BYTES;
 export const IMAGE_TTL_MS = 10 * 60 * 1000;
 const MAX_MANIFESTS = 64;
 const IMAGE_TOOLS = new Set(["read_image", "generate_image", "capture_page_image"]);
+/** Single source of truth for result paths that may hydrate image bytes.
+ * All image tools preserve late Registry reauthorization after async I/O. */
+export function isImageTransferTool(tool:string):boolean {return IMAGE_TOOLS.has(tool);}
 const MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 type Records = MediaRecordStore;
 export interface ImageLease {
@@ -325,7 +328,7 @@ export class ImageTransferHandler<T extends ImageOperation = ImageOperation> {
   }
   /** Hydrate only the fixed succeeded image-tool terminal shape, before standard MCP projection. */
   async hydrate(summary: unknown, scope: ImageReadScope): Promise<unknown> {
-    if (!object(summary) || summary.status !== "SUCCEEDED" || !IMAGE_TOOLS.has(String(summary.tool))) return summary;
+    if (!object(summary) || summary.status !== "SUCCEEDED" || !isImageTransferTool(String(summary.tool))) return summary;
     const terminal = summary.data;
     if (!object(terminal) || !object(terminal.data) || !Array.isArray(terminal.data.content)) return summary;
     if (summary.operationId !== scope.operationId || terminal.operationId !== scope.operationId || terminal.status !== "SUCCEEDED")

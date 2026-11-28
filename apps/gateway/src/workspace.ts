@@ -1,5 +1,5 @@
 import { withSqlUsage } from "./sql-meter.js";
-import { ImageTransferHandler } from "./image-transfer.js";
+import { ImageTransferHandler, isImageTransferTool } from "./image-transfer.js";
 import { MusicHandler } from "./media/handler.js";
 import type { DurableObjectState, WebSocket as DurableSocket } from "@cloudflare/workers-types";
 import {
@@ -944,10 +944,18 @@ export class Workspace {
       // active/already-notified status reads do not enumerate outbox/history.
       maintenance.settled = !op.terminalAt || op.terminalNotified === true;
       let data: unknown = summary;
-      if (path === '/internal/status' && typeof b.agentId === 'string' && typeof b.bindingRevision === 'number') {
+      // Source, text, compute and ordinary cancellation status need no async
+      // image hydration. After the first fresh scoped authorization there is
+      // no await before serialization, hence no opportunity for a concurrent
+      // Registry revocation. Never omit the second check if async image I/O
+      // could occur. Image tools preserve the existing post-hydration fence.
+      const mightHydrateImage = path === '/internal/status' &&
+        typeof b.agentId === 'string' && typeof b.bindingRevision === 'number' &&
+        isImageTransferTool(op.tool);
+      if (mightHydrateImage) {
         try {
           data = await this.images.hydrate(summary, {workspaceId: op.workspaceId, operationId,
-            agentId: b.agentId, bindingRevision: b.bindingRevision});
+            agentId: b.agentId as string, bindingRevision: b.bindingRevision as number});
         } catch (error) {
           if (!scoped) throw error;
           const code = error instanceof ApiError ? error.code : undefined;
@@ -955,7 +963,7 @@ export class Workspace {
             code === 'RESULT_EXPIRED' ? 'EXPIRED' : code === 'LIMIT_EXCEEDED' ? 'TOO_LARGE' : 'UNAVAILABLE');
         }
       }
-      if (scoped) await this.authorizeScopedResult(op, b);
+      if (scoped && mightHydrateImage) await this.authorizeScopedResult(op, b);
       return json(data);
     }
     // Admin-only read-only diagnostic path. Exposed by the top-level Worker
