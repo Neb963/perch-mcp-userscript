@@ -3,6 +3,13 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### Clean-install Resource retirement S09-003
+
+- Source `2a49d88`, [CI 46142275476](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46142275476) passed 704 tests / 0 failed / 1 historical skip. New no-legacy `resourceStorageMaintenance` short circuit prevents inactive Resource schema/trigger writes in native/prepare mode, while legacy data appearing later still migrates.
+- Strengthened the test's SQL-write assertion to refuse every CREATE, INSERT, UPDATE, DELETE, DROP, ALTER or REPLACE SQL statement; no incorrect regex can permit an unobserved Resource write. Direct hermetic Chromium manager remains five tabs with zero Library navigation.
+- [S09-003 qualification](docs/verification/v0.3-remediation/r05/RESOURCE-RETIREMENT-EVIDENCE.md) moves one previously FAIL clause to PASS. Matrix now 1,317: PASS 87, FAIL 5, NOT_STARTED 1186, OWNER 24, BLOCKED 1, SUPERSEDED 14. Remaining F14 subclauses still require independent verification.
+- Pending new exact-head CI for strengthened invariant; no live infrastructure or deployment.
+
 ### R03 F14/F25 Resource clean-install storage short circuit
 
 - New v2 workspaces and a fresh native-mode Registry do **not** imply a legacy Resource library exists. `resourceStorageMaintenance` now checks for a legacy library before installing Resource SQL schema/triggers. Legacy/native authority markers stay mandatory if migration was previously started; existing native installations still use their original migration readers.

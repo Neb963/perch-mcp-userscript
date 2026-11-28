@@ -371,7 +371,8 @@ test('F14 clean development-only native mode never seeds or installs Resource SQ
       assert.equal(resourceStorageStatus(f.db).phase,'LEGACY');
     }
     const normal=f.queries.slice(before);
-    assert.equal(normal.filter(row=>/^\\s*(CREATE|INSERT|UPDATE|DELETE)\\s.*resource_/i.test(row.sql)).length,0,
+    assert.equal(normal.filter(row=>['CREATE','INSERT','UPDATE','DELETE','DROP','ALTER','REPLACE']
+      .some(verb=>row.sql.trimStart().toUpperCase().startsWith(verb+' '))).length,0,
       'No Resource schema, migration, or lifecycle writes without legacy authority.');
     assert.deepEqual(f.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'resource_%'"),[]);
     // If old Resource state appears later, keep the compatible migration path.
