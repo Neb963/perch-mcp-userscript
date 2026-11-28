@@ -81,6 +81,26 @@ test('S03-002/003/004/005/006: malformed standalone requests fail before admissi
     moves: [{from: 'scratch/existing', to: 'src/moved', destination: 'absent', ifSha256: 'a'.repeat(64)}]}), 'PATH_DENIED');
 });
 
+
+test('S03-007/008 admission rejects excessive nesting and UTF-8 serialized bytes before durable effects', () => {
+  const target = 'w2.workspace.1.1', operationKey='k2.'+Date.now()+'.'+crypto.randomUUID();
+  const write=(content:string)=>parseDevelopmentCall('write',{target,operationKey,
+    files:[{path:'scratch/budget.txt',encoding:'utf8',content,ifAbsent:true}]});
+  const rejected=(fn:()=>unknown)=>
+    assert.throws(fn,(error:unknown)=>error instanceof ToolError && error.code==='LIMIT_EXCEEDED');
+  let tooDeep:unknown='leaf';
+  for(let i=0;i<18;i++) tooDeep={nested:tooDeep};
+  rejected(()=>parseDevelopmentCall('read',{target,files:[{path:'main.pjs'}],unrelated:tooDeep}));
+  rejected(()=>parseDevelopmentCall('workspace_status',{target,unrelated:tooDeep}));
+  const tooMany=Array.from({length:16_385},()=>0);
+  rejected(()=>parseDevelopmentCall('read',{target,files:[{path:'main.pjs'}],unrelated:tooMany}));
+  // Schema permits 512 KiB for an individual input field, but the wire
+  // reserves bytes for the authenticated envelope and result metadata.
+  rejected(()=>write('x'.repeat(512*1024)));
+  assert.equal(write('x'.repeat(200_000)).name,'write');
+  assert.equal(parseDevelopmentCall('read',{target,files:[{path:'main.pjs'}]}).name,'read');
+});
+
 test('100 QuickJS reads share a local read view and a denied publication leaves scratch unchanged', async () => {
   const input = {js:'let count=0; for(let i=0;i<100;i++) if(await fs.readTextFile("scratch/input")==="A") count++; return count;',
     access:{read:['scratch/input'],maxReads:100}};

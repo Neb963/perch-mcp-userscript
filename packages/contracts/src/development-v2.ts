@@ -160,6 +160,27 @@ function stringifyWellFormed(value: unknown): string {
   });
 }
 
+/** Bound object traversal *before* Zod parsing or Registry/Workspace effects.
+ * Network MCP input is JSON, so repeated object references are non-canonical. */
+const maxInputDepth = 16;
+const maxInputNodes = 16_384;
+function assertBoundedInputTree(root: unknown): void {
+  const stack: {value: unknown; depth: number}[] = [{value:root,depth:0}];
+  const visited = new WeakSet<object>();
+  let nodes = 0;
+  while (stack.length) {
+    const {value,depth} = stack.pop()!;
+    if (++nodes > maxInputNodes || depth > maxInputDepth)
+      throw new ToolError('LIMIT_EXCEEDED','Development input exceeds structural depth or node limits.');
+    if (!value || typeof value !== 'object') continue;
+    if (visited.has(value))
+      throw new ToolError('INVALID_INPUT','Development input contains repeated object references.');
+    visited.add(value);
+    const children = Array.isArray(value) ? value : Object.values(value);
+    for (const child of children) stack.push({value:child,depth:depth+1});
+  }
+}
+
 function receiptPaths(step: BatchArgumentsV2['actions'][number]): string[] {
   switch (step.tool) {
     case 'read': case 'write': return step.args.files.map(file => file.path);
@@ -263,6 +284,7 @@ export function preflightDevelopmentBatch(batch: BatchArgumentsV2, approvedHosts
 export function parseDevelopmentCall(name: string, raw: unknown) {
   if (!developmentToolNames.includes(name as DevelopmentTool))
     throw new ToolError('INVALID_INPUT', 'Unknown development tool.');
+  assertBoundedInputTree(raw);
   if (Object.hasOwn(special, name)) {
     const parsed = special[name as keyof typeof special].safeParse(raw);
     if (!parsed.success) throw new ToolError('INVALID_INPUT', 'Invalid operation scope or status arguments.');
@@ -279,7 +301,9 @@ export function parseDevelopmentCall(name: string, raw: unknown) {
   if (!parsed.success) throw new ToolError('INVALID_INPUT', 'Invalid development tool arguments.');
   if (tool === 'batch') preflightDevelopmentBatch(parsed.data as BatchArgumentsV2);
   else {
-    stringifyWellFormed(parsed.data);
+    const serialized = stringifyWellFormed(parsed.data);
+    if (utf8.encode(serialized).byteLength > LIMITS.transportBytes - batchEnvelopeReserve)
+      throw new ToolError('LIMIT_EXCEEDED','Development input exceeds serialized envelope byte budget.');
     // Public admission rejects invalid bytes, conflicting paths and missing
     // mutation preconditions before the operation is durably recorded.
     // Browser execution independently revalidates current file state.
