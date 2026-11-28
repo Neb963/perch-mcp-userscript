@@ -1,3 +1,5 @@
+> **Newer exact-head check (2026-11-28):** [5c045bc, CI 46140138366](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46140138366) passed 701 tests, 0 failures, 1 skip. The [F09/OAuth/UI qualification](F09-OAUTH-UI-QUALIFICATION.md) supports 19 specific atomic status changes, not a blanket release approval. Native benchmark 187/46 remains over 120/40; actual preview capture and OWNER gates remain open. Historical baseline sections below stay labeled by source SHA.
+
 # R05 exact-head requirement inventory and release gates
 
 ## Authority and method

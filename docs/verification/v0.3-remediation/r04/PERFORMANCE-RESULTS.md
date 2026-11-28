@@ -1,3 +1,5 @@
+> **Newer verified native/legacy measurement (2026-11-28):** Exact commit `5c045bc74b9be3c5c6bb970a6f0934d5a6cc7c88`, [run 46140138366](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46140138366), is **187 SQL reads / 46 writes native** and **249 / 76 legacy** across the identical five-stage lifecycle. Both remain above the native ≤120/40 objective. Historical tables below intentionally preserve their earlier source SHA and numbers; do not treat them as current.
+
 # R04 measured Cloudflare cost and specification targets
 
 **Current evidence**: exact clean CI head `34657b7a7795c4fad9e28787f522711ce33a673e`, offline run [46105833686](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46105833686), artifact `perch-mcp-remediation-cost-evidence` (native/legacy JSON, uploaded independently before build). SourceDirty=false for both. Miniflare/local SDK only; browser execution was a synthetic terminal receipt, never real Perchance. The original [e742f091 baseline](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46095386706) is preserved.

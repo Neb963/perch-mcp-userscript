@@ -3,6 +3,14 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### 2026-11-28 exact-head F09/OAuth/manager qualification
+
+- Safe demand-driven native compute read path committed at `5c045bc` after detecting and fixing a write-only manual-edit race. The existing size/prefix negatives remain intact, with added 100-file selector and same-size-edit regressions.
+- [Offline run 46140138366](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46140138366): 701 PASS, 0 FAIL, 1 historical skip, build/artifacts/dry-run PASS. Local synthetic Chromium exact-installer: 30 screenshots, 10/8/2 complete Workspace rows, 52px desktop row, no external requests.
+- Native full five-stage lifecycle still **187 SQL reads / 46 writes**, legacy 249/76. The ≤120/40 objective remains **UNMET**; do not relabel aggregate batching as ordinary per-operation compliance.
+- R05 reconciled 19 atomic clauses with direct evidence in [qualification report](docs/verification/v0.3-remediation/r05/F09-OAUTH-UI-QUALIFICATION.md). Requirement inventory remains mostly unverified; screenshot and OWNER gates still block release.
+- Next: resolve other normative requirements with independently reproducible tests and safe corrections, investigate SQL terminal/dispatch amplification without weakening authority, preserve draft PR and no live access.
+
 Baseline `298f3b9619335364c668a69b6f04570ae530fcab` (tree `c07b3e7e25ea0e4d063ee11435cc58e3d524059b`), same tree as audited PR #24 head. Work on `repair/v0.3-conformance`. [Authority](docs/v0.3/REMEDIATION-AUTHORITY.md) and [verification index](docs/verification/v0.3-remediation/REQUIREMENT-TRACEABILITY.md).
 
 | Phase | Verification gate | State |
