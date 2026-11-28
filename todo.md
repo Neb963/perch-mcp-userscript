@@ -30,6 +30,12 @@ The 3fac671 manager release passed strict typecheck and 667/670 tests in offline
 
 F10 status semantics: stale heartbeat is not verified source. Registry detail must explicitly report unverified SourceRevision/LocalRevision/PreviewRevision/SavedRevision, effective tool permissions, unsupported pixel capture and scoped blockers without reading source. Native generator_info must return reasoned revision objects without implicit verification. A focused local-workerd test exercises a READ_SOURCE-only Connector, unbound discovery, bound Target detail, unauthorized write capability and explicit unavailable verified-source path. Verification pending exact-head CI.
 
+### R04 measured no-op fast path and fresh physical schema (2026-11-28)
+
+- ce51cf6 exact-head CI 46109712786 succeeded, but SQL rows native five-stage **193/57**, legacy **246/85**, identical to verified de350a/34657 baseline. The active-poll deadline shortcut adds complexity without measured SQL saving. Revert the Workspace source and remove its additional test before further optimization.
+- For new installations only, change the SqlRecords `records` canonical table declaration to `WITHOUT ROWID` (one composite PRIMARY KEY B-tree, not a rowid table with separate key index). Do NOT rebuild or migrate existing `records` tables. Preserve the original schema automatically for previously created Durable Objects via `CREATE TABLE IF NOT EXISTS`.
+- Qualify both fresh WITHOUT ROWID and pre-existing rowid shapes under SQLite: chunked Unicode, rollback, triggers, write/delete, cold reopen and exact authorization. Verify actual Miniflare native/legacy SQL rows before claiming a benefit; revert if reads or writes increase or state semantics change.
+- Keep fresh-vs-existing physical layout distinction visible in the report and rollout. Owner has expressed willingness to reconfigure credentials, but no live drop/reset or migration is authorized.
 ### R04 measured rollback and bounded active polling (2026-11-28)
 
 - CI 46109244898 at fbe2132 passed offline typecheck/tests/build, but SQL IN-plan increased five-stage native reads 193→203 and legacy 246→256, with unchanged writes. Revert and remove test; a measured regression cannot remain.

@@ -9,7 +9,7 @@ export class SqlRecords {
   private usage: SqlUsage = { reads: 0, writes: 0, statements: 0, unmetered: 0 };
   constructor(private storage: DurableObjectStorage) {
     this.query(
-      "CREATE TABLE IF NOT EXISTS records (key TEXT NOT NULL, part INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(key, part))",
+      "CREATE TABLE IF NOT EXISTS records (key TEXT NOT NULL, part INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(key, part)) WITHOUT ROWID",
     );
   }
   /** All statements consume their cursor before reading Cloudflare's counters. */
