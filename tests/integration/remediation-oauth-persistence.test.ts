@@ -5,7 +5,7 @@ import { createCapacityHarness } from './gateway-capacity-harness.js';
 const admin='/api/v1/admin';
 const base='https://capacity.test';
 
-for (const ttl of [900,1800,3600,7200,86400,604800,2592000,31536000,315360000]) {
+for (const ttl of [900,1800,3600,7200,86400,604800,2592000,31536000,24*86400,315360000]) {
   test('F16 actual SDK persistent v2 consent, KV expiry and revocation: '+ttl+' seconds', {timeout:30_000}, async()=>{
     const h=await createCapacityHarness(0,{DEVELOPMENT_CONTRACT_V2_ENABLED:'true',DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED:'true',
       OAUTH_ACCESS_TOKEN_TTL_SECONDS:String(ttl),REGISTRY_GRANT_BUDGET:'1'},{entryPoint:'tests/fixtures/oauth-refresh-runtime.ts'});

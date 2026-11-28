@@ -20,7 +20,7 @@ The visual script renders Workspaces, Connectors, Activity, Recovery and Setting
 
 ## Remaining limitations
 
-- Ten-year access tokens pass local workerd issuance/refresh/revoke, not real ChatGPT connector compatibility (OWNER-02).
+- Ten-year access tokens pass local workerd issuance/refresh/revoke, but **Chromium clamps a single timer exceeding 2^31-1 milliseconds to near-immediate**. A generic client using `expires_in*1000` in `setTimeout()` could therefore enter a KV-expensive refresh storm. The default is 24 days (2,073,600 seconds; 2,073,600,000 ms) with ample margin below 2^31-1. Explicit longer SDK-supported TTLs are permitted by operator configuration only; OWNER-02 must qualify the actual external client before changing the default. The Registry Grant/SDK refresh authorization remain indefinite in either case.
 - Binding-local historical root reuse is verified. F06 cross-tab physical compaction is not qualified with stale Violentmonkey GM caches. Do not discard protected bytes based on synthetic exclusion.
 - F11 actual generator preview pixel capture lacks a qualified pure userscript API; remains BLOCKED_FEASIBILITY, notwithstanding screenshots of the manager.
 - R04 performance targets and the full requirements register remain open. No live test or deployment is authorized.
