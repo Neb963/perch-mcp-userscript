@@ -2,7 +2,7 @@
 export interface NativeIdentity { generatorId: string; slug: string; publicId?: string; draftId: string }
 export interface NativeSnapshot { identity: NativeIdentity; files: Record<string, Uint8Array>; revision: string; dirty: boolean; saveState: string }
 export interface FileWrite { path: string; bytes: Uint8Array | null }
-export interface MutationResult { status: 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN'; revision: string; nativeRevision?: string; committed: string[]; error?: { code: string; message: string; recovery: string } }
+export interface MutationResult { status: 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN'; revision: string; nativeRevision?: string; committed: string[]; uncertainPaths?: string[]; error?: { code: string; message: string; recovery: string } }
 export interface CapabilityReport { adapterVersion: 1; ready: boolean; identity?: NativeIdentity; sourceRead: boolean; sourceWrite: boolean; sourceWriteBlocked: string[]; nativeSave: boolean; preview: boolean; dirty: boolean; blocked: string[]; liveExternalWritesEnabled: boolean }
 export interface KeyValueStore { get<T>(key: string): Promise<T | undefined>; set<T>(key: string, value: T): Promise<void>; delete(key: string): Promise<void>; list(): Promise<string[]> }
 export class BrowserError extends Error {

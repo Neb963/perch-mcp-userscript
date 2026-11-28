@@ -1,0 +1,75 @@
+{
+  "scope": "Synthetic real pinned SDK/workerd tests; no external endpoints. Evidence produced before the R01 checkpoint.",
+  "tests": "tests/integration/remediation-receipt.test.ts",
+  "originalBaselineRepro": "tests/unit/remediation-execution-baseline.test.ts, test name F05",
+  "cases": [
+    {
+      "id": "A27-lost-admission-ack",
+      "actual": "UNKNOWN/UNKNOWN with original Target and key after dropped durable admission reply. One persisted operation recovered by key.",
+      "verificationScope": "Verified"
+    },
+    {
+      "id": "A27-retry-same",
+      "actual": "Repeated exact key/request returned the original operation ID. No second admission. Queued fixture cancelled before native execution.",
+      "verificationScope": "Verified admission dedup; native dispatch evidence separate"
+    },
+    {
+      "id": "A27-retry-changed",
+      "actual": "Modified payload with the issued key rejected NONE/IDEMPOTENCY_CONFLICT.",
+      "verificationScope": "Verified"
+    },
+    {
+      "id": "F05-lost-result-ack",
+      "actual": "Lost status by operation ID stayed UNKNOWN/UNKNOWN. Lost cancel by operation key stayed UNKNOWN. Subsequent status recovered exact CANCELLED/NONE.",
+      "verificationScope": "Verified"
+    },
+    {
+      "id": "A24-successful-large-result",
+      "actual": "250000-byte terminal payload omitted. SUCCEEDED/KNOWN, operation selectors and TOO_LARGE preserved.",
+      "verificationScope": "Verified SDK/ledger delivery"
+    },
+    {
+      "id": "A24-partial-large-result",
+      "actual": "250000-byte terminal payload omitted. PARTIAL/PARTIAL, operation selectors and TOO_LARGE preserved.",
+      "verificationScope": "Verified SDK/ledger delivery; bounded batch-step coverage separate"
+    },
+    {
+      "id": "A24-expiry",
+      "actual": "Injected TTL retained SUCCEEDED/KNOWN and exact selectors, with EXPIRED and no transient bytes.",
+      "verificationScope": "Verified SDK/ledger delivery"
+    },
+    {
+      "id": "A24-projection-failure",
+      "actual": "Inline malformed and missing staged image bytes delivered text-only SUCCEEDED metadata with UNAVAILABLE/EXPIRED.",
+      "verificationScope": "Verified SDK/ledger delivery"
+    },
+    {
+      "id": "A09-revoked-during-projection",
+      "actual": "Authorized hydrated image bytes delivered previously. Real Registry revoked at final authorization. Retained result and image withheld.",
+      "verificationScope": "Verified"
+    },
+    {
+      "id": "A16-net-zero-expiry",
+      "actual": "SUCCEEDED/NONE remained exact across cleanup and reconstructed Workspace in legacy and native canonical storage.",
+      "verificationScope": "Verified SDK/ledger delivery; guest/native behavior coverage separate"
+    }
+  ],
+  "runs": [
+    {
+      "command": "node --import tsx --test tests/integration/remediation-receipt.test.ts tests/integration/image-transfer.test.ts",
+      "passed": 15,
+      "failed": 0,
+      "log": "r01-f05.log"
+    },
+    {
+      "command": "node --import tsx --test --test-concurrency=2 tests/integration/assignment-contract.test.ts tests/integration/optimization-faults.test.ts tests/integration/remediation-receipt.test.ts",
+      "passed": 22,
+      "failed": 0,
+      "log": "r01-f05-adjacent.log"
+    },
+    {
+      "command": "npm run typecheck",
+      "exitCode": 0
+    }
+  ]
+}

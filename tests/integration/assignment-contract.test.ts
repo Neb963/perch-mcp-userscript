@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCapacityHarness } from './gateway-capacity-harness.js';
 import { issueSyntheticToken } from '../fixtures/optimization-client.js';
-import { encodeTarget, nextGeneration, parseTarget } from '../../packages/contracts/src/target.js';
+import { encodeTarget, nextGeneration, parseTarget, validGeneration } from '../../packages/contracts/src/target.js';
 
 const admin = '/api/v1/admin';
 const ceiling = ['READ_SOURCE', 'WRITE_SOURCE', 'PREVIEW_CONTROL'];
@@ -17,7 +17,32 @@ test('Target encoding rejects alternate representations and generation overflow'
   assert.throws(() => nextGeneration(Number.MAX_SAFE_INTEGER), /cannot advance/);
 });
 
-test('v2 Connector consent, legacy scope and indexed discovery in local workerd', async () => {
+test('S02-009 generation boundaries use canonical zero and MAX_SAFE_INTEGER, rejecting every overflow', () => {
+  const maximum = Number.MAX_SAFE_INTEGER;
+  for (const value of [0, 1, maximum - 1, maximum]) assert.equal(validGeneration(value), true, String(value));
+  for (const value of [-1, -0.5, 1.5, maximum + 1, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY,
+    Number.NaN, '0', null, undefined]) assert.equal(validGeneration(value), false, String(value));
+  for (const [assignmentGeneration, bindingGeneration] of [[0, 0], [maximum, maximum],
+    [0, maximum], [maximum, 0]] as const) {
+    const identity = {workspaceId: 'scope_9-A', assignmentGeneration, bindingGeneration};
+    const encoded = encodeTarget(identity);
+    assert.equal(encoded, 'w2.scope_9-A.' + assignmentGeneration + '.' + bindingGeneration);
+    assert.deepEqual(parseTarget(encoded), identity);
+  }
+  assert.equal(nextGeneration(0), 1);
+  assert.equal(nextGeneration(maximum - 1), maximum);
+  for (const value of [-1, -0.1, 1.5, maximum, maximum + 1, Number.NaN, Number.POSITIVE_INFINITY])
+    assert.throws(() => nextGeneration(value), /cannot advance/);
+  for (const value of ['w2.scope_9-A.00.0', 'w2.scope_9-A.0.00', 'w2.scope_9-A.-0.1',
+    'w2.scope_9-A.9007199254740992.0', 'w2.scope_9-A.0.9007199254740992',
+    'w2.scope_9-A.0.1e1'])
+    assert.throws(() => parseTarget(value), /Invalid Workspace Target/);
+  for (const value of [-1, maximum + 1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])
+    assert.throws(() => encodeTarget({workspaceId: 'scope_9-A', assignmentGeneration: value, bindingGeneration: 0}),
+      /Invalid Workspace Target/);
+});
+
+test('S02-020 S02-023 v2 Connector discovery and Target isolation in local workerd', async () => {
   const h = await createCapacityHarness(1, { DEVELOPMENT_CONTRACT_V2_ENABLED: 'true' });
   try {
     const legacy = h.fixtures[0]!;
@@ -68,7 +93,16 @@ test('v2 Connector consent, legacy scope and indexed discovery in local workerd'
     const asTarget = (w: Record<string, unknown>) => encodeTarget({
       workspaceId: String(w.id), assignmentGeneration: Number(w.assignmentGeneration), bindingGeneration: Number(w.bindingGeneration),
     });
+    // Foreign and nonexistent IDs must be indistinguishable to this Connector.
+    const absent = encodeTarget({workspaceId:'nonexistent-workspace',assignmentGeneration:0,bindingGeneration:0});
     await assert.rejects(discover(a, pa, { target: asTarget(b1) }), /TARGET_NOT_FOUND/);
+    await assert.rejects(discover(a, pa, { target: absent }), /TARGET_NOT_FOUND/);
+    // An owned Workspace with a mismatched canonical generation is known
+    // to this Connector, but is never accepted as the current Target.
+    const staleAssignment = encodeTarget({workspaceId:String(a1.id),
+      assignmentGeneration:Number(a1.assignmentGeneration)+1,
+      bindingGeneration:Number(a1.bindingGeneration)});
+    await assert.rejects(discover(a, pa, { target: staleAssignment }), /STALE_TARGET/);
     await assert.rejects(discover(a, pa, { target: asTarget(a2) }), /STALE_TARGET/);
     await assert.rejects(h.internal(h.registry, '/internal/authorize', {
       props: legacy.props, agentId: legacy.agentId, target: asTarget(a1),
@@ -88,11 +122,108 @@ test('v2 Connector consent, legacy scope and indexed discovery in local workerd'
     const approvals = await h.get(admin + '/approvals');
     assert.ok((approvals.items as Record<string, unknown>[]).every((row) => !Object.hasOwn(row, 'completionRedirect')));
     await h.update(admin + '/connectors/' + a.id, { expectedRevision: a.revision, suspended: true });
-    await assert.rejects(discover(a, pa), /REVOKED/);
+    await assert.rejects(discover(a, pa), /PAUSED/);
     await h.internal(h.registry, '/internal/authorize', { props: legacy.props, agentId: legacy.agentId });
   } finally {
     await h.close();
   }
+});
+
+test('A01 S02-012 S02-024 exact owned targets, isolated discovery trace, 50-Workspace pagination and stale cursor', async()=>{
+  const h=await createCapacityHarness(0,{DEVELOPMENT_CONTRACT_V2_ENABLED:'true',
+    DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED:'true',REGISTRY_WORKSPACE_BUDGET:'60'},
+    {entryPoint:'tests/fixtures/optimization-runtime.ts'});
+  try {
+    const connector=async(label:string)=>h.request(admin+'/connectors',{
+      expectedRevision:(await h.get(admin+'/state')).revision,label,permissionCeiling:ceiling});
+    const assignee=async(c:Record<string,unknown>,label:string)=>h.request(admin+'/workspaces',{
+      label,contractVersion:2,connectorId:c.id,expectedConnectorRevision:c.revision});
+    const bind=async(c:Record<string,unknown>,w:Record<string,unknown>,label:string)=>{
+      const binding={generatorId:'a01-'+label,slug:'a01-'+label,draftId:'',browserInstallationId:'capacity-browser'};
+      const proof=await h.executionRequest('/api/v1/tab/rebind-proof',{workspaceId:w.id,
+        expectedRevision:w.revision,binding,tabInstanceId:'fixture-'+label,adapterVersion:'2'});
+      return h.request(admin+'/workspaces/'+w.id+'/rebind',{expectedRevision:w.revision,
+        expectedConnectorRevision:c.revision,binding,bindingProof:proof.proof});
+    };
+    const grant=async(c:Record<string,unknown>)=>{
+      const pending=await h.internal(h.registry,'/internal/oauth/pending',{request:{
+        resource:c.endpoint,clientId:'a01-fixture',redirectUri:'https://client.test/callback',scope:['mcp']}});
+      const list=await h.get(admin+'/approvals');
+      const approval=(list.items as Record<string,unknown>[]).find(row=>row.id===pending.id)!;
+      await h.request(admin+'/approvals/'+pending.id+'/decision',{expectedRevision:approval.revision,
+        digest:approval.digest,decision:'approve'});
+      return (await h.internal(h.registry,'/internal/oauth/consume',{id:pending.id,handle:pending.handle})).props as Record<string,unknown>;
+    };
+    const a=await connector('A'),b=await connector('B'),c=await connector('C');
+    const a1=await bind(a,await assignee(a,'W1'),'w1'),a2=await bind(a,await assignee(a,'W2'),'w2'),
+      b1=await bind(b,await assignee(b,'W3'),'w3');
+    const pa=await grant(a),pb=await grant(b),pc=await grant(c);
+    type Page={workspaces:Array<{label:string;target:string|null}>;nextCursor:string|null;
+      fixtureTrace:{statements:Array<{sql:string;key:string|null}>;workspaceLookups:number}};
+    async function discover(conn:Record<string,unknown>,props:Record<string,unknown>,
+      owned:Record<string,unknown>[],args:Record<string,unknown>={}):Promise<Page> {
+      const response=await h.registry.fetch('https://internal/internal/v2/discover',{
+        method:'POST',headers:{'Content-Type':'application/json','X-Fixture-Discovery-Trace':'1'},
+        body:JSON.stringify({agentId:conn.id,props,args})});
+      assert.equal(response.status,200);
+      const page=await response.json() as Page;
+      const allowed=new Set(['core','grant/'+props.grantId,'agent/'+conn.id,'assignment-index/v2/'+conn.id,
+        ...owned.map(w=>'workspace/'+w.id)]);
+      assert.equal(page.fixtureTrace.workspaceLookups,0);
+      for(const query of page.fixtureTrace.statements){
+        assert.equal(query.sql,'SELECT part,value FROM records WHERE key=? ORDER BY part',query.sql);
+        assert.ok(query.key!==null&&allowed.has(query.key),'Unexpected authority record read: '+query.key);
+      }
+      assert.deepEqual(page.fixtureTrace.statements.filter(q=>q.key?.startsWith('workspace/')).map(q=>q.key).sort(),
+        page.workspaces.map(row=>{
+          const w=owned.find(w=>w.label===row.label);assert.ok(w);return 'workspace/'+w.id;
+        }).sort());
+      return page;
+    }
+    const ap=await discover(a,pa,[a1,a2]);
+    assert.deepEqual(ap.workspaces.map(row=>parseTarget(row.target).workspaceId).sort(),[a1.id,a2.id].sort());
+    // S02-024: use a real verified Binding, not the already-unbound
+    // Workspace from the separate negative-case discovery test.
+    const originallyBound = encodeTarget({workspaceId:String(a1.id),
+      assignmentGeneration:Number(a1.assignmentGeneration),
+      bindingGeneration:Number(a1.bindingGeneration)});
+    assert.ok(ap.workspaces.some(row=>row.target===originallyBound));
+    const wrongGeneration = encodeTarget({workspaceId:String(a1.id),
+      assignmentGeneration:Number(a1.assignmentGeneration)+1,
+      bindingGeneration:Number(a1.bindingGeneration)});
+    await assert.rejects(h.internal(h.registry,'/internal/v2/discover',{
+      agentId:a.id,props:pa,args:{target:wrongGeneration}}),/STALE_TARGET/);
+    assert.equal(ap.nextCursor,null);
+    const bp=await discover(b,pb,[b1]);
+    assert.deepEqual(bp.workspaces.map(row=>parseTarget(row.target).workspaceId),[b1.id]);
+    assert.equal(bp.nextCursor,null);
+    const cp=await discover(c,pc,[]);
+    assert.deepEqual(cp.workspaces,[]);assert.equal(cp.nextCursor,null);
+    const all=[a1,a2];
+    for(let i=2;i<50;i++)all.push(await assignee(a,'W-A-'+i));
+    const expected=[...all].sort((x,y)=>String(x.id)<String(y.id)?-1:1).map(w=>w.label);
+    const first=await discover(a,pa,all,{limit:7});assert.ok(first.nextCursor);
+    assert.deepEqual(first.workspaces.map(w=>w.label),expected.slice(0,7));
+    const repeat=await discover(a,pa,all,{limit:7});
+    assert.deepEqual(repeat.workspaces.map(w=>w.label),first.workspaces.map(w=>w.label));
+    assert.equal(repeat.nextCursor,first.nextCursor);
+    let cursor:string|null=first.nextCursor;const observed=first.workspaces.map(w=>w.label);
+    while(cursor){
+      const next=await discover(a,pa,all,{limit:7,cursor});
+      assert.ok(next.workspaces.length>0&&next.workspaces.length<=7);
+      observed.push(...next.workspaces.map(w=>w.label));cursor=next.nextCursor;
+      assert.ok(observed.length<=50,'Pagination must terminate');
+    }
+    assert.deepEqual(observed,expected);
+    const removed=all.at(-1)!;
+    await h.request(admin+'/workspaces/'+removed.id+'/unassign',{expectedRevision:removed.revision,
+      expectedConnectorRevision:a.revision});
+    await assert.rejects(h.internal(h.registry,'/internal/v2/discover',{agentId:a.id,props:pa,
+      args:{limit:7,cursor:first.nextCursor}}),/STALE_CURSOR/);
+    const remaining=await discover(a,pa,all.slice(0,-1),{limit:50});
+    assert.deepEqual(remaining.workspaces.map(w=>w.label),expected.filter(label=>label!==removed.label));
+    assert.equal(remaining.nextCursor,null);
+  } finally {await h.close();}
 });
 
 test('Binding transition holds dispatched effects, preserves original Grant access and publishes once', async () => {

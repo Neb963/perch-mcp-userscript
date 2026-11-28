@@ -84,7 +84,11 @@ export function projectAssignment(workspace: AssignedWorkspace, ceiling: readonl
   const readable = effective.includes('READ_SOURCE');
   const binding = workspace.binding;
   const observation = workspace.observation?.epoch === workspace.epoch ? workspace.observation : undefined;
-  const fresh = observation !== undefined && observation.observedAt + 60_000 > Date.now();
+  const now=Date.now();
+  const fresh = observation !== undefined && Number.isSafeInteger(observation.observedAt) &&
+    observation.observedAt <= now + 60_000 && observation.observedAt + 60_000 > now;
+  const readinessReason=!binding?'UNBOUND':workspace.transition?'TRANSITION_PENDING':
+    workspace.paused?'PAUSED':!observation?'NO_OBSERVATION':!fresh?'STALE_HEARTBEAT':'HEARTBEAT_NOT_SOURCE_PROOF';
   return {
     label: workspace.label,
     target: binding ? encodeTarget({
@@ -96,9 +100,18 @@ export function projectAssignment(workspace: AssignedWorkspace, ceiling: readonl
     identity: readable && binding ? { generatorId: binding.generatorId, draftId: binding.draftId } : null,
     connection: !binding ? 'UNBOUND' : fresh ? 'CONNECTED' : observation ? 'STALE' : 'UNKNOWN',
     paused: workspace.paused,
-    dirty: fresh ? observation.dirty : null,
+    dirty: readable && fresh ? observation.dirty : null,
     observedAt: observation?.observedAt ?? null,
-    freshness: fresh ? 'VERIFIED' : observation ? 'STALE' : 'UNKNOWN',
+    observationAgeMs: observation ? Math.max(0,now-observation.observedAt) : null,
+    freshness: fresh ? 'HEARTBEAT_OBSERVED' : observation ? 'STALE' : 'UNKNOWN',
+    readinessReason,
+    capabilities: {
+      sourceRead: {permitted:readable,availability:binding?'REQUIRES_EXPLICIT_READ':'UNBOUND'},
+      sourceWrite: {permitted:effective.includes('WRITE_SOURCE'),availability:'REQUIRES_FRESH_VERIFICATION'},
+      preview: {permitted:effective.includes('PREVIEW_CONTROL'),availability:'REQUIRES_BROWSER_PROBE'},
+      capture: {permitted:effective.includes('CAPTURE_PREVIEW'),availability:'UNSUPPORTED_INTERFACE'},
+      save: {permitted:effective.includes('SAVE'),availability:'REQUIRES_NATIVE_PROVIDER_PROOF'},
+    },
     permissions: effective,
   };
 }

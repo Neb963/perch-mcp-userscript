@@ -1,3 +1,5 @@
+import { ToolError } from '../../../packages/contracts/src/errors.js';
+import { parsePublicFetchDestination } from '../../../packages/contracts/src/public-fetch.js';
 import { ExecutionError } from './compute.js';
 
 export interface PublicFetchOptions {
@@ -15,12 +17,12 @@ export interface PublicFetchResult { bytes: Uint8Array; status: number; contentT
 const encoder = new TextEncoder();
 
 export function validatePublicFetchUrl(raw: string, approvedHosts: readonly string[]): URL {
-  let url: URL;
-  try { url = new URL(raw); } catch { throw new ExecutionError('INVALID_INPUT', 'Fetch requires an absolute HTTPS URL.'); }
-  const host = url.hostname.toLowerCase();
-  if (url.protocol !== 'https:' || url.username || url.password || url.port && url.port !== '443' || url.hash || host.endsWith('.') || host.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*$/.test(host) || /(?:^|\.)(?:localhost|local|internal|test|invalid|example)$/.test(host)) throw new ExecutionError('PATH_DENIED', 'Fetch permits approved public HTTPS hostnames only; credentials, IP literals, fragments and alternate ports are denied.');
-  if (!approvedHosts.some(approved => approved === host && !approved.includes('*'))) throw new ExecutionError('SCOPE_DENIED', 'This exact public hostname has not been approved by the Operator.');
-  return url;
+  try {
+    return parsePublicFetchDestination(raw, approvedHosts);
+  } catch (error) {
+    if (error instanceof ToolError) throw new ExecutionError(error.code, error.message);
+    throw error;
+  }
 }
 
 /** Public retrieval only. Browser DNS cannot be independently attested: approve trusted hosts, never attacker-controlled DNS. */

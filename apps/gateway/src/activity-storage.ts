@@ -95,7 +95,11 @@ export class CanonicalActivity {
       db.query("CREATE INDEX canonical_activity_order_v2 ON canonical_activity_v2(rank,sort_time,key)");
       db.query("CREATE INDEX canonical_activity_workspace_v2 ON canonical_activity_v2(workspace,rank,sort_time,key)");
       db.query("CREATE INDEX canonical_activity_phase_v2 ON canonical_activity_v2(phase,rank,sort_time,key)");
-      db.query("CREATE INDEX canonical_activity_both_v2 ON canonical_activity_v2(workspace,phase,rank,sort_time,key)");
+      // Combined Workspace + phase pagination is already bounded by the
+      // Workspace index and 1000-entry canonical retention. Omitting this
+      // additional B-tree on new installations saves an Activity-index write
+      // per terminal without weakening Activity snapshots, keyset cursors or
+      // migration verification. Existing databases keep their physical index.
       db.query("CREATE INDEX canonical_activity_serial_v2 ON canonical_activity_v2(serial) WHERE base IS NOT NULL");
       for (const [event, row] of [["INSERT", "NEW"], ["UPDATE", "NEW"], ["DELETE", "OLD"]] as const) {
         const tracked = `${row}.key='activity' OR ${row}.key LIKE 'terminal-notice/%'` +

@@ -1,5 +1,5 @@
 import { withSqlUsage } from "./sql-meter.js";
-import { ImageTransferHandler } from "./image-transfer.js";
+import { ImageTransferHandler, isImageTransferTool } from "./image-transfer.js";
 import { MusicHandler } from "./media/handler.js";
 import type { DurableObjectState, WebSocket as DurableSocket } from "@cloudflare/workers-types";
 import {
@@ -10,6 +10,7 @@ import {
   errorResponse,
   id,
   json,
+  omitDevelopmentResult,
   parseBody,
   operationTimeoutMs,
   randomSecret,
@@ -35,6 +36,8 @@ import { encodeTarget } from '../../../packages/contracts/src/target.js';
 import type { AuthProps, WorkspaceRecord } from "./registry.js";
 import { isTerminalViewportEffect } from "../../../packages/contracts/src/effect-policy.js";
 interface TransitionFence { id: string; bindingRevision: number; epoch: number; serial: number; aborted?: true }
+const operatorRestoreTool = 'operator_source_restore';
+const operatorRestoreKey = 'operator-restore/v1';
 interface Lease {
   contractVersion?: 2;
   assignmentGeneration?: number;
@@ -56,6 +59,7 @@ interface Operation {
   policyRevision?: number;
   permissionRevision?: number;
   cancelRequested?: true;
+  transferRecoveryOnly?: true;
   sequence: number;
   argsDigest: string;
   workspaceId: string;
@@ -77,6 +81,7 @@ interface Operation {
   terminalAt?: number;
   terminalNotified?: boolean;
   terminalErrorCode?: string;
+  terminalEffectState?: 'NONE' | 'KNOWN';
   resolution?: unknown;
   lateObservation?: unknown;
   terminalResultDigest?: string;
@@ -187,7 +192,7 @@ export class Workspace {
     });
   }
   async fetch(request: Request): Promise<Response> {
-    return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","workspace",new URL(request.url).pathname,()=>this.fetchMetered(request));
+    return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","workspace",new URL(request.url).pathname,()=>this.fetchMetered(request),this.env.SQL_TELEMETRY_DETAIL_ENABLED==="true");
   }
   private async fetchMetered(request: Request): Promise<Response> {
     let response: Response;
@@ -306,6 +311,9 @@ export class Workspace {
               canonical(current.resolution) === canonical(op.resolution) && !current.terminalNotified) {
             current.terminalNotified = true;
             this.operations.put("operation/" + current.operationId, current);
+            if (current.tool === operatorRestoreTool && !['UNKNOWN', 'PARTIAL'].includes(current.phase) &&
+                this.db.get(operatorRestoreKey) === current.operationId)
+              this.db.delete(operatorRestoreKey);
           }
         });
       } catch {
@@ -404,6 +412,8 @@ export class Workspace {
       op.result !== undefined
     ) {
       op.terminalResultDigest ??= operationReceiptDigest(op.result);
+      if (op.target && op.phase === 'SUCCEEDED')
+        op.terminalEffectState ??= this.successfulEffect(op);
       delete op.result;
       this.operations.put("operation/" + op.operationId, op);
     }
@@ -441,6 +451,71 @@ export class Workspace {
       );
     return l;
   }
+  private async operatorRestore(body: Record<string, unknown>, lease: Lease): Promise<Response> {
+    if (lease.contractVersion !== 2 || !lease.permissions.includes('WRITE_SOURCE') ||
+        !['acquire', 'check'].includes(String(body.action)))
+      throw new ApiError('SCOPE_DENIED', 'An exact v2 editor lease and Operator restore action are required.', 403);
+    const operationId = id(body.operationId);
+    const operationKey = 'operation/' + operationId;
+    const acquiring = body.action === 'acquire';
+    let newlyCreated = false;
+    const sameLease = () => {
+      const current = this.db.get<Lease>('lease');
+      return current?.epoch === lease.epoch && current.secretHash === lease.secretHash &&
+        current.tabInstanceId === lease.tabInstanceId && current.expiresAt > Date.now();
+    };
+    const matching = (op: Operation | undefined) => op?.tool === operatorRestoreTool &&
+      op.phase === 'RUNNING' && op.epoch === lease.epoch && op.tabInstanceId === lease.tabInstanceId &&
+      op.bindingRevision === lease.bindingRevision && op.deadlineMs > Date.now() &&
+      this.db.get<string>(operatorRestoreKey) === operationId;
+    if (acquiring) {
+      const digest = str(body.archiveSha256, 'archiveSha256', 64);
+      if (!/^[a-f0-9]{64}$/.test(digest))
+        throw new ApiError('INVALID_INPUT', 'A verified archive digest is required.');
+      this.db.transaction(() => {
+        const existing = this.operations.get(operationKey);
+        if (existing) {
+          if (!sameLease() || !matching(existing) || existing.argsDigest !== digest)
+            throw new ApiError('CONFLICT', 'The Operator restore is already settled or its intent differs.', 409);
+          return;
+        }
+        if (!sameLease() || !this.operations.journalReady || this.db.get(operatorRestoreKey) ||
+            this.journal.activeStats().length || this.journal.leaseBlocked() || this.journal.pendingExists())
+          throw new ApiError('TAB_BUSY', 'Settle pending or unresolved operations before native restore.', 409);
+        const sequence = this.db.get<number>('sequence', 0) + 1, now = Date.now();
+        this.db.put('sequence', sequence);
+        this.db.put(operatorRestoreKey, operationId);
+        this.operations.put(operationKey, {
+          operationId, sequence, argsDigest:digest, workspaceId:lease.workspaceId, epoch:lease.epoch,
+          bindingRevision:lease.bindingRevision, tabInstanceId:lease.tabInstanceId, deadlineMs: now + 120_000,
+          tool:operatorRestoreTool, permissions:['WRITE_SOURCE'], requiredPermissions:['WRITE_SOURCE'], mutating:true,
+          props:{grantId:'operator',agentId:'operator',workspaceId:lease.workspaceId,bindingRevision:lease.bindingRevision},
+          agentId:'operator', traceId:crypto.randomUUID(), phase:'RUNNING', createdAt:now,
+        });
+        newlyCreated = true;
+      });
+      // A browser or Gateway restart must leave a recoverable timed receipt.
+      await this.scheduleAlarm();
+    }
+    if (!sameLease() || !matching(this.operations.get(operationKey)))
+      throw new ApiError('STALE_EPOCH', 'The exact Operator restore intent has expired or changed.', 409);
+    const response = await rpc(registry(this.env), '/internal/operator-restore-fence', {
+      action:body.action, operationId, workspaceId:lease.workspaceId, epoch:lease.epoch,
+      bindingRevision:lease.bindingRevision, credentialEpoch:lease.credentialEpoch,
+    }).catch(error => {
+      if (newlyCreated && error instanceof ApiError && error.status >= 400 && error.status < 500)
+        this.db.transaction(() => {
+          const op = this.operations.get(operationKey);
+          if (!op || !matching(op)) return;
+          op.phase = 'REJECTED'; op.terminalAt = Date.now(); op.terminalErrorCode = error.code;
+          this.operations.put(operationKey, op);
+        });
+      throw error;
+    });
+    if (!sameLease() || !matching(this.operations.get(operationKey)) || response.operationId !== operationId)
+      throw new ApiError('EFFECT_UNKNOWN', 'Reconcile the exact Operator restore reservation before retrying.', 409);
+    return json({operationId});
+  }
   private cancelUndispatched(op: Operation, message: string): void {
     op.phase = 'CANCELLED';
     op.result = {
@@ -455,22 +530,41 @@ export class Workspace {
     delete op.dispatchAttempt;
     this.operations.put('operation/' + op.operationId, op);
   }
-  private async authorizeScopedResult(op: Operation, b: Record<string, unknown>): Promise<void> {
+  private async authorizeScopedResult(op: Operation, b: Record<string, unknown>): Promise<number> {
     const props = b.props as AuthProps | undefined;
     if (!op.target || op.props.contractVersion !== 2 || props?.contractVersion !== 2 ||
         op.target !== b.target || op.props.grantId !== props.grantId || op.agentId !== b.agentId)
       throw new ApiError('NOT_FOUND', 'Operation not found in this scope.', 404);
-    await rpc(registry(this.env), '/internal/authorize', {
+    const authority = await rpc<{workspace:{bindingRevision:number}}>(registry(this.env), '/internal/authorize', {
       props, agentId: op.agentId, target: op.target, permissions: op.requiredPermissions, resultAccess: true,
     });
+    // Preserve the previous Worker-side bindingRevision fence without its
+    // separate Registry request. Target generations and original Grant are
+    // checked above; this additionally rejects revision drift.
+    if (authority.workspace.bindingRevision !== op.bindingRevision)
+      throw new ApiError('NOT_FOUND', 'Operation not found in this scope.', 404);
+    return authority.workspace.bindingRevision;
+  }
+  private successfulEffect(op: Operation): 'NONE' | 'KNOWN' {
+    const retained = op.result as {effectState?: unknown} | undefined;
+    return op.terminalEffectState ?? (op.mutating && retained?.effectState !== 'NONE' ? 'KNOWN' : 'NONE');
   }
   private summary(op: Operation): Record<string, unknown> {
+    const now = Date.now();
+    const expiredResult = op.terminalAt !== undefined && op.terminalAt + 600_000 <= now;
+    const result = op.result as {data?: {resultAvailability?: unknown}} | undefined;
+    const inFlightEffect = op.mutating && op.terminalAt === undefined &&
+      (op.phase === 'DISPATCHED' || op.phase === 'RUNNING' || op.dispatchAttempt !== undefined);
+    const resultAvailability = expiredResult ? 'EXPIRED'
+      : op.terminalAt !== undefined && (result === undefined || result?.data?.resultAvailability === 'TOO_LARGE')
+        ? 'TOO_LARGE' : undefined;
     return {
       operationId: op.operationId,
       ...(op.target ? {contractVersion: 2, target: op.target, operationKey: op.operationKey,
-        traceId: op.traceId, serverTimeMs: Date.now(), phase: op.phase,
-        effectState: op.phase === 'UNKNOWN' ? 'UNKNOWN' : op.phase === 'PARTIAL' ? 'PARTIAL' :
-          op.phase === 'SUCCEEDED' && op.mutating ? 'KNOWN' : 'NONE',
+        traceId: op.traceId, serverTimeMs: now, phase: op.phase,
+        effectState: op.phase === 'UNKNOWN' || inFlightEffect ? 'UNKNOWN' : op.phase === 'PARTIAL' ? 'PARTIAL' :
+          op.phase === 'SUCCEEDED' ? this.successfulEffect(op) : 'NONE',
+        ...(resultAvailability ? {resultAvailability} : {}),
         ...(op.cancelRequested ? {cancelRequested: true} : {})} : {}),
       status: op.phase,
       workspaceId: op.workspaceId,
@@ -481,7 +575,7 @@ export class Workspace {
       bindingRevision: op.bindingRevision,
       ...(op.resolution ? { resolution: op.resolution } : {}),
       ...(op.lateObservation ? { lateObservation: op.lateObservation } : {}),
-      ...(op.result === undefined || (op.terminalAt!==undefined&&op.terminalAt+600000<=Date.now())
+      ...(op.result === undefined || expiredResult
         ? op.terminalAt
           ? {
               error: {
@@ -672,7 +766,7 @@ export class Workspace {
           throw new ApiError('IDEMPOTENCY_CONFLICT', 'Operation key was used for a different request.', 409);
         const retained = this.operations.get('operation/' + found.operationId);
         if (!retained) return {contractVersion: 2, target, operationKey, operationId: found.operationId,
-          serverTimeMs: Date.now(), resultAvailability: 'EXPIRED',
+          serverTimeMs: Date.now(), phase: 'UNKNOWN', effectState: 'UNKNOWN', resultAvailability: 'EXPIRED',
           error: {code: 'RESULT_EXPIRED', message: 'Operation receipt retention expired. Do not replay the intent.'}};
         return this.summary(retained);
       };
@@ -742,26 +836,26 @@ export class Workspace {
         if (fence && !fence.aborted && fence.bindingRevision === w.bindingRevision)
           throw new ApiError('TRANSITION_BLOCKED', 'Workspace is fenced for a Binding change.', 409);
         const all = this.journal.activeStats();
-        if (this.journal.pendingFull())
+        if (this.db.get(operatorRestoreKey))
+          throw new ApiError('TRANSITION_BLOCKED', 'An Operator restore owns the Workspace writer reservation.', 409);
+        const admissionCaps=this.journal.admissionCaps();
+        if (admissionCaps.pendingFull)
           throw new ApiError(
             "QUOTA_EXCEEDED",
             "Terminal notice outbox is full; restore Registry communication before new work.",
             429,
           );
-        if (
-          this.journal.holdsFull()
-        )
+        if (admissionCaps.holdsFull)
           throw new ApiError(
             "QUOTA_EXCEEDED",
             "Unresolved-operation metadata budget reached; reconcile held operations.",
             429,
           );
-        if (op.mutating && this.journal.holds())
-          throw new ApiError(
-            "EFFECT_UNKNOWN",
-            "Workspace holds an unresolved effect.",
-            409,
-          );
+        if (op.mutating && admissionCaps.holds) {
+          if (op.target && op.tool === 'write' && (args.mode === 'commit' || args.mode === 'abort'))
+            op.transferRecoveryOnly = true;
+          else throw new ApiError('EFFECT_UNKNOWN', 'Workspace holds an unresolved effect.', 409);
+        }
         if (all.length >= 8)
           throw new ApiError(
             "QUEUE_FULL",
@@ -825,8 +919,9 @@ export class Workspace {
           404,
         );
       const scoped = !!op.target && typeof b.agentId === 'string';
+      let authorizedBindingRevision: number | undefined;
       if (scoped) {
-        await this.authorizeScopedResult(op, b);
+        authorizedBindingRevision = await this.authorizeScopedResult(op, b);
         const current = this.operations.get('operation/' + operationId);
         if (!current || current.props.grantId !== op.props.grantId || current.target !== op.target)
           throw new ApiError('NOT_FOUND', 'Operation not found in this scope.', 404);
@@ -854,11 +949,34 @@ export class Workspace {
       // A pending receipt still gets the normal durable retry path. Clean
       // active/already-notified status reads do not enumerate outbox/history.
       maintenance.settled = !op.terminalAt || op.terminalNotified === true;
-      const data = path === '/internal/status' && typeof b.agentId === 'string' && typeof b.bindingRevision === 'number'
-        ? await this.images.hydrate(summary, {workspaceId: op.workspaceId, operationId,
-            agentId: b.agentId, bindingRevision: b.bindingRevision})
-        : summary;
-      if (scoped) await this.authorizeScopedResult(op, b);
+      let data: unknown = summary;
+      // Source, text, compute and ordinary cancellation status need no async
+      // image hydration. After the first fresh scoped authorization there is
+      // no await before serialization, hence no opportunity for a concurrent
+      // Registry revocation. Never omit the second check if async image I/O
+      // could occur. Image tools preserve the existing post-hydration fence.
+      // Status/cancel no longer performs a duplicate Worker-side Registry
+      // read. Hydrate images using the binding revision from this operation's
+      // already-fresh Registry authorization, preserving both the image's
+      // binding fence and the post-hydration revocation check. Legacy callers
+      // retain their explicit bindingRevision.
+      const imageBindingRevision = authorizedBindingRevision ??
+        (typeof b.bindingRevision === 'number' ? b.bindingRevision : undefined);
+      const mightHydrateImage = path === '/internal/status' &&
+        typeof b.agentId === 'string' && imageBindingRevision !== undefined &&
+        isImageTransferTool(op.tool);
+      if (mightHydrateImage) {
+        try {
+          data = await this.images.hydrate(summary, {workspaceId: op.workspaceId, operationId,
+            agentId: b.agentId as string, bindingRevision: imageBindingRevision});
+        } catch (error) {
+          if (!scoped) throw error;
+          const code = error instanceof ApiError ? error.code : undefined;
+          data = omitDevelopmentResult(summary,
+            code === 'RESULT_EXPIRED' ? 'EXPIRED' : code === 'LIMIT_EXCEEDED' ? 'TOO_LARGE' : 'UNAVAILABLE');
+        }
+      }
+      if (scoped && mightHydrateImage) await this.authorizeScopedResult(op, b);
       return json(data);
     }
     // Admin-only read-only diagnostic path. Exposed by the top-level Worker
@@ -1002,6 +1120,8 @@ export class Workspace {
       if (!op.resolution) {
         op.resolution = b.resolution;
         this.operations.put("operation/" + op.operationId, op);
+        if (op.tool === operatorRestoreTool && this.db.get(operatorRestoreKey) === op.operationId)
+          this.db.delete(operatorRestoreKey);
         const current = this.db.get<Lease>("lease");
         if (current) {
           this.db.put(
@@ -1022,7 +1142,16 @@ export class Workspace {
       path === "/api/v1/tab/reply" && b.phase !== "RUNNING",
     );
     if(path==="/api/v1/tab/ticket"){maintenance.settled=true;return json(await this.push.issue(l));}
-    if (path !== "/api/v1/tab/poll") this.expire();
+    // V2 browser receipts are bound to exactly one operation. Global
+    // expiration/GC is handled by the durable alarm, polling and heartbeat.
+    // For both RUNNING and terminal replies, expire the *exact* operation
+    // synchronously under its canonical transaction below. This prevents
+    // unrelated index scans without changing a late/expired effect's state.
+    // Legacy receipts retain the original maintenance path.
+    const directV2Reply=path==="/api/v1/tab/reply" && l.contractVersion===2;
+    if (path !== "/api/v1/tab/poll" && !directV2Reply) this.expire();
+    if (path === '/api/v1/tab/operator-restore')
+      return this.operatorRestore(b, l);
     if (path === "/api/v1/tab/image")
       return json(await this.images.handle(b, l));
     if (path === "/api/v1/tab/music" || path === "/api/v1/tab/music-result")
@@ -1063,9 +1192,19 @@ export class Workspace {
       if (renewalDue) current.expiresAt = Date.now() + 180000;
       current.permissions = valid.permissions;
       if (renewalDue || permissionsChanged) this.db.put("lease", current);
+      const controlled = current.contractVersion === 2 && typeof b.activeOperationId === 'string'
+        ? this.operations.get('operation/' + id(b.activeOperationId)) : undefined;
+      const cancellation = controlled?.cancelRequested === true && controlled.target &&
+        ['DISPATCHED', 'RUNNING'].includes(controlled.phase) && controlled.workspaceId === current.workspaceId &&
+        controlled.epoch === current.epoch && controlled.bindingRevision === current.bindingRevision &&
+        controlled.tabInstanceId === current.tabInstanceId && controlled.target === encodeTarget({
+          workspaceId: current.workspaceId, assignmentGeneration: current.assignmentGeneration!,
+          bindingGeneration: current.bindingGeneration!,
+        });
       return json({
         expiresAt: current.expiresAt,
         permissions: current.permissions,
+        ...(cancellation ? {cancelRequestedOperationId: controlled.operationId} : {}),
         ...(this.push.enabled?{workAvailable:this.journal.workAvailable()}:{}),
       });
     }
@@ -1126,6 +1265,7 @@ export class Workspace {
           epoch: l.epoch,
           operationId: op.operationId,
           tool: op.tool,
+          ...(op.transferRecoveryOnly ? {transferRecoveryOnly: true} : {}),
         });
         if(!Array.isArray(authority.workspace?.permissions)||!Array.isArray(authority.grant?.permissions))
           throw new ApiError("GATEWAY_DEGRADED","Registry dispatch authority has an invalid shape.",503);
@@ -1188,6 +1328,7 @@ export class Workspace {
               connectorId: dispatched.agentId, grantId: dispatched.props.grantId,
               assignmentGeneration: l.assignmentGeneration, bindingGeneration: l.bindingGeneration,
               policyRevision: dispatched.policyRevision, permissionRevision: dispatched.permissionRevision,
+              ...(dispatched.transferRecoveryOnly ? {transferRecoveryOnly: true} : {}),
             } : {version: 1}),
             operationId: dispatched.operationId,
             workspaceId: dispatched.workspaceId,
@@ -1206,6 +1347,8 @@ export class Workspace {
     }
     if (path === '/api/v1/tab/segment') {
       const op = this.operations.get('operation/' + id(b.operationId));
+      if (op?.transferRecoveryOnly)
+        throw new ApiError('SCOPE_DENIED', 'Transfer recovery may inspect scoped retained state only.', 403);
       if (!op?.target || op.phase !== 'RUNNING' || op.epoch !== l.epoch || op.tabInstanceId !== l.tabInstanceId ||
           op.deadlineMs <= Date.now() || op.cancelRequested)
         throw new ApiError('CANCELLED', 'V2 operation is ended, cancelled or fenced.', 409);
@@ -1338,6 +1481,7 @@ export class Workspace {
             "Terminal result must match operation and phase.",
           );
       }
+      let refusedLateRunningAck=false, refusedExpiredTerminalReply=false;
       this.db.transaction(() => {
         const op = this.operations.get("operation/" + operationId);
         if (!op || op.epoch !== l.epoch || op.tabInstanceId !== l.tabInstanceId)
@@ -1346,6 +1490,21 @@ export class Workspace {
             "Operation belongs to another lease.",
             409,
           );
+        // Verify exact identity before any expiry mutation. Do not throw
+        // *inside* transactionSync after expireOperation has changed state:
+        // that would roll back the durable UNKNOWN/REJECTED receipt. Instead
+        // commit the outcome and reject the stale RUNNING ack afterwards.
+        if (directV2Reply) {
+          const removed=this.expireOperation(op,Date.now());
+          if (phase==="RUNNING" && (removed || op.terminalAt)) {
+            refusedLateRunningAck=true;
+            return;
+          }
+          if (removed) {
+            refusedExpiredTerminalReply=true;
+            return;
+          }
+        }
         if (op.terminalAt) {
           if (op.phase === "UNKNOWN" && phase !== "RUNNING") {
             op.lateObservation = b.result;
@@ -1366,7 +1525,9 @@ export class Workspace {
         }
         if (!["DISPATCHED", "RUNNING"].includes(op.phase))
           throw new ApiError("CONFLICT", "Operation not dispatched.", 409);
-        if (phase === "CANCELLED" && op.phase === "RUNNING" && op.mutating)
+        // Scoped controllers can attest a known pre-effect stop. The parsed
+        // terminal receipt already requires effectState NONE for CANCELLED.
+        if (!op.target && phase === "CANCELLED" && op.phase === "RUNNING" && op.mutating)
           throw new ApiError(
             "EFFECT_UNKNOWN",
             "Running mutation cannot be reported cancelled.",
@@ -1374,6 +1535,12 @@ export class Workspace {
           );
         if (phase === "RUNNING" && op.phase === "RUNNING") return;
         op.phase = phase;
+        if (op.target && phase === "SUCCEEDED") {
+          const verifiedEffect = (b.result as {effectState: unknown}).effectState;
+          if (verifiedEffect !== 'NONE' && verifiedEffect !== 'VERIFIED')
+            throw new ApiError('INVALID_INPUT', 'A successful operation requires a verified effect state.');
+          op.terminalEffectState = op.mutating && verifiedEffect === 'VERIFIED' ? 'KNOWN' : 'NONE';
+        }
         if (phase !== "RUNNING") {
           op.terminalResultDigest=operationReceiptDigest(b.result);
           const errorCode=(b.result as {error?:{code?:unknown}})?.error?.code;
@@ -1388,6 +1555,12 @@ export class Workspace {
         }
         this.operations.put("operation/" + operationId, op);
       });
+      if(refusedLateRunningAck)
+        throw new ApiError("CONFLICT","Operation expired or finished before RUNNING acknowledgement.",409,
+          "Inspect the exact retained operation status; never replay a possibly dispatched effect.");
+      if(refusedExpiredTerminalReply)
+        throw new ApiError("NOT_FOUND","Retained operation expired.",404,
+          "The original retained receipt exceeded its retention window.");
       return json({ ok: true });
     }
     throw new ApiError("NOT_FOUND", "Route not found.", 404);

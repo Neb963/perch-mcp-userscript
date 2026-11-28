@@ -1,5 +1,15 @@
 import { v2Permissions, v2DefaultPermissions } from '../../../packages/contracts/src/target.js';
 import { managerStyles } from "./manager.css";
+/** The visible Connector view watches briefly for user-initiated consent,
+ * never polls an idle Gateway indefinitely or retries a failed quota forever. */
+export function approvalPollingDelay(pending: number, elapsedMs: number,
+  failedAttempts: number, quotaDelayMs = 0): number | null {
+  if (failedAttempts >= 5 || (failedAttempts === 0 && pending === 0 && elapsedMs >= 30_000))
+    return null;
+  return Math.max(quotaDelayMs, failedAttempts
+    ? Math.min(60_000, 4000 * 2 ** Math.min(failedAttempts, 4)) : 4000);
+}
+import type { HistoricalRecoveryInspection, HistoricalRecoveryScope } from "./historical-recovery.js";
 import { validatePublicFetchUrl } from "./public-fetch.js";
 export interface ManagerIdentity {
   generatorId: string;
@@ -13,11 +23,40 @@ export interface ManagerConfiguration {
   paired: boolean;
   browserInstallationId?: string;
 }
+export interface WorkspaceTransitionReceipt {
+  workspaceId: string;
+  action: string;
+  key: string;
+}
+interface RestoreIntent {
+  mode: "exact-binding" | "source-only";
+  expectedRevision: string;
+  archiveSha256: string;
+}
+interface LocalCheckpointSummary {
+  id: string;
+  label?: string;
+  revision: string;
+  createdAt: number;
+  pinned: boolean;
+}
+interface PrivateFileSummary {
+  id: string;
+  path: string;
+  bytes: number;
+  sha256: string;
+  state: string;
+}
 export interface ManagerClient {
   /** Adds management credential, JSON type and a fresh Idempotency-Key for writes. Never redirects credentials. */
   request(method: string, path: string, body?: unknown,
     options?: {signal?: AbortSignal; idempotencyKey?: string}): Promise<unknown>;
   bindingProof?(workspace: Record<string,unknown>, binding: ManagerIdentity): Promise<unknown>;
+  transitionReceipts?: {
+    list(): Promise<WorkspaceTransitionReceipt[]>;
+    retain(receipt: WorkspaceTransitionReceipt): Promise<void>;
+    retire(key: string): Promise<void>;
+  };
   health(origin?: string): Promise<unknown>;
   /** Read-only, bounded redacted local request outcomes; never returns credentials. */
   diagnostics?(): unknown;
@@ -39,6 +78,18 @@ export interface ManagerClient {
     revision:string;sourceError?:string;
     holds:Array<{id:string;kind:string;state:string;createdAt:number;paths:string[];baseRevision:string}>;
   }>;
+  localRecoveryScopes?(): Promise<HistoricalRecoveryScope[]>;
+  inspectLocalRecovery?(scopeId:string): Promise<HistoricalRecoveryInspection>;
+  exportLocalRecovery?(scopeId:string): Promise<string>;
+  resolveRetainedLocalHold?(scopeId:string,recordId:string,expectedInspection:string,evidence:string):Promise<void>;
+  listCheckpoints?(scopeId: string): Promise<LocalCheckpointSummary[]>;
+  exportCheckpoint?(scopeId: string, checkpointId: string): Promise<string>;
+  setCheckpointPinned?(scopeId: string, checkpointId: string, pinned: boolean): Promise<void>;
+  stagePrivateFile?(path: string, bytes: Uint8Array): Promise<{id:string;sha256:string;bytes:number}>;
+  listPrivateFiles?(): Promise<PrivateFileSummary[]>;
+  previewPrivateFileImport?(id: string): Promise<{expectedLocalRevision: string; path: string; bytes: number; sha256: string}>;
+  importPrivateFile?(id: string, expectedLocalRevision: string): Promise<{localRevision: string}>;
+  previewSourceRestore?(archive: unknown, mode: RestoreIntent["mode"]): Promise<RestoreIntent & {fileCount:number}>;
   resolveLocalHold?(workspaceId:string,journalId:string,expectedRevision:string,evidence:string):Promise<void>;
   localArtifacts?(): Promise<
     {
@@ -69,7 +120,7 @@ export interface ManagerClient {
   sourceBackup?(): Promise<unknown>;
   /** Separate unpublished Resource drafts from every retained document; controller excludes credentials. */
   localDrafts?(): Promise<unknown>;
-  restoreSourceBackup?(backup: unknown): Promise<void>;
+  restoreSourceBackup?(backup: unknown, intent?: RestoreIntent): Promise<void>;
   importPreview?(bytes: Uint8Array): Promise<unknown>;
   /** Supplied only when binary request handling is needed; normal JSON responses use request(). */
   exportResources?(): Promise<Uint8Array>;
@@ -98,26 +149,12 @@ export interface ManagerHandle {
   refresh(): Promise<void>;
   setStatus(status: ManagerStatus): void;
 }
-type Tab = "Workspaces" | "Agents" | "Library" | "Activity" | "Recovery" | "Settings";
+type Tab = "Workspaces" | "Agents" | "Activity" | "Recovery" | "Settings";
 type Row = Record<string, unknown>;
 interface List {
   items: Row[];
   revision: number;
   cursor?: string | null;
-}
-interface ResourceDraft {
-  id: string;
-  title: string;
-  description: string;
-  kind: string;
-  enabled: boolean;
-  body: string;
-  files: Record<string, string>;
-  revision: number;
-  dependencies: string[];
-  provenance: string;
-  license: string;
-  upstreamVersion?: string;
 }
 const ADMIN = "/api/v1/admin";
 const PERMISSIONS = [
@@ -259,6 +296,7 @@ export async function buildDiagnosticReport(
   client: ManagerClient,
   version: string,
   current?: ManagerStatus,
+  localOnly = false,
 ): Promise<Record<string, unknown>> {
   const config = client.configuration();
   const get = async (task: () => Promise<unknown>) => {
@@ -273,7 +311,8 @@ export async function buildDiagnosticReport(
       };
     }
   };
-  const [health, stateResult, remote] = await Promise.all([
+  const omitted = {ok:false,code:"LOCAL_ONLY",status:0,traceId:undefined};
+  const [health, stateResult, remote] = localOnly ? [omitted,omitted,omitted] : await Promise.all([
     get(() => client.health()),
     get(() => client.request("GET", `${ADMIN}/state`)),
     get(() => client.request("GET", `${ADMIN}/diagnostics`)),
@@ -355,6 +394,23 @@ export async function buildDiagnosticReport(
         paused: safeState.paused === true,
         workspaces: num(safeState.workspaces),
         agents: num(safeState.agents),
+        assignmentContractVersion: num(safeState.assignmentContractVersion),
+        rollout: (() => {
+          const r=record(safeState.rollout);
+          return {
+            developmentContractV2Enabled:r.developmentContractV2Enabled===true,
+            developmentContractV2ExecutionEnabled:r.developmentContractV2ExecutionEnabled===true,
+            canonicalStorageMode:['legacy','prepare','native'].includes(str(r.canonicalStorageMode))
+              ?r.canonicalStorageMode:'unknown',
+            pushNotificationsEnabled:r.pushNotificationsEnabled===true,
+            binaryPayloadsEnabled:r.binaryPayloadsEnabled===true,
+            admissionBudgetEnabled:r.admissionBudgetEnabled===true,
+            oauthGrantPersistence:r.oauthGrantPersistence==='UNTIL_REVOKED'?'UNTIL_REVOKED':'UNKNOWN',
+            oauthAccessTokenTtlSeconds:Number.isSafeInteger(r.oauthAccessTokenTtlSeconds)?r.oauthAccessTokenTtlSeconds:null,
+            oauthAccessTokenQualification:['DEFAULT_BROWSER_TIMER_SAFE','EXPLICIT_TIMER_SAFE','EXPERIMENTAL_EXTERNAL_CLIENT_REQUIRED'].includes(str(r.oauthAccessTokenQualification))?
+              r.oauthAccessTokenQualification:'UNKNOWN',
+          };
+        })(),
       }),
     },
     oauthAudit: { ok: remote.ok, ...(!remote.ok ? { error: remote } : {}), events },
@@ -459,10 +515,13 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       connection: client.configuration().paired ? "offline" : "unpaired",
     },
     tab: Tab = client.configuration().paired ? "Workspaces" : "Settings";
-  let resourceLoad = 0;
   let viewAbort: AbortController | undefined;
-  const v2Requests = new Map<string, {path:string; key:string; body:Record<string,unknown>}>();
+  const v2Requests = new Map<string, WorkspaceTransitionReceipt>();
+  let receiptInstallation = "";
   const mutationPending = new Set<string>();
+  let authority: { generation: number; installation: string } | undefined;
+  let remoteAction: { generation: number; installation: string } | undefined;
+  const isDocumentHidden=()=>doc.visibilityState==='hidden';
   let approvalRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   function stopApprovalRefresh() {
     if (approvalRefreshTimer !== undefined) clearTimeout(approvalRefreshTimer);
@@ -475,17 +534,15 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     state: Row = {},
     workspaces: List = { items: [], revision: 0 },
     agents: List = { items: [], revision: 0 };
-  let draft: ResourceDraft | undefined,
-    draftBaseline: ResourceDraft | undefined,
-    draftBase = "",
-    draftFile = "",
-    draftPending: Promise<void> = Promise.resolve(),
-    editorDirty = false;
   let recoveryWorkspaceId = "";
-  let sortField = "label",
-    sortDirection = 1,
-    filterValue = "",
-    confirmedAction: (() => Promise<void>) | undefined;
+  let retainedScopeId = "";
+  let retainedPanel: { own: number; node: HTMLElement } | undefined;
+  let filterValue = "";
+  const localTables = new Map<HTMLElement, () => void>();
+  // Session-local, redacted cache; never used as mutation authority.
+  let lastKnown: {installation:string; observedAt:number; workspaces:Row[]; connectors:Row[]; activity:Row[]} | undefined;
+  let snapshotInstallation = "";
+  let confirmation: { box: HTMLElement; trigger: HTMLElement | null } | undefined;
   const buttons = new Map<Tab, HTMLButtonElement>();
   function fitTextarea(area: HTMLTextAreaElement, minimum = 100) {
     if (!area.isConnected || !area.getClientRects().length) return;
@@ -518,7 +575,10 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     } catch (e) {
       if (view===generation || state.assignmentContractVersion!==2) report(e);
     } finally {
-      if (target?.isConnected) target.disabled = false;
+      if (target?.isConnected) {
+        if (target.hasAttribute("data-remote-mutation")) refreshRemoteButtons();
+        else target.disabled = false;
+      }
     }
   }
   function on<K extends keyof HTMLElementEventMap>(
@@ -541,6 +601,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     () => Promise<void> | void
   >();
   function activateButton(button: HTMLButtonElement) {
+    if (button.disabled || !button.isConnected || !opened) return;
     const action = buttonActions.get(button);
     if (action)
       void run(async () => {
@@ -609,28 +670,87 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     parent.append(r);
     return r;
   }
-  function confirmAction(message: string, action: () => Promise<void>) {
-    confirmedAction = action;
+  function installation() {
+    const config = client.configuration();
+    return JSON.stringify([config.paired, config.origin, config.browserInstallationId]);
+  }
+  function requireAuthority(own: number) {
+    if (!opened || destroyed || own !== generation ||
+        authority?.generation !== own || authority.installation !== installation())
+      throw new Error("Gateway authority changed. Refresh this view before taking action.");
+  }
+  function refreshRemoteButtons() {
+    const active = doc.visibilityState !== "hidden" && authority?.generation === generation && authority.installation === installation() && !remoteAction;
+    for (const control of body.querySelectorAll<HTMLButtonElement>("[data-remote-mutation]")) {
+      control.disabled = !active || control.dataset.unavailable === "true";
+    }
+  }
+  async function runRemoteAction(own: number, action: () => Promise<void>) {
+    requireAuthority(own);
+    if (remoteAction || confirmation) throw new Error("A management action or confirmation is already pending.");
+    const current = { generation: own, installation: installation() };
+    remoteAction = current;
+    refreshRemoteButtons();
+    try {
+      await action();
+    } catch(error) {
+      const detail=record(error);
+      if(current.generation===generation && (num(detail.status)===429 || num(detail.status)>=500 || ["NETWORK_ERROR","TIMEOUT","GATEWAY_DEGRADED","AUTH_REQUIRED","UNAUTHORIZED","HTTP_ERROR"].includes(str(detail.code)))) {
+        authority=undefined;
+        dismissConfirmation();
+        renderViewShell("Gateway action outcome is unverified. Inspect the original receipt before another action.");
+      }
+      throw error;
+    } finally {
+      if (remoteAction === current) remoteAction = undefined;
+      refreshRemoteButtons();
+    }
+  }
+  function markRemote(control: HTMLButtonElement, unavailable = false) {
+    control.dataset.remoteMutation = "";
+    control.dataset.unavailable = String(unavailable);
+    control.disabled = unavailable || remoteAction !== undefined || authority?.generation !== generation;
+    return control;
+  }
+  function remoteButton(label: string, own: number, action: () => Promise<void>, cls?: string) {
+    return markRemote(button(label, () => runRemoteAction(own, action), cls));
+  }
+  function dismissConfirmation(restoreFocus = false) {
+    const current = confirmation;
+    if (!current) return;
+    confirmation = undefined;
+    current.box.remove();
+    if (restoreFocus && current.trigger?.isConnected) current.trigger.focus();
+  }
+  function confirmAction(message: string, action: () => Promise<void>, remote = false,
+      confirmLabel = "Confirm", parent = body) {
+    if (confirmation) {
+      confirmation.box.focus();
+      return;
+    }
+    const own = generation;
+    if (remote) requireAuthority(own);
     const box = el("div", undefined, "confirm");
     box.setAttribute("role", "alert");
+    box.tabIndex = -1;
+    const selected = shadow.activeElement;
+    const current = { box, trigger: selected && "focus" in selected ? selected as HTMLElement : null };
+    confirmation = current;
     p(message, box);
+    const confirm = button(confirmLabel, async () => {
+      if (confirmation !== current || own !== generation || !opened || destroyed) return;
+      dismissConfirmation(true);
+      if (remote) await runRemoteAction(own, action);
+      else await action();
+    }, "danger");
     box.append(
-      button(
-        "Confirm",
-        async () => {
-          const current = confirmedAction;
-          confirmedAction = undefined;
-          box.remove();
-          await current?.();
-        },
-        "danger",
-      ),
+      remote ? markRemote(confirm) : confirm,
       button("Cancel", () => {
-        confirmedAction = undefined;
-        box.remove();
+        if (confirmation === current) dismissConfirmation(true);
       }),
     );
-    body.prepend(box);
+    if (parent === body) body.prepend(box);
+    else parent.append(box);
     box.querySelector("button")?.focus();
   }
   function copy(label: string, value: string) {
@@ -640,7 +760,19 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     });
   }
   function setStatus(next: ManagerStatus) {
+    const oldConnection = status.connection;
     status = next;
+    if (next.connection === "degraded" || next.connection === "unpaired") {
+      authority = undefined;
+      dismissConfirmation();
+      refreshRemoteButtons();
+      if (opened && oldConnection !== next.connection) {
+        ++generation;
+        viewAbort?.abort();
+        stopApprovalRefresh();
+        renderViewShell("Gateway state is unverified. Refresh to check availability.");
+      }
+    }
     statusNode.textContent = [
       next.workspace,
       next.agent,
@@ -657,16 +789,6 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       .join(" · ");
     launcher.textContent = `Perch MCP · ${next.connection}`;
   }
-  function sorted(items: Row[]) {
-    return items
-      .filter((r) =>
-        json(r).toLocaleLowerCase().includes(filterValue.toLocaleLowerCase()),
-      )
-      .sort(
-        (a, b) =>
-          str(a[sortField]).localeCompare(str(b[sortField])) * sortDirection,
-      );
-  }
   function table(
     columns: {
       key: string;
@@ -677,17 +799,46 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     parent: HTMLElement = body,
     useFilter = true,
   ) {
-    const t = el("table"),
-      thead = el("thead"),
-      tr = el("tr"),
-      tbody = el("tbody");
+    const t = el("table"), thead = el("thead"), tr = el("tr"), tbody = el("tbody");
+    let sortField = "label", sortDirection = 1;
+    const empty = el("p", "No entries.", "empty");
+    const count=el("p", "", "muted table-count");
+    count.setAttribute("aria-live","polite");
+    const renderRows = () => {
+      if (confirmation && t.contains(confirmation.box)) dismissConfirmation();
+      tbody.replaceChildren();
+      const needle = filterValue.toLocaleLowerCase();
+      const selected = rows.filter(r => !useFilter || json(r).toLocaleLowerCase().includes(needle));
+      selected.sort((a,b) => str(a[sortField]).localeCompare(str(b[sortField])) * sortDirection);
+      for (const row of selected) {
+        const r = el("tr");
+        for (const c of columns) {
+          const td = el("td");
+          td.dataset.label=c.label;
+          if (c.render) c.render(row, td);
+          else td.textContent = str(row[c.key], "—");
+          const value=el('div',undefined,'cell-value');
+          value.append(...Array.from(td.childNodes));
+          td.append(value);
+          r.append(td);
+        }
+        tbody.append(r);
+      }
+      empty.textContent=rows.length && !selected.length?"No matching entries.":"No entries.";
+      empty.hidden=selected.length!==0;
+      if(useFilter)count.textContent=`Showing ${selected.length} of ${rows.length} entries`;
+      refreshRemoteButtons();
+    };
     for (const c of columns) {
       const th = el("th");
       th.scope = "col";
-      const b = button(c.label, async () => {
+      const b = button(c.label, () => {
+        if(confirmation) dismissConfirmation();
         sortDirection = sortField === c.key ? -sortDirection : 1;
         sortField = c.key;
-        await refresh();
+        renderRows();
+        for (const header of tr.querySelectorAll("th")) header.removeAttribute("aria-sort");
+        th.setAttribute("aria-sort",sortDirection===1?"ascending":"descending");
       });
       b.setAttribute("aria-label", `Sort by ${c.label}`);
       th.append(b);
@@ -695,29 +846,24 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     }
     thead.append(tr);
     t.append(thead, tbody);
-    for (const row of useFilter ? sorted(rows) : rows) {
-      const r = el("tr");
-      for (const c of columns) {
-        const td = el("td");
-        td.dataset.label=c.label;
-        if (c.render) c.render(row, td);
-        else td.textContent = str(row[c.key], "—");
-        const value=el('div',undefined,'cell-value');
-        value.append(...Array.from(td.childNodes));
-        td.append(value);
-        r.append(td);
-      }
-      tbody.append(r);
-    }
-    parent.append(t);
-    if (!rows.length) p("No entries.", parent, "empty");
+    if(useFilter)parent.append(count);
+    parent.append(t,empty);
+    if (useFilter) localTables.set(t,renderRows);
+    renderRows();
   }
   function search(parent = body) {
     const f = field("Filter", filterValue, "search");
-    on(f.input, "change", () => {
+    f.label.classList.add("compact-filter");
+    const apply = () => {
+      if(confirmation) dismissConfirmation();
       filterValue = f.input.value;
-      void refresh();
-    });
+      for (const [table,render] of localTables) {
+        if (table.isConnected) render();
+        else localTables.delete(table);
+      }
+    };
+    on(f.input, "input", apply);
+    on(f.input, "change", apply);
     const row = el("div", undefined, "row");
     row.append(f.label, button("Refresh", refresh));
     parent.append(row);
@@ -756,17 +902,89 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     const a = await loadList(`${ADMIN}/${s.assignmentContractVersion===2?'connectors':'agents'}`,signal);
     return {s,w,a};
   }
+  function tabLabel() {
+    return tab === "Agents" ? "Connectors" : tab;
+  }
+  function cachedRows(view: Tab): Row[] {
+    if (!lastKnown || lastKnown.installation!==installation() || Date.now()-lastKnown.observedAt>86400000)
+      return [];
+    return view==="Workspaces"?lastKnown.workspaces:view==="Agents"?lastKnown.connectors:view==="Activity"?lastKnown.activity:[];
+  }
+  function rememberBase(scope:string, w:List, a:List) {
+    const previous=lastKnown?.installation===scope?lastKnown:undefined;
+    lastKnown={installation:scope,observedAt:Date.now(),
+      workspaces:w.items.slice(0,100).map(row=>({label:str(row.label).slice(0,120),id:str(row.id).slice(0,128),
+        connector:str(a.items.find(c=>c.id===row.connectorId||c.workspaceId===row.id)?.label,"Unassigned").slice(0,120),
+        binding:str(record(row.binding).slug,"Unbound").slice(0,120),paused:row.paused===true})),
+      connectors:a.items.slice(0,100).map(row=>({label:str(row.label).slice(0,120),id:str(row.id).slice(0,128),
+        assignments:num(row.assignmentCount),suspended:row.suspended===true})),
+      activity:previous?.activity??[]};
+  }
+  async function stopLocal() {
+    const pending=client.pauseLocal?.();
+    setStatus({...status,connection:"paused",reason:"Local stop requested; remote effects may still complete."});
+    await pending;
+    announce("Local admissions stopped. Previously dispatched effects may still complete.");
+  }
+  async function exportLocalDiagnostics() {
+    const report=await buildDiagnosticReport(client,options.version,status,true);
+    client.download("perch-mcp-local-diagnostics.json",json(report),"application/json");
+    announce("Local diagnostic report exported. No Gateway request was made.");
+  }
+  function renderViewShell(message: string) {
+    body.replaceChildren();
+    localTables.clear();
+    if (tab === "Settings") renderSettings();
+    else {
+      heading(tabLabel());
+      p(message, body, "muted");
+      actions(body,button("Refresh",refresh),button("Export local diagnostics",exportLocalDiagnostics),
+        ...(client.pauseLocal?[button("Stop this document immediately",stopLocal,"danger")]:[]));
+      if (tab==="Workspaces") {
+        const editor=el("p","Current editor: checking local identity…","muted");
+        body.append(editor);
+        const own=generation, scope=installation();
+        void client.currentIdentity().then(identity=>{
+          if(own===generation&&scope===installation()&&editor.isConnected)
+            editor.textContent="Current editor: "+identity.slug+" · "+identity.generatorId+" · draft "+(identity.draftId||"(default)");
+        }).catch(()=>{if(editor.isConnected)editor.textContent="Current editor identity unavailable.";});
+        p("Local connection: "+status.connection+". Native manual editing remains available.",body);
+      }
+      if (tab==="Agents") {
+        const config=client.configuration();
+        p("Gateway: "+(config.origin||"not configured")+". Remote authorization status unknown; no revocation inferred.",body);
+      }
+      if (tab==="Activity") {
+        p("Local observations remain available through the diagnostic export and Recovery. Remote operation outcomes are not inferred.",body);
+      }
+      if (tab === "Recovery") mountRetainedRecovery(generation);
+      const rows=cachedRows(tab);
+      if(rows.length&&lastKnown){
+        heading("Last-known remote snapshot — stale");
+        p("Observed "+new Date(lastKnown.observedAt).toISOString()+". Read-only; cannot authorize any action.",body,"muted");
+        search();
+        const columns=tab==="Workspaces"?[{key:"label",label:"Workspace"},{key:"connector",label:"Connector"},{key:"binding",label:"Last-known Binding"}]:
+          tab==="Agents"?[{key:"label",label:"Connector"},{key:"assignments",label:"Assignments"},{key:"suspended",label:"Last-known suspension"}]:
+            [{key:"operationId",label:"Operation"},{key:"tool",label:"Tool"},{key:"phase",label:"Last-known outcome"}];
+        table(columns,rows);
+      } else p("No valid cached remote summary; state is unknown.",body,"muted");
+    }
+  }
   async function refresh() {
     stopApprovalRefresh();
+    dismissConfirmation();
     const own = ++generation;
+    authority = undefined;
     viewAbort?.abort();
     viewAbort = new AbortController();
     if (!opened || destroyed) return;
-    announce("Loading…");
-    if (tab === "Settings") {
-      body.replaceChildren();
-      renderSettings();
+    const scope = installation();
+    if(snapshotInstallation!==scope){
+      snapshotInstallation=scope;lastKnown=undefined;state={};workspaces={items:[],revision:0};agents={items:[],revision:0};
     }
+    updateTabs();
+    renderViewShell("Loading management state…");
+    announce("Loading…");
     try {
       if (!client.configuration().paired) {
         if (own !== generation) return;
@@ -778,56 +996,51 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         return;
       }
       const base = await baseData(viewAbort.signal);
-      if (own !== generation || destroyed) return;
+      if (own !== generation || destroyed || scope !== installation()) return;
+      if (!Number.isSafeInteger(base.s.revision) ||
+          base.s.assignmentContractVersion === 2 && !Number.isSafeInteger(base.s.policyRevision))
+        throw new Error("Gateway returned invalid management revisions.");
       state = base.s;
       workspaces = base.w;
       agents = base.a;
+      rememberBase(scope,workspaces,agents);
+      authority = { generation: own, installation: scope };
       body.replaceChildren();
-      if (state.assignmentContractVersion===2 && tab==='Library') tab='Settings';
+      localTables.clear();
       updateTabs();
       if (tab === "Workspaces") {
         if (state.assignmentContractVersion===2) await renderDevelopmentWorkspaces(own);
         else await renderWorkspaces(own);
       }
       if (tab === "Agents") await renderAgents(own);
-      if (tab === "Library") await renderLibrary(own);
       if (tab === "Activity") await renderActivity(own);
       if (tab === "Recovery") await renderRecovery(own);
       if (tab === "Settings") {
         renderSettings();
-        if (state.assignmentContractVersion===2 && client.exportResources)
+        if (num(state.libraryRevision)>0 && client.exportResources)
           body.append(button('Export legacy Resource archive',async()=>{
             const bytes=await client.exportResources!();
             client.download('perch-resource-archive.zip',bytes,'application/zip');
           }));
       }
-      if (own === generation) announce("Updated.");
+      if (own === generation) {
+        refreshRemoteButtons();
+        announce("Updated.");
+      }
     } catch (e) {
       if (own !== generation) return;
+      authority = undefined;
+      dismissConfirmation();
+      renderViewShell("Gateway unavailable. Remote actions require a fresh connection.");
       report(e);
-      if (!body.children.length) {
-        heading("Gateway unavailable");
-        p(
-          "Normal Perchance editing remains available. Close this manager to continue. Reconnect from Settings.",
-        );
-        body.append(
-          button("Settings", async () => {
-            tab = "Settings";
-            updateTabs();
-            body.replaceChildren();
-            renderSettings();
-          }),
-        );
-      }
     }
   }
   function updateTabs() {
     body.setAttribute("role", "tabpanel");
-    body.setAttribute("aria-label", tab);
+    body.setAttribute("aria-label", tabLabel());
     for (const [name, b] of buttons) {
       b.setAttribute("aria-selected", String(name === tab));
-      if (name==='Agents') b.textContent=state.assignmentContractVersion===2?'Connectors':'Agents';
-      if (name==='Library') b.hidden=state.assignmentContractVersion===2;
+      if (name==='Agents') b.textContent='Connectors';
     }
   }
   function permissionEditor(parent: HTMLElement, values: readonly string[], allowed: readonly string[] = PERMISSIONS) {
@@ -851,10 +1064,13 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   /** One explicit connection action; remote pause changes use readback and are
    * never replayed after a lost acknowledgement. */
   async function connectWorkspace(w: Row): Promise<void> {
+    const own = generation;
+    requireAuthority(own);
     const id=str(w.id);
     if(!id)throw new Error('Choose a Workspace first.');
     const current=record(await client.request('GET',`${ADMIN}/workspaces/${encodeURIComponent(id)}`));
     if(str(current.id)!==id)throw new Error('Workspace changed; refresh the list.');
+    requireAuthority(own);
     if(state.paused===true){
       // The button explicitly says that all Workspaces will be resumed.
       try{await client.request('POST',`${ADMIN}/pause`,{
@@ -866,6 +1082,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     }
     let ready=current;
     if(current.paused===true){
+      requireAuthority(own);
       try{await client.request('PATCH',`${ADMIN}/workspaces/${encodeURIComponent(id)}`,{
         expectedRevision:num(current.revision),paused:false,
       });}catch(error){
@@ -877,6 +1094,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     }
     try {
       if(!client.attach)throw new Error('The native browser connection is unavailable.');
+      requireAuthority(own);
       await client.attach(ready);
       await refresh();
       announce('Editor connected. The agent can continue.');
@@ -910,38 +1128,65 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     await connectWorkspace({...live,...result});
   }
   async function transitionWorkspace(w: Row, action: string, args: Row, own: number) {
+    requireAuthority(own);
     const id = str(w.id);
     if (mutationPending.has(id)) throw new Error('A change is pending for this Workspace.');
     const path = `${ADMIN}/workspaces/${encodeURIComponent(id)}/${action}`;
     const current = agents.items.find(item=>item.id===w.connectorId);
     const cached = v2Requests.get(id);
-    if (cached && cached.path!==path) throw new Error('Inspect or resume the pending Workspace transition.');
-    const request = cached ?? {path,key:crypto.randomUUID(),body:{
-      expectedRevision:w.revision,...(current ? {expectedConnectorRevision:current.revision} : {}),...args,
-    }};
+    if (cached && cached.action!==action) throw new Error('Inspect the original Workspace transition first.');
+    const request = cached ?? {workspaceId:id,action,key:crypto.randomUUID()};
+    const scope = installation();
+    const retire = async () => {
+      if (installation() !== scope) return;
+      await client.transitionReceipts?.retire(request.key);
+      v2Requests.delete(id);
+    };
     v2Requests.set(id,request);
     mutationPending.add(id);
     try {
       let next: Row;
+      const reconcile = async () => {
+        const receipt=record(await client.request('GET',`${ADMIN}/receipts/${request.key}`));
+        const result=record(receipt.result);
+        if (result.id!==id)
+          throw new Error('Receipt did not identify the requested Workspace.');
+        return result;
+      };
+      if (!cached) {
+        try {
+          await client.transitionReceipts?.retain(request);
+          requireAuthority(own);
+        } catch (error) {
+          await retire();
+          throw error;
+        }
+      }
       try {
-        next=record(await client.request('POST',request.path,request.body,{idempotencyKey:request.key}));
+        if (cached) {
+          next = await reconcile();
+        } else {
+          next=record(await client.request('POST',path,{
+            expectedRevision:w.revision,...(current ? {expectedConnectorRevision:current.revision} : {}),...args,
+          },{idempotencyKey:request.key}));
+          if (next.id !== id) throw new Error("Response did not identify the requested Workspace.");
+        }
       } catch (error) {
+        if (cached) throw new Error('The original Workspace transition is unresolved. Inspect its receipt before making a new change.');
         const code = error && typeof error==='object' && 'code' in error ? String(error.code) : '';
         if (['STALE_REVISION','APPROVAL_REQUIRED','SCOPE_DENIED','BINDING_MISMATCH','TAB_BUSY','INVALID_INPUT','CONFLICT'].includes(code)) {
-          v2Requests.delete(id);
+          await retire();
           throw error;
         }
         try {
-          const receipt=record(await client.request('GET',`${ADMIN}/receipts/${request.key}`));
-          next=record(receipt.result);
-          if (next.id!==id) throw new Error('Receipt did not identify the requested Workspace.');
+          next=await reconcile();
         } catch {
-          throw new Error('Transition may still be pending. Inspect the exact Workspace and retry the same action.');
+          throw new Error('Transition outcome is unknown. Inspect the original Workspace receipt.');
         }
       }
-      v2Requests.delete(id);
-      if (action==='rebind' && next.binding && client.attach && own===generation) {
-        try { await client.attach(next); }
+      await retire();
+      if (!cached && action==='rebind' && next.binding && client.attach && own===generation) {
+        try { requireAuthority(own); await client.attach(next); }
         catch { if (own===generation) announce('Binding committed. Reconnect this verified editor to acquire its lease.',true); return; }
       }
       if (own===generation) await refresh();
@@ -949,15 +1194,28 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   }
   async function renderDevelopmentWorkspaces(own: number) {
     heading('Workspaces');
+    const creation=el("details",undefined,"workspace-create");
+    creation.append(el("summary","Create Workspace"));
     const create = field('Workspace name');
-    actions(body,create.label,button('Create Workspace',async()=>{
+    actions(creation,create.label,remoteButton('Create Workspace',own,async()=>{
       if (!create.input.value.trim()) throw new Error('Enter a Workspace name.');
       await client.request('POST',`${ADMIN}/workspaces`,{contractVersion:2,label:create.input.value.trim()});
       if (own===generation) await refresh();
     }));
-    const nextIdentity = await client.currentIdentity().catch(()=>undefined);
-    if (own!==generation || destroyed) return;
+    body.append(creation);
+    const scope = installation();
+    const [nextIdentity, pending] = await Promise.all([
+      client.currentIdentity().catch(()=>undefined),
+      client.transitionReceipts?.list() ?? [],
+    ]);
+    if (own!==generation || destroyed || scope!==installation()) return;
+    if (receiptInstallation !== scope) {
+      receiptInstallation = scope;
+      v2Requests.clear();
+    }
+    for (const receipt of pending) v2Requests.set(receipt.workspaceId, receipt);
     const choices = agents.items.filter(item=>item.contractVersion===2 && item.suspended!==true);
+    p(nextIdentity ? `Current editor: ${nextIdentity.slug} · ${nextIdentity.generatorId} · draft ${nextIdentity.draftId || "(default)"}` : "Current editor identity unavailable.",body,"muted");
     search();
     table([
       {key:'label',label:'Workspace',render(w,td){
@@ -968,11 +1226,15 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       {key:'binding',label:'Binding and status',render(w,td){
         const previous=record(w.binding);
         const observation=record(w.observation);
-        const fresh=observation.epoch===w.epoch && num(observation.observedAt)+60000>Date.now();
+        const now=Date.now();
+        const seenAt=num(observation.observedAt);
+        const fresh=!!w.binding && observation.epoch===w.epoch &&
+          Number.isSafeInteger(seenAt) && seenAt<=now+60000 && seenAt+60000>now;
         p(w.binding ? `${str(previous.slug)} · ${str(previous.generatorId)} · draft ${str(previous.draftId)||'(default)'}` : 'Unbound',td);
-        p(w.paused?'Paused':fresh?'Last heartbeat verified':'Offline or unverified',td,'muted');
-        p(fresh ? observation.dirty===true?'Draft has unsaved edits':observation.dirty===false?'Draft clean':'Draft state unknown' :
-          'Draft state unknown',td,'muted');
+        const connection=!w.binding?'No active Binding':w.paused?'Paused':fresh?'Heartbeat recent':'Offline';
+        const source=fresh?observation.dirty===true?'Unsaved':
+          observation.dirty===false?'Draft clean':'Dirty unknown':'Dirty unknown';
+        p(connection+' · '+source,td,'muted');
         if (w.transition) p('Transition awaiting settlement',td,'muted');
       }},
       {key:'action',label:'Actions',render(w,td){
@@ -980,72 +1242,122 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           td.append(button('Reconnect legacy Workspace',async()=>connectWorkspace(w)));
           return;
         }
-        const id=str(w.id),wd=w.binding!==null && w.binding!==undefined;
+        const intent: Row = {...w, binding: w.binding ? {...record(w.binding)} : w.binding,
+          transition: w.transition ? {...record(w.transition)} : w.transition};
+        const id=str(intent.id),wd=intent.binding!==null && intent.binding!==undefined;
+        const pending = v2Requests.get(id);
+        if (pending) {
+          p(`Transition outcome unknown · ${pending.key}`, td, "muted");
+          td.append(remoteButton("Inspect original transition", own, () =>
+            transitionWorkspace(intent, pending.action, {}, own)));
+          return;
+        }
+        const previous = record(intent.binding);
+        const owningConnector = agents.items.find(item => item.id === intent.connectorId);
+        const scope = `${str(intent.label, id)} (${id}) · ${str(owningConnector?.label, 'Unassigned')}`;
+        const oldDraft = `${str(previous.generatorId, 'Unbound')} · draft ${str(previous.draftId) || '(default)'}`;
         const observation=record(w.observation);
         const dirty=wd && !(observation.epoch===w.epoch && observation.dirty===false &&
           num(observation.observedAt)+60000>Date.now());
         if (nextIdentity && client.bindingProof) {
-          p(`This tab · ${nextIdentity.slug} · ${nextIdentity.generatorId} · draft ${nextIdentity.draftId||'(default)'}`,td,'muted');
-          td.append(button(wd?'Reassign to this tab':'Assign this tab',async()=>{
+          const destination = {...nextIdentity};
+          td.append(markRemote(button(wd?'Reassign to this tab':'Assign this tab',async()=>{
             const rebind=async()=>{
               const cached=v2Requests.get(id);
-              if (cached) return transitionWorkspace(w,'rebind',{},own);
+              if (cached) return transitionWorkspace(intent,'rebind',{},own);
               const exact=await client.currentIdentity();
-              if (JSON.stringify(exact)!==JSON.stringify(nextIdentity))
+              if (exact.generatorId !== destination.generatorId || exact.slug !== destination.slug ||
+                  exact.draftId !== destination.draftId || exact.browserInstallationId !== destination.browserInstallationId)
                 throw new Error('This editor changed after the actions were shown. Refresh Workspaces.');
+              requireAuthority(own);
               const probe=client.probe ? record(await client.probe()) : null;
               if (probe && probe.ready!==true) throw new Error('This editor is not ready.');
-              const proof=record(await client.bindingProof!(w,exact));
-              await transitionWorkspace(w,'rebind',{binding:exact,bindingProof:proof.proof,acknowledgeDirty:dirty},own);
+              const latest = await client.currentIdentity();
+              if (latest.generatorId !== destination.generatorId || latest.draftId !== destination.draftId ||
+                  latest.browserInstallationId !== destination.browserInstallationId)
+                throw new Error('This editor changed during confirmation. Refresh Workspaces.');
+              requireAuthority(own);
+              const proof=record(await client.bindingProof!(intent,destination));
+              await transitionWorkspace(intent,'rebind',{binding:destination,bindingProof:proof.proof,acknowledgeDirty:dirty},own);
             };
-            if (dirty && !v2Requests.has(id)) confirmAction('Leave the previous native draft in its current state and reassign?',rebind);
-            else await rebind();
-          }));
+            if (dirty && !v2Requests.has(id))
+              confirmAction(`Reassign ${scope} from ${oldDraft} to ${destination.generatorId} · draft ${destination.draftId || '(default)'}? The previous draft will remain in place.`,rebind,true);
+            else await runRemoteAction(own, rebind);
+          })));
         }
+        const secondary=el("details",undefined,"secondary-actions");
+        secondary.append(el("summary","More actions"));
+        td.append(secondary);
+        // Heartbeat and cached Activity are not native revision attestations.
+        // Render only positively verified hashes; otherwise disclose UNKNOWN.
+        const revision=(field:string)=>{
+          const candidate=record(w[field]);
+          const value=str(candidate.value);
+          return candidate.verified===true&&/^sha256:[a-f0-9]{64}$/.test(value)
+            ? value : 'UNKNOWN (no verified native readback)';
+        };
+        p('SourceRevision: '+revision('sourceRevision'),secondary,'muted');
+        p('PreviewRevision: '+revision('previewRevision'),secondary,'muted');
+        p('SavedRevision: '+revision('savedRevision'),secondary,'muted');
+        const observed=lastKnown?.installation===installation()
+          ? lastKnown.activity.find(row=>row.workspaceId===w.id) : undefined;
+        if(observed) {
+          const when=num(observed.observedAt);
+          p('Last result (observed '+(when>0?new Date(when).toISOString():'time unknown')+
+            '): '+str(observed.phase,'UNKNOWN')+' · '+str(observed.tool,'operation unknown'),secondary,'muted');
+        } else p('Last result: UNKNOWN (open Activity for an authoritative update)',secondary,'muted');
+        const lastPhase=str(observed?.phase);
+        const active=str(w.inFlightOperation);
+        p('In-flight/Hold: '+(active ? 'Operation '+active+' — inspect Activity'
+          : w.transition ? 'TRANSITION_BLOCKED — reconcile before reassignment'
+          : ['UNKNOWN','PARTIAL'].includes(lastPhase) ? lastPhase+' — inspect Recovery'
+          : ['ADMITTED','DISPATCHED','RUNNING'].includes(lastPhase) ? lastPhase+' — status may have changed'
+          : 'UNKNOWN (inspect Activity/Recovery for current Holds)'),secondary,'muted');
         if (wd) {
-          td.append(button('Reconnect',async()=>connectWorkspace(w)),
-            button('Detach',()=>confirmAction('Detach this Binding and preserve the native draft?',async()=>
-              transitionWorkspace(w,'detach',{acknowledgeDirty:true},own))));
+          secondary.append(remoteButton('Reconnect',own,async()=>connectWorkspace(intent)),
+            markRemote(button('Detach',()=>confirmAction(`Detach ${scope} from ${oldDraft} and preserve the native draft?`,async()=>
+              transitionWorkspace(intent,'detach',{acknowledgeDirty:true},own),true))));
         }
-        td.append(button(w.paused?'Resume':'Pause',async()=>{
+        secondary.append(remoteButton(intent.paused?'Resume':'Pause',own,async()=>{
           await client.request('PATCH',`${ADMIN}/workspaces/${encodeURIComponent(id)}`,
-            {expectedRevision:w.revision,paused:!w.paused});
+            {expectedRevision:intent.revision,paused:!intent.paused});
           if (own===generation) await refresh();
         }));
         const policies=el('details');
         policies.append(el('summary','Permissions'));
         const values=permissionEditor(policies,Array.isArray(w.permissions)?w.permissions as string[]:[],v2Permissions);
-        policies.append(button('Save Workspace permissions',async()=>{
+        policies.append(remoteButton('Save Workspace permissions',own,async()=>{
           await client.request('PATCH',`${ADMIN}/workspaces/${encodeURIComponent(id)}`,{
-            expectedRevision:w.revision,permissions:values(),
+            expectedRevision:intent.revision,permissions:values(),
           });
           if (own===generation) await refresh();
         }));
-        td.append(policies);
+        secondary.append(policies);
         const other=choices.filter(item=>item.id!==w.connectorId);
         if (other.length) {
           const chosen=select('Destination Connector',other.map(item=>({value:str(item.id),label:str(item.label)})));
-          td.append(chosen.label,button(w.connectorId?'Transfer':'Assign Connector',async()=>{
+          secondary.append(chosen.label,markRemote(button(intent.connectorId?'Transfer':'Assign Connector',async()=>{
             const selected=other.find(item=>item.id===chosen.input.value);
             if (!selected) throw new Error('Choose a Connector.');
             const args={connectorId:selected.id,expectedDestinationConnectorRevision:selected.revision,acknowledgeDirty:dirty};
-            if (w.connectorId) confirmAction('Transfer to the selected Connector and leave the old native draft in place?',async()=>
-              transitionWorkspace(w,'transfer',args,own));
-            else if (dirty) confirmAction('Assign this Connector while preserving the previous draft?',async()=>transitionWorkspace(w,'assign',args,own));
-            else await transitionWorkspace(w,'assign',args,own);
-          }));
+            if (intent.connectorId) confirmAction(`Transfer ${scope} to ${str(selected.label, str(selected.id))} and preserve ${oldDraft}?`,async()=>
+              transitionWorkspace(intent,'transfer',args,own),true);
+            else if (dirty) confirmAction(`Assign ${scope} to ${str(selected.label, str(selected.id))} and preserve ${oldDraft}?`,async()=>transitionWorkspace(intent,'assign',args,own),true);
+            else await runRemoteAction(own, () => transitionWorkspace(intent,'assign',args,own));
+          })));
         }
-        if (w.connectorId) td.append(button('Unassign',()=>confirmAction('Remove this Connector assignment and preserve the draft?',async()=>
-          transitionWorkspace(w,'unassign',{acknowledgeDirty:true},own))));
-        if (w.transition && !mutationPending.has(id)) td.append(button('Cancel pending transition',()=>
-          confirmAction('Cancel this transition only after pending effects settle?',async()=>{
+        if (intent.connectorId) secondary.append(markRemote(button('Unassign',()=>confirmAction(`Unassign ${scope} and preserve ${oldDraft}?`,async()=>
+          transitionWorkspace(intent,'unassign',{acknowledgeDirty:true},own),true))));
+        if (intent.transition && !mutationPending.has(id)) secondary.append(markRemote(button('Cancel pending transition',()=>
+          confirmAction(`Cancel the pending transition for ${scope} after pending effects settle?`,async()=>{
             await client.request('POST',`${ADMIN}/workspaces/${encodeURIComponent(id)}/abort-transition`,
-              {expectedRevision:w.revision,transitionId:record(w.transition).id},{idempotencyKey:crypto.randomUUID()});
+              {expectedRevision:intent.revision,transitionId:record(intent.transition).id},{idempotencyKey:crypto.randomUUID()});
             v2Requests.delete(id);
             if (own===generation) await refresh();
-          })));
+          },true))));
       }},
     ],workspaces.items);
+    body.querySelectorAll("table").forEach(t=>t.classList.add("compact-workspaces"));
   }
   async function renderWorkspaces(own:number) {
     heading("Workspaces");
@@ -1300,10 +1612,10 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   }
   async function renderAgents(own: number) {
     const v2=state.assignmentContractVersion===2;
-    heading(v2?"Connectors":"Agents and OAuth");
+    heading("Connectors and OAuth");
     p(
       v2 ? "A Connector can reach multiple assigned Workspaces. Chats using the same Connector share its Grant." :
-        "One Agent targets one Workspace. Connector reuse across conversations shares its Grant and queue.",
+        "Legacy Connector: fixed Workspace scope. Fresh installations use Connector-level authorization.",
       body,
       "muted",
     );
@@ -1316,7 +1628,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         "muted",
       );
     const row = el("div", undefined, "row"),
-      name = field(v2?"Connector name":"Agent name"),
+      name = field("Connector name"),
       target = select(
         "Workspace",
         workspaces.items
@@ -1330,7 +1642,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     row.append(
       name.label,
       ...(v2 ? [ceilingPanel] : [target.label]),
-      button(v2?"Create Connector":"Create Agent", async () => {
+      remoteButton(v2?"Create Connector":"Create Agent", own, async () => {
         if (!name.input.value.trim() || !v2 && !target.input.value)
           throw new Error(v2?"Enter a Connector name.":"Enter a name and select an unassigned Workspace.");
         await client.request("POST", `${ADMIN}/${v2?'connectors':'agents'}`, {
@@ -1341,12 +1653,16 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       }),
     );
     body.append(row);
+    // Time-limited consent must appear before the potentially long Connector list.
+    const approvalPanel = el("section");
+    const grantsPanel = el("section");
+    body.append(approvalPanel);
     search();
     table(
       [
         {
           key: "label",
-          label: "Agent",
+          label: "Connector",
           render(a, td) {
             p(str(a.label), td);
             p(str(a.id), td, "muted");
@@ -1354,7 +1670,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
               const settings=el('details');
               settings.append(el('summary','Permission ceiling'));
               const permissions=permissionEditor(settings,Array.isArray(a.permissionCeiling)?a.permissionCeiling as string[]:[],v2Permissions);
-              settings.append(button('Save Connector ceiling',async()=>{
+              settings.append(remoteButton('Save Connector ceiling',own,async()=>{
                 await client.request('PATCH',`${ADMIN}/connectors/${encodeURIComponent(str(a.id))}`,{
                   expectedRevision:a.revision,permissionCeiling:permissions(),
                 });
@@ -1364,47 +1680,45 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             }
             const legacyWorkspace=workspaces.items.find(w=>w.id===a.workspaceId);
             if (v2 && a.contractVersion===1 && legacyWorkspace?.binding)
-              td.append(button('Upgrade to v2',()=>confirmAction('Preserve this Binding and require new OAuth consent on the same endpoint?',async()=>{
+              td.append(markRemote(button('Upgrade to v2',()=>confirmAction(
+                `Upgrade Connector ${str(a.label, str(a.id))} on Workspace ${str(legacyWorkspace.label, str(legacyWorkspace.id))}? Fresh consent is required for ${str(a.endpoint)}.`,async()=>{
                 await client.request('POST',`${ADMIN}/connectors/${encodeURIComponent(str(a.id))}/upgrade`,{
                   expectedRevision:a.revision,expectedWorkspaceRevision:legacyWorkspace.revision,acknowledgeReauthorization:true,
                 },{idempotencyKey:crypto.randomUUID()});
                 if (own===generation) await refresh();
-              })));
+              },true))));
           },
         },
         {
           key: "workspaceId",
-          label: "Connector",
+          label: "Access",
           render(a, td) {
-            const url = endpoint(client.configuration().origin, a),
-              input = field("MCP connector URL", url);
-            input.input.readOnly = true;
-            td.append(input.label);
-            actions(
-              td,
-              copy("Copy URL", url),
-              copy(
-                "Copy setup instructions",
-                `Create a custom remote MCP connector with URL ${url}. Complete OAuth, then approve the matching code in Perch MCP → Agents. Verify workspace_status before editing. Tokens remain in the client.`,
-              ),
-            );
-            p(
-              a.contractVersion===2 ? `${num(a.assignmentCount)} assigned Workspaces · v2` :
-                `Workspace: ${str(workspaces.items.find((w) => w.id === a.workspaceId)?.label, str(a.workspaceId))}`,
-              td,
-              "muted",
-            );
+            const url = endpoint(client.configuration().origin, a);
+            const first = el("div", undefined, "compact-connector");
+            first.append(copy("Copy URL", url));
+            p(a.contractVersion===2 ? `${num(a.assignmentCount)} Workspaces · ${a.suspended?"suspended":"enabled"}` :
+              `Legacy Workspace: ${str(workspaces.items.find(w=>w.id===a.workspaceId)?.label,str(a.workspaceId))}`, first, "muted");
+            const setup=el("details",undefined,"secondary-actions");
+            setup.append(el("summary","Connector URL and setup"));
+            const input=field("MCP connector URL",url);
+            input.input.readOnly=true;
+            setup.append(input.label,copy("Copy setup instructions",
+              `Create a custom remote MCP connector with URL ${url}. Complete OAuth, approve the exact request in Perch MCP → Connectors, then call workspace_status. Tokens remain in the client.`));
+            td.append(first,setup);
           },
         },
         {
           key: "suspended",
           label: "Actions",
           render(a, td) {
-            const label = field("Agent label", str(a.label));
-            td.append(label.label);
+            const settings=el("details",undefined,"secondary-actions");
+            settings.append(el("summary","Manage Connector"));
+            td.append(settings);
+            const label = field("Connector label", str(a.label));
+            settings.append(label.label);
             actions(
-              td,
-              button("Rename", async () => {
+              settings,
+              remoteButton("Rename", own, async () => {
                 await client.request(
                   "PATCH",
                   `${ADMIN}/${a.contractVersion===2?'connectors':'agents'}/${encodeURIComponent(str(a.id))}`,
@@ -1415,8 +1729,9 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
                 );
                 await refresh();
               }),
-              button(
-                a.suspended ? "Resume Agent" : "Suspend Agent",
+              remoteButton(
+                a.suspended ? "Resume Connector" : "Suspend Connector",
+                own,
                 async () => {
                   await client.request(
                     "PATCH",
@@ -1437,26 +1752,22 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     );
     // The time-limited OAuth request must be visible without waiting for
     // unrelated Grant data. A failure in either list does not hide the other.
-    const approvalPanel = el("section");
-    const grantsPanel = el("section");
-    body.append(approvalPanel, grantsPanel);
+    body.append(grantsPanel);
     let lastApprovalState = "";
     let pendingApprovalCount = 0;
     const loadApprovals = async () => {
       const approvals = await loadList(`${ADMIN}/approvals`);
       if (own !== generation || destroyed || !opened || tab !== "Agents")
         return;
-      const pending = approvals.items.filter(
-        (item) => item.state === "pending" && num(item.expiresAt) > Date.now(),
-      );
-      pendingApprovalCount = pending.length;
+      const pending = approvals.items.filter(item => item.state === "pending");
+      pendingApprovalCount = pending.filter(item=>num(item.expiresAt)>Date.now()).length;
       const fingerprint = JSON.stringify(pending);
       if (fingerprint === lastApprovalState) return; // Preserve focus while polling.
       lastApprovalState = fingerprint;
       approvalPanel.replaceChildren();
       heading("Pending approvals", approvalPanel);
       p(
-        "This list refreshes automatically while Agents is open. Match the code, Client and callback before approving.",
+        "Verify the code, Connector, audience, client, callback and application permissions before approving.",
         approvalPanel,
         "muted",
       );
@@ -1466,10 +1777,12 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             key: "code",
             label: "Request",
             render(a, td) {
+              const connector = agents.items.find(item => item.id === a.agentId);
               p(`${str(a.kind)} · ${str(a.code)}`, td);
-              p(`Agent ${str(a.agentId)} · Workspace ${str(a.workspaceId)}`, td);
+              p(`Connector ${str(connector?.label, str(a.agentId, "Unknown"))} · ${str(a.agentId)}`, td);
+              if (a.workspaceId) p(`Workspace ${str(a.workspaceId)}`, td);
               p(
-                `Client ${str(a.clientId)} · expires ${str(a.expiresAt)}`,
+                `Client ${str(a.clientId, "Unknown")} · expires ${new Date(num(a.expiresAt)).toLocaleString()}`,
                 td,
                 "muted",
               );
@@ -1479,9 +1792,14 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             key: "digest",
             label: "Exact authorization",
             render(a, td) {
+              if (a.kind === "oauth") {
+                p(`Audience: ${str(a.audience, "Unavailable")}`, td);
+                p(`Application permission ceiling: ${Array.isArray(a.permissionSnapshot)
+                  ? arrayStrings(a.permissionSnapshot).join(", ") || "None" : "Unavailable"}`, td);
+              }
               p(`Redirect: ${str(a.redirectUri)}`, td);
               p(
-                `Scope: ${Array.isArray(a.scope) ? arrayStrings(a.scope).join(", ") : str(a.scope)}`,
+                `OAuth scopes: ${Array.isArray(a.scope) ? arrayStrings(a.scope).join(", ") : str(a.scope)}`,
                 td,
               );
               p(`Digest: ${str(a.digest)}`, td);
@@ -1493,51 +1811,79 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             key: "state",
             label: "Decision",
             render(a, td) {
-              p(str(a.state), td);
+              const expired=num(a.expiresAt)<=Date.now();
+              p(expired?"Expired — restart authorization":str(a.state), td);
+              const connector = agents.items.find(item => item.id === a.agentId);
+              const requiresExact = a.kind === "oauth" && v2;
+              const valid = !expired && (!requiresExact || (
+                !!connector && connector.contractVersion === 2 &&
+                typeof a.audience === "string" && !!a.audience &&
+                a.audience === connector.endpoint && !!str(a.clientId) && !!str(a.redirectUri) &&
+                !!str(a.code) && Array.isArray(a.permissionSnapshot) &&
+                a.permissionSnapshot.every(permission => v2Permissions.some(accepted => accepted === permission)) &&
+                Number.isSafeInteger(a.revision) && /^[a-f0-9]{64}$/.test(str(a.digest))
+              ));
+              if (expired) p("The authorization window expired. Restart the external Connector authorization.", td);
+              else if (!valid) p("Approval blocked because the exact authorization details could not be verified.", td);
+              const approval = {
+                id: str(a.id), expectedRevision: num(a.revision) || approvals.revision,
+                digest: str(a.digest), expiresAt: num(a.expiresAt),
+              };
               actions(
                 td,
-                button("Approve exact request", async () => {
+                markRemote(button("Approve exact request", () => runRemoteAction(own, async () => {
+                  if (!valid || approval.expiresAt <= Date.now()) throw new Error("Authorization request expired or changed.");
                   await client.request(
                     "POST",
-                    `${ADMIN}/approvals/${encodeURIComponent(str(a.id))}/decision`,
+                    `${ADMIN}/approvals/${encodeURIComponent(approval.id)}/decision`,
                     {
-                      expectedRevision: num(a.revision) || approvals.revision,
-                      digest: str(a.digest),
+                      expectedRevision: approval.expectedRevision,
+                      digest: approval.digest,
                       decision: "approve",
                     },
                   );
                   await refresh();
-                }),
-                button(
+                })), !valid),
+                markRemote(remoteButton(
                   "Deny",
+                  own,
                   async () => {
+                    if (approval.expiresAt <= Date.now()) throw new Error("Authorization request expired.");
                     await client.request(
                       "POST",
-                      `${ADMIN}/approvals/${encodeURIComponent(str(a.id))}/decision`,
+                      `${ADMIN}/approvals/${encodeURIComponent(approval.id)}/decision`,
                       {
-                        expectedRevision: num(a.revision) || approvals.revision,
-                        digest: str(a.digest),
+                        expectedRevision: approval.expectedRevision,
+                        digest: approval.digest,
                         decision: "deny",
                       },
                     );
                     await refresh();
                   },
                   "danger",
-                ),
+                ),expired),
               );
             },
           },
         ],
         pending,
         approvalPanel,
+        false,
       );
     };
+    const approvalToolbar=el("div",undefined,"row");
+    approvalToolbar.append(button("Check pending approvals", async()=>loadApprovals()));
+    p("Automatic checks stop after 30 seconds without pending requests. Use this button when starting a new authorization.",approvalToolbar,"muted");
+    approvalPanel.before(approvalToolbar);
     const showApprovalsFailure = (error: unknown) => {
       if (own !== generation || !opened || destroyed || tab !== "Agents") return;
+      authority=undefined;
+      dismissConfirmation();
+      refreshRemoteButtons();
       if (!approvalPanel.textContent?.includes("Pending approvals")) {
         approvalPanel.replaceChildren();
         heading("Pending approvals", approvalPanel);
-        p("Could not retrieve approvals. Automatic retry is active.", approvalPanel);
+        p("Could not retrieve approvals. Check approvals manually or retry after service recovery.", approvalPanel);
       }
       announce(errorText(error), true);
     };
@@ -1549,8 +1895,10 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     const pollApprovals = async () => {
       if (own !== generation || destroyed || !opened || tab !== "Agents") return;
       approvalRefreshTimer = undefined;
+      if (doc.visibilityState === "hidden") return;
       try {
         await loadApprovals();
+        // A failed poll invalidates prior mutation authority. Reacquire through explicit Refresh, not by assuming this list repairs all revisions.
         approvalFailures = 0;
         quotaDelay=0;
       } catch (error) {
@@ -1560,10 +1908,10 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       }
       // Check generation after the await: a closed or superseded manager must
       // never restart the timer. Only one automatic request is in flight.
-      if (own !== generation || destroyed || !opened || tab !== "Agents") return;
-      const delay = Math.max(quotaDelay,approvalFailures
-        ? Math.min(60000,4000*2**Math.min(approvalFailures,4))
-        : pendingApprovalCount || Date.now()-approvalWatchStarted < 30000 ? 4000 : 15000);
+      if (own !== generation || destroyed || !opened || tab !== "Agents" || isDocumentHidden()) return;
+      const delay=approvalPollingDelay(pendingApprovalCount,Date.now()-approvalWatchStarted,
+        approvalFailures,quotaDelay);
+      if(delay===null) return; // idle or repeatedly failing; explicit refresh is always available.
       approvalRefreshTimer = setTimeout(() => void pollApprovals(), delay);
       (approvalRefreshTimer as unknown as { unref?: () => void }).unref?.();
     };
@@ -1579,9 +1927,10 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           [
             {
               key: "agentId",
-              label: "Agent / Workspace",
+              label: "Connector / Workspace",
               render(g, td) {
-                p(`${str(g.agentId)} / ${str(g.workspaceId)}`, td);
+                const connector=agents.items.find(a=>a.id===g.agentId);
+                p(`${str(connector?.label,str(g.agentId))}${g.workspaceId ? " / "+str(g.workspaceId) : ""}`,td);
                 p(str(g.clientId), td, "muted");
               },
             },
@@ -1589,7 +1938,12 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
               key: "state",
               label: "Authorization",
               render(g, td) {
-                p(`${str(g.state)} · expires ${str(g.expiresAt)}`, td);
+                const connector=agents.items.find(a=>a.id===g.agentId);
+                p(g.state==="revoked"?"Revoked":g.expiresAt===null && g.contractVersion===2
+                  ? connector?.suspended===true ? "Suspended (authorization retained)" : "Authorized — until revoked"
+                  : num(g.expiresAt)>Date.now()?"Authorized (legacy finite Grant)":"Credentials unavailable / recovery required",td);
+                if (g.audience) p(`Audience: ${str(g.audience)}`,td,"muted");
+                if (Array.isArray(g.permissions)) p(`Grant permissions: ${arrayStrings(g.permissions).join(", ") || "None"}`,td,"muted");
               },
             },
             {
@@ -1600,57 +1954,45 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
                   p("Revoked — no further authorization", td, "muted");
                   return;
                 }
-                const revoke = button("Revoke Grant", () => {
-                  const panel = el("div", undefined, "confirm");
-                  p(
-                    `Revoke this Client Grant for ${str(g.clientId)}? The connected MCP client loses access. This does not delete the Workspace or generator.`,
-                    panel,
+                const grant = { id: str(g.id), revision: num(g.revision),
+                  clientId: str(g.clientId), connectorId: str(g.agentId) };
+                const connector = agents.items.find(item => item.id === grant.connectorId);
+                const revoke = markRemote(button("Revoke Grant", () => {
+                  confirmAction(
+                    `Revoke Grant ${grant.id} for ${grant.clientId} on Connector ${str(connector?.label, grant.connectorId)}?`,
+                    async () => {
+                      const key = crypto.randomUUID();
+                      let uncertain: unknown;
+                      try {
+                        const outcome = record(await client.request("POST",
+                          `${ADMIN}/grants/${encodeURIComponent(grant.id)}/revoke`,
+                          { expectedRevision: grant.revision }, { idempotencyKey: key }));
+                        if (outcome.state !== "revoked") throw new Error("Gateway did not confirm Grant revocation.");
+                      } catch (error) {
+                        uncertain = error;
+                      }
+                      let current: Row | undefined;
+                      try {
+                        const latest = await loadList(`${ADMIN}/grants`);
+                        current = latest.items.find(item => item.id === grant.id);
+                      } catch {
+                        throw new Error(`Grant revocation unverified. Refresh Grants to inspect the original request ${key}.`);
+                      }
+                      if (current?.state !== "revoked")
+                        throw uncertain ?? new Error(`Grant revocation unverified. Inspect request ${key} before taking another action.`);
+                      if (own !== generation) return;
+                      await refresh();
+                      announce("Grant revoked and verified in the Registry. Reauthorize the connector to regain access.");
+                    }, true, "Confirm revoke", td,
                   );
-                  const confirm = button("Confirm revoke", async () => {
-                    confirm.disabled = true;
-                    const endpoint = `${ADMIN}/grants/${encodeURIComponent(str(g.id))}/revoke`;
-                    let uncertain: unknown;
-                    try {
-                      const outcome = record(await client.request("POST", endpoint, {
-                        expectedRevision: num(g.revision),
-                      }));
-                      if (outcome.state !== "revoked")
-                        throw new Error("Gateway did not confirm Grant revocation.");
-                    } catch (error) {
-                      // Reconcile a potentially committed POST by reading the
-                      // authoritative state. Never replay an uncertain write.
-                      uncertain = error;
-                    }
-                    let current: Row | undefined;
-                    try {
-                      const grants = await loadList(`${ADMIN}/grants`);
-                      current = grants.items.find((item) => item.id === g.id);
-                    } catch {
-                      panel.replaceChildren();
-                      p("Revocation outcome unknown: server readback failed. Refresh Grants to reconcile; do not submit the POST again.", panel);
-                      throw new Error("Grant revocation unverified. Refresh Grants; do not retry the uncertain write.");
-                    }
-                    if (current?.state !== "revoked") {
-                      panel.replaceChildren();
-                      p("Grant still appears active or has changed. Refresh Grants and inspect its revision before attempting another action.", panel);
-                      throw uncertain ?? new Error(
-                        "Grant revocation not verified. Do not repeat an uncertain write.",
-                      );
-                    }
-                    await refresh();
-                    announce("Grant revoked and verified in the Registry. Reauthorize the connector to regain access.");
-                  }, "danger");
-                  panel.append(confirm, button("Cancel", () => panel.remove()));
-                  td.append(panel);
-                  revoke.disabled = true;
-                  confirm.focus();
-                }, "danger");
+                }, "danger"));
                 td.append(revoke);
               },
             },
           ],
           grants.items,
           grantsPanel,
+          false,
         );
       } catch {
         if (own !== generation || destroyed || !opened || tab !== "Agents") return;
@@ -1660,731 +2002,146 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       }
     })();
   }
-  function normalizeResource(value: Row): ResourceDraft {
-    const files: Record<string, string> = Object.create(null) as Record<
-      string,
-      string
-    >;
-    for (const [path, content] of Object.entries(record(value.files)))
-      if (typeof content === "string") files[path] = content;
-    return {
-      id: str(value.id),
-      kind: str(value.kind, "document"),
-      title: str(value.title, str(value.id)),
-      description: str(value.description),
-      enabled: value.enabled !== false,
-      body: str(value.body),
-      files,
-      revision: num(value.revision),
-      dependencies: arrayStrings(value.dependencies),
-      provenance: str(value.provenance),
-      license: str(value.license, "operator-provided"),
-      ...(typeof value.upstreamVersion === "string"
-        ? { upstreamVersion: value.upstreamVersion }
-        : {}),
-    };
-  }
-  async function openResource(value: Row) {
-    const load = ++resourceLoad;
-    const loaded = record(
-      await client.request(
-        "GET",
-        `${ADMIN}/resources/${encodeURIComponent(str(value.id))}`,
-      ),
-    );
-    if (load !== resourceLoad || destroyed) return;
-    draft = normalizeResource(Object.keys(loaded).length ? loaded : value);
-    draftBase = draft.body;
-    draftBaseline = structuredClone(draft);
-    draftFile = "";
-    editorDirty = false;
-    const saved = await client.drafts?.get(`resource:${draft.id}`);
-    if (load !== resourceLoad || destroyed) return;
-    if (saved) {
-      try {
-        const parsed = record(JSON.parse(saved));
-        if (parsed.id === draft.id) {
-          const restored = normalizeResource(parsed);
-          if (restored.revision === draft.revision) {
-            draft = restored;
-            editorDirty = true;
-            announce(
-              "Recovered unpublished Resource draft. Other document drafts remain available through Settings → Export unpublished Resource drafts.",
-            );
-          } else
-            announce(
-              "An unpublished draft from another revision is retained. Export it before replacing the current draft.",
-              true,
-            );
-        }
-      } catch {
-        announce(
-          "A malformed Resource draft is retained. Export it from Settings before cleanup.",
-          true,
-        );
-      }
+  function mountRetainedRecovery(own: number) {
+    if (!client.localRecoveryScopes || !client.inspectLocalRecovery) return;
+    if (retainedPanel?.own === own) {
+      body.append(retainedPanel.node);
+      return;
     }
-    await refresh();
-    if (load === resourceLoad) focusResourceEditor();
-  }
-  function focusResourceEditor() {
-    const area = body.querySelector<HTMLTextAreaElement>(
-      'textarea[aria-label="Resource text"]',
-    );
-    const panel = area?.closest<HTMLElement>(".editor");
-    if (!area || !panel || !opened) return;
-    fitTextarea(area, 140);
-    area.focus({ preventScroll: true });
-    body.scrollTop +=
-      panel.getBoundingClientRect().top - body.getBoundingClientRect().top - 10;
-  }
-  function saveDraft() {
-    if (!draft) return;
-    editorDirty = true;
-    const key = `resource:${draft.id}`,
-      value = json(draft);
-    draftPending = draftPending
-      .then(() => client.drafts?.set(key, value))
-      .then(() => undefined)
-      .catch(report);
-  }
-  async function renderLibrary(own: number) {
-    const response = await loadList(`${ADMIN}/resources`);
-    if (own !== generation) return;
-    state.libraryRevision = response.revision;
-    heading("Library");
-    p(
-      "Resources are editable instructions, not security policy. Publishing creates a new revision. Local drafts survive a failed publish.",
-      body,
-      "muted",
-    );
-    search();
-    const createRow = el("div", undefined, "row"),
-      id = field("New Resource ID"),
-      kind = select(
-        "Kind",
-        ["skill", "workflow", "instruction", "document"].map((value) => ({
-          value,
-          label: value,
-        })),
-      );
-    createRow.append(
-      id.label,
-      kind.label,
-      button("Create Resource", async () => {
-        if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(id.input.value))
-          throw new Error(
-            "Use 1–80 lowercase letters, digits, or hyphens for the Resource ID.",
-          );
-        const created = record(
-          await client.request("POST", `${ADMIN}/resources`, {
-            resource: {
-              id: id.input.value,
-              kind: kind.input.value,
-              title: id.input.value,
-              description: "",
-              body: "",
-              files: {},
-              enabled: true,
-              dependencies: [],
-              provenance: "Operator-authored",
-              license: "operator-provided",
-            },
-          }),
-        );
-        await openResource(created);
-      }),
-    );
-    body.append(createRow);
-    actions(
-      body,
-      button("Export Library ZIP", async () => {
-        if (client.exportResources)
-          client.download(
-            "perch-mcp-library.zip",
-            await client.exportResources(),
-            "application/zip",
-          );
-        else {
-          const exported = await client.request(
-            "GET",
-            `${ADMIN}/resources/export`,
-          );
-          client.download(
-            "perch-mcp-library.json",
-            json(exported),
-            "application/json",
-          );
-        }
-      }),
-      button("Import Library…", () => {
-        importFile.click();
-      }),
-    );
-    const importFile = el("input");
-    importFile.type = "file";
-    importFile.accept = ".zip,application/zip";
-    importFile.hidden = true;
-    importFile.setAttribute("aria-label", "Import Library package");
-    on(importFile, "change", () => {
-      const file = importFile.files?.[0];
-      if (file) void run(() => previewImport(file, response.revision));
-    });
-    body.append(importFile);
-    table(
-      [
-        {
-          key: "id",
-          label: "Resource",
-          render(r, td) {
-            td.append(button(str(r.title, str(r.id)), () => openResource(r)));
-            p(str(r.id), td, "muted");
-          },
-        },
-        {
-          key: "kind",
-          label: "Kind / revision",
-          render(r, td) {
-            p(
-              `${str(r.kind)} · revision ${str(r.revision)} · ${r.enabled === false ? "disabled" : "enabled"}`,
-              td,
-            );
-            p(str(r.description), td, "muted");
-          },
-        },
-        {
-          key: "id",
-          label: "Actions",
-          render(r, td) {
-            actions(
-              td,
-              button("Duplicate", async () => {
-                const copyId = `${str(r.id).slice(0, 60)}-copy-${Date.now().toString(36)}`;
-                const full = record(
-                  await client.request(
-                    "GET",
-                    `${ADMIN}/resources/${encodeURIComponent(str(r.id))}`,
-                  ),
-                );
-                const value = normalizeResource({ ...full, id: copyId });
-                const created = record(
-                  await client.request("POST", `${ADMIN}/resources`, {
-                    resource: {
-                      ...value,
-                      revision: undefined,
-                      dependencies: full.dependencies ?? [],
-                    },
-                  }),
-                );
-                await openResource(created);
-              }),
-              button(r.enabled === false ? "Enable" : "Disable", async () => {
-                const full = record(
-                  await client.request(
-                    "GET",
-                    `${ADMIN}/resources/${encodeURIComponent(str(r.id))}`,
-                  ),
-                );
-                await client.request(
-                  "PUT",
-                  `${ADMIN}/resources/${encodeURIComponent(str(r.id))}`,
-                  {
-                    expectedRevision: num(r.revision),
-                    resource: {
-                      ...normalizeResource(full),
-                      revision: undefined,
-                      enabled: r.enabled === false,
-                    },
-                  },
-                );
-                await refresh();
-              }),
-              button(
-                "Delete",
-                async () => {
-                  confirmAction(
-                    `Delete Resource ${str(r.id)}? Active dependencies may block deletion.`,
-                    async () => {
-                      await client.request(
-                        "POST",
-                        `${ADMIN}/resources/${encodeURIComponent(str(r.id))}/delete`,
-                        { expectedRevision: num(r.revision) },
-                      );
-                      if (draft?.id === r.id) draft = undefined;
-                      await refresh();
-                    },
-                  );
-                },
-                "danger",
-              ),
-            );
-          },
-        },
-      ],
-      response.items,
-    );
-    if (draft) renderEditor();
-  }
-  function renderEditor() {
-    const current = draft!;
-    const panel = el("section", undefined, "editor");
-    heading(`Edit ${current.id}`, panel);
-    p(
-      `Base revision ${current.revision}${editorDirty ? " · unpublished draft" : ""}`,
-      panel,
-      "muted",
-    );
-    const row = el("div", undefined, "row"),
-      title = field("Resource title", current.title),
-      description = field("Description", current.description);
-    on(title.input, "input", () => {
-      current.title = title.input.value;
-      saveDraft();
-    });
-    on(description.input, "input", () => {
-      current.description = description.input.value;
-      saveDraft();
-    });
-    row.append(title.label, description.label);
-    panel.append(row);
-    const meta = el("details");
-    meta.append(el("summary", "Resource metadata"));
-    const metadataRow = el("div", undefined, "row"),
-      dependencies = field(
-        "Dependency Resource IDs (comma separated)",
-        current.dependencies.join(", "),
-      ),
-      provenance = field("Provenance", current.provenance),
-      license = field("License / redistribution terms", current.license);
-    on(dependencies.input, "input", () => {
-      current.dependencies = dependencies.input.value
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      saveDraft();
-    });
-    on(provenance.input, "input", () => {
-      current.provenance = provenance.input.value;
-      saveDraft();
-    });
-    on(license.input, "input", () => {
-      current.license = license.input.value;
-      saveDraft();
-    });
-    metadataRow.append(dependencies.label, provenance.label, license.label);
-    meta.append(metadataRow);
-    panel.append(meta);
-    const grid = el("div", undefined, "editor-grid"),
-      fileList = el("div", undefined, "file-list"),
-      main = el("div"),
-      areaLabel = el("label", "Resource text"),
-      area = el("textarea");
-    area.spellcheck = false;
-    area.setAttribute("aria-label", "Resource text");
-    area.value = draftFile ? (current.files[draftFile] ?? "") : current.body;
-    areaLabel.append(area);
-    main.append(areaLabel);
-    for (const path of ["", ...Object.keys(current.files).sort()]) {
-      const b = button(path || "Main text", async () => {
-        draftFile = path;
-        await refresh();
-        focusResourceEditor();
-      });
-      b.setAttribute("aria-pressed", String(path === draftFile));
-      fileList.append(b);
-    }
-    const fileName = field("Reference file path");
-    fileList.append(
-      fileName.label,
-      button("Add text file", async () => {
-        const path = fileName.input.value;
-        if (
-          !/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(path) ||
-          path
-            .split("/")
-            .some(
-              (p) =>
-                !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p) ||
-                p === "." ||
-                p === ".." ||
-                ["constructor", "prototype", "__proto__"].includes(p),
-            ) ||
-          Object.keys(current.files).some(
-            (p) => p.toLowerCase() === path.toLowerCase(),
-          )
-        )
-          throw new Error("Enter a unique relative path without traversal.");
-        current.files[path] = "";
-        draftFile = path;
-        saveDraft();
-        await refresh();
-        focusResourceEditor();
-      }),
-    );
-    area.dataset.autoGrowMinimum = "140";
-    const fit = () => fitTextarea(area, 140);
-    on(area, "input", () => {
-      if (draftFile) current.files[draftFile] = area.value;
-      else current.body = area.value;
-      saveDraft();
-      fit();
-    });
-    queueMicrotask(fit);
-    grid.append(fileList, main);
-    panel.append(grid);
-    actions(
-      panel,
-      button(
-        "Publish revision",
-        async () => {
-          await draftPending;
-          const saved = record(
-            await client.request(
-              "PUT",
-              `${ADMIN}/resources/${encodeURIComponent(current.id)}`,
-              {
-                expectedRevision: current.revision,
-                resource: {
-                  id: current.id,
-                  kind: current.kind,
-                  title: current.title,
-                  description: current.description,
-                  enabled: current.enabled,
-                  body: current.body,
-                  files: current.files,
-                  dependencies: current.dependencies,
-                  provenance: current.provenance,
-                  license: current.license,
-                  ...(current.upstreamVersion
-                    ? { upstreamVersion: current.upstreamVersion }
-                    : {}),
-                },
-              },
-            ),
-          );
-          await client.drafts?.delete(`resource:${current.id}`);
-          draft = normalizeResource(saved);
-          draftBase = draft.body;
-          draftBaseline = structuredClone(draft);
-          editorDirty = false;
-          await refresh();
-          announce("Published new Resource revision.");
-        },
-        "primary",
-      ),
-      button("Compare draft", async () => {
-        const details = el("details");
-        details.open = true;
-        details.append(el("summary", "Draft difference"));
-        const parts: [string, string, string][] = [
-          ["Main text", draftBase, current.body],
-          ...[
-            ...new Set([
-              ...Object.keys(draftBaseline?.files ?? {}),
-              ...Object.keys(current.files),
-            ]),
-          ]
-            .sort()
-            .map(
-              (path) =>
-                [
-                  path,
-                  draftBaseline?.files[path] ?? "",
-                  current.files[path] ?? "",
-                ] as [string, string, string],
-            ),
-        ];
-        let changed = false;
-        for (const [path, before, after] of parts) {
-          if (before === after) continue;
-          changed = true;
-          details.append(el("h3", path));
-          const pre = el("pre");
-          for (const line of lineDiff(before, after))
-            pre.append(
-              el(
-                "span",
-                `${line.kind === "add" ? "+" : line.kind === "remove" ? "-" : " "} ${line.text}\n`,
-                `diff-${line.kind}`,
-              ),
-            );
-          details.append(pre);
-        }
-        if (
-          draftBaseline &&
-          (draftBaseline.title !== current.title ||
-            draftBaseline.description !== current.description ||
-            draftBaseline.dependencies.join(",") !==
-              current.dependencies.join(",") ||
-            draftBaseline.provenance !== current.provenance ||
-            draftBaseline.license !== current.license)
-        ) {
-          changed = true;
-          p(
-            "Resource metadata changed. Review the metadata fields before publishing.",
-            details,
-          );
-        }
-        if (!changed) p("No changes.", details);
-        panel.append(details);
-      }),
-      button("Preview text", async () => {
-        const details = el("details");
-        details.open = true;
-        details.append(
-          el("summary", "Safe text preview"),
-          renderResourcePreview(
-            doc,
-            draftFile ? (current.files[draftFile] ?? "") : current.body,
-          ),
-        );
-        panel.append(details);
-      }),
-      button("Revision history", async () => {
-        const histories = list(
-          await client.request(
-            "GET",
-            `${ADMIN}/resources/${encodeURIComponent(current.id)}/history`,
-          ),
-        );
-        table(
-          [
-            { key: "revision", label: "Revision" },
-            { key: "hash", label: "Digest" },
-            {
-              key: "revision",
-              label: "Restore",
-              render(r, td) {
-                td.append(
-                  button("Restore as new revision", async () => {
-                    confirmAction(
-                      `Restore Resource ${current.id} revision ${str(r.revision)} as a new revision?`,
-                      async () => {
-                        const saved = record(
-                          await client.request(
-                            "POST",
-                            `${ADMIN}/resources/${encodeURIComponent(current.id)}/restore`,
-                            {
-                              expectedRevision: current.revision,
-                              historicalRevision: num(r.revision),
-                            },
-                          ),
-                        );
-                        draft = normalizeResource(saved);
-                        draftBase = draft.body;
-                        draftBaseline = structuredClone(draft);
-                        editorDirty = false;
-                        await refresh();
-                      },
-                    );
-                  }),
-                );
-              },
-            },
-          ],
-          histories.items,
-          panel,
-        );
-      }),
-      button("Close editor", async () => {
-        await draftPending;
-        draft = undefined;
-        draftFile = "";
-        await refresh();
-      }),
-    );
-    if (draftFile)
-      actions(
-        panel,
-        button(
-          "Remove selected reference file",
-          async () => {
-            delete current.files[draftFile];
-            draftFile = "";
-            saveDraft();
-            await refresh();
-          },
-          "danger",
-        ),
-      );
-    const assignment = el("details");
-    assignment.append(el("summary", "Resource assignment"));
-    p(
-      "Global → Workspace → Agent. A more specific Resource with the same ID replaces the broader assignment.",
-      assignment,
-      "muted",
-    );
-    const ar = el("div", undefined, "row"),
-      scope = select("Assignment scope", [
-        { value: "global", label: "Global" },
-        { value: "workspace", label: "Workspace" },
-        { value: "agent", label: "Agent" },
-      ]),
-      target = select("Assignment target", [
-        { value: "", label: "Global" },
-        ...workspaces.items.map((w) => ({
-          value: str(w.id),
-          label: `Workspace: ${str(w.label)}`,
-        })),
-        ...agents.items.map((a) => ({
-          value: str(a.id),
-          label: `Agent: ${str(a.label)}`,
-        })),
-      ]);
-    const updateTargets = () => {
-      const entries =
-        scope.input.value === "global"
-          ? [{ value: "", label: "Global" }]
-          : (scope.input.value === "workspace"
-              ? workspaces.items
-              : agents.items
-            ).map((e) => ({ value: str(e.id), label: str(e.label) }));
-      target.input.replaceChildren(
-        ...entries.map((e) => {
-          const option = el("option", e.label);
-          option.value = e.value;
-          return option;
-        }),
-      );
-    };
-    on(scope.input, "change", updateTargets);
-    updateTargets();
-    ar.append(
-      scope.label,
-      target.label,
-      button("Enable Resource at scope", async () => {
-        await client.request("POST", `${ADMIN}/resources/assign`, {
-          expectedRevision: num(state.libraryRevision),
-          resourceId: current.id,
-          scopeType: scope.input.value,
-          scopeId: scope.input.value === "global" ? "" : target.input.value,
-          enabled: true,
-        });
-        await refresh();
-        announce("Resource assignment updated.");
-      }),
-      button("Disable Resource at scope", async () => {
-        await client.request("POST", `${ADMIN}/resources/assign`, {
-          expectedRevision: num(state.libraryRevision),
-          resourceId: current.id,
-          scopeType: scope.input.value,
-          scopeId: scope.input.value === "global" ? "" : target.input.value,
-          enabled: false,
-        });
-        await refresh();
-        announce("Resource disabled at selected scope.");
-      }),
-    );
-    assignment.append(ar);
-    panel.append(assignment);
+    const panel = el("section", undefined, "recovery-status");
+    retainedPanel = { own, node: panel };
     body.append(panel);
-  }
-  async function previewImport(file: File, expectedRevision: number) {
-    if (file.size > 8 * 1024 * 1024)
-      throw new Error("Import exceeds the 8 MiB compressed input limit.");
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const preview = record(
-      client.importPreview
-        ? await client.importPreview(bytes)
-        : await client.request("POST", `${ADMIN}/resources/import/preview`, {
-            archiveBase64: bytesToBase64(bytes),
-          }),
-    );
-    const panel = el("section", undefined, "editor");
-    heading(`Import preview: ${file.name}`, panel);
-    p(
-      `${file.size.toLocaleString()} input bytes. No changes have been published.`,
-      panel,
-    );
-    const entries = Array.isArray(preview.items)
-      ? preview.items.filter(isRecord)
-      : Array.isArray(preview.entries)
-        ? preview.entries.filter(isRecord)
-        : [];
-    const decisions: Record<
-      string,
-      {
-        action: string;
-        newId?: string;
+    const active = () => own === generation && tab === "Recovery" && opened && !destroyed;
+    async function load() {
+      panel.replaceChildren();
+      heading("Retained local evidence", panel);
+      const summary = el("p", "Reading local recovery records…", "muted");
+      panel.append(summary);
+      let scopes: HistoricalRecoveryScope[];
+      try {
+        scopes = await client.localRecoveryScopes!();
+      } catch (error) {
+        if (active()) summary.textContent = errorText(error);
+        return;
       }
-    > = {};
-    table(
-      [
-        { key: "id", label: "Resource" },
-        {
-          key: "status",
-          label: "Action / size",
-          render(r, td) {
-            p(
-              `${str(r.action, str(r.status))} · ${str(r.bytes, str(r.size))} bytes`,
-              td,
-            );
-            p(str(r.reason), td);
-          },
-        },
-        {
-          key: "id",
-          label: "Conflict decision",
-          render(r, td) {
-            if (r.action === "excluded") {
-              td.textContent = "Excluded";
-              return;
+      if (!active()) return;
+      if (!scopes.length) {
+        summary.textContent = "No retained local recovery scopes on this installation.";
+        return;
+      }
+      summary.remove();
+      const scopeSelector = select("Retained Binding and Epoch", scopes.map(scope => ({
+        value: scope.id,
+        label: `${scope.workspaceId} · Assignment ${scope.assignmentGeneration} · Binding ${scope.bindingGeneration} · Epoch ${scope.epoch}`,
+      })), scopes.some(scope => scope.id === retainedScopeId) ? retainedScopeId : scopes[0]!.id);
+      const evidence = el("div");
+      panel.append(scopeSelector.label, evidence);
+      let inspectionGeneration = 0;
+      async function inspect() {
+        const id = scopeSelector.input.value;
+        retainedScopeId = id;
+        const request = ++inspectionGeneration;
+        dismissConfirmation();
+        evidence.replaceChildren(el("p", "Reading the selected scope…"));
+        let result: HistoricalRecoveryInspection;
+        try {
+          result = await client.inspectLocalRecovery!(id);
+        } catch (error) {
+          if (active() && request === inspectionGeneration) evidence.replaceChildren(el("p", errorText(error)));
+          return;
+        }
+        if (!active() || request !== inspectionGeneration || result.scope.id !== id) return;
+        evidence.replaceChildren();
+        const {scope, revision} = result;
+        p(`Native identity digest ${scope.nativeIdentityDigest}`, evidence, "muted");
+        p(revision ? `Verified source revision ${revision}` : str(result.sourceError, "Verified source readback unavailable."), evidence, "muted");
+        if (client.exportLocalRecovery) evidence.append(button("Export selected local evidence", () =>
+          confirmAction(`Download private evidence for Workspace ${scope.workspaceId}, Assignment ${scope.assignmentGeneration}, Binding ${scope.bindingGeneration}, Epoch ${scope.epoch}?`, async () => {
+            const data = await client.exportLocalRecovery!(id);
+            if (active() && request === inspectionGeneration)
+              client.download("perch-local-recovery.json", data, "application/json");
+          })));
+        for (const row of result.records) {
+          const card = el("section", undefined, "recovery-item");
+          card.append(el("strong", `${row.kind} · ${row.state}`));
+          p(row.id, card, "muted");
+          if (row.reason) p(row.reason, card);
+          if (row.gatewayOperationId) p(`Gateway Operation ${row.gatewayOperationId}`, card, "muted");
+          const describeDigest = (value: string | null | undefined) =>
+            value === null ? "verified absent" : value ?? "unknown";
+          if (row.expectedDigest !== undefined || row.observedDigest !== undefined)
+            p(`Expected pointer digest ${describeDigest(row.expectedDigest)} · observed ${describeDigest(row.observedDigest)}`, card, "muted");
+          if (row.paths.length) {
+            const details = el("details");
+            details.append(el("summary", "File digest evidence"));
+            for (const path of row.paths) {
+              p(`${path.path} · expected ${describeDigest(path.expectedDigest)} · observed ${describeDigest(path.observedDigest)}`, details);
             }
-            const choice = select(`Decision for ${str(r.id)}`, [
-              { value: "skip", label: "Keep existing / skip" },
-              { value: "replace", label: "Replace with imported revision" },
-              { value: "fork", label: "Create customized fork" },
-            ]);
-            decisions[str(r.id)] = {
-              action: r.action === "add" ? "replace" : "skip",
-            };
-            choice.input.value = r.action === "add" ? "replace" : "skip";
-            on(choice.input, "change", () => {
-              decisions[str(r.id)] = {
-                action: choice.input.value,
-                ...(choice.input.value === "fork"
-                  ? {
-                      newId: `${str(r.id).slice(0, 60)}-import-${Date.now().toString(36)}`,
-                    }
-                  : {}),
-              };
-            });
-            td.append(choice.label);
-          },
-        },
-      ],
-      entries,
-      panel,
-      false,
-    );
-    if (!entries.length) panel.append(el("pre", json(preview)));
-    actions(
-      panel,
-      button(
-        "Commit reviewed import",
-        async () => {
-          await client.request("POST", `${ADMIN}/resources/import`, {
-            expectedRevision,
-            archiveBase64: bytesToBase64(bytes),
-            decisions,
-          });
-          await refresh();
-          announce("Library import committed.");
-        },
-        "primary",
-      ),
-      button("Cancel import", () => {
-        panel.remove();
-      }),
-    );
-    body.prepend(panel);
-    panel.scrollIntoView?.({ block: "start" });
+            card.append(details);
+          }
+          const acknowledgement = row.acknowledgement;
+          if (acknowledgement && client.resolveRetainedLocalHold) card.append(button("Review local Hold", () =>
+            confirmAction(`Acknowledge Hold ${row.id} for Workspace ${scope.workspaceId}, Assignment ${scope.assignmentGeneration}, Binding ${scope.bindingGeneration}, Epoch ${scope.epoch} after reviewing the verified source evidence?`, async () => {
+              if (!active() || request !== inspectionGeneration) return;
+              await client.resolveRetainedLocalHold!(id, row.id, acknowledgement,
+                "Operator reviewed the exact retained local Hold and current readback.");
+              if (active() && request === inspectionGeneration) await inspect();
+            })));
+          evidence.append(card);
+        }
+        if (!result.records.length) p("No pending local Hold or staged publication in this scope.", evidence, "muted");
+        if (client.listCheckpoints) {
+          const checkpoints = el("section");
+          evidence.append(checkpoints);
+          heading("Checkpoints", checkpoints);
+          try {
+            const entries = await client.listCheckpoints(id);
+            if (!active() || request !== inspectionGeneration) return;
+            if (!entries.length) p("No checkpoints in this Epoch.", checkpoints, "muted");
+            for (const entry of entries) {
+              const checkpoint = el("section", undefined, "recovery-item");
+              checkpoint.append(el("strong", entry.label || entry.id));
+              p(`${new Date(entry.createdAt).toLocaleString()} · revision ${entry.revision} · ${entry.pinned ? "Pinned" : "Rotating retention"}`, checkpoint, "muted");
+              if (client.exportCheckpoint) checkpoint.append(button("Export checkpoint", async () => {
+                const data = await client.exportCheckpoint!(id, entry.id);
+                if (active() && request === inspectionGeneration)
+                  client.download("perch-checkpoint.json", data, "application/json");
+              }));
+              if (client.setCheckpointPinned) checkpoint.append(button(entry.pinned ? "Unpin checkpoint" : "Pin checkpoint", async () => {
+                await client.setCheckpointPinned!(id, entry.id, !entry.pinned);
+                if (active() && request === inspectionGeneration) await inspect();
+              }));
+              if (client.previewSourceRestore && client.exportCheckpoint && client.restoreSourceBackup) {
+                checkpoint.append(remoteButton("Inspect checkpoint restore", own, async () => {
+                  const archive = JSON.parse(await client.exportCheckpoint!(id, entry.id));
+                  const intent = await client.previewSourceRestore!(archive, "exact-binding");
+                  if (!active() || request !== inspectionGeneration) return;
+                  requireAuthority(own);
+                  confirmAction(`Restore ${intent.fileCount} checkpoint files in Workspace ${scope.workspaceId} at revision ${intent.expectedRevision}?`, async () => {
+                    if (!active() || request !== inspectionGeneration) return;
+                    await client.restoreSourceBackup!(archive, intent);
+                    if (active() && request === inspectionGeneration) await inspect();
+                  }, true);
+                }));
+              }
+              checkpoints.append(checkpoint);
+            }
+          } catch (error) {
+            if (active() && request === inspectionGeneration) p(errorText(error), checkpoints);
+          }
+        }
+      }
+      on(scopeSelector.input, "change", () => { void inspect(); });
+      await inspect();
+    }
+    void load().catch(error => {
+      if (active()) p(errorText(error), panel);
+    });
   }
-  /** Recovery surfaces one clear next action per state; technical evidence is
-   * available under Details, never demanded as an unexplained input field. */
   async function renderRecovery(own:number){
     heading('Connection recovery');
     p('This screen checks what stopped the agent. It never repeats a Save or source edit.',body,'muted');
+    mountRetainedRecovery(own);
     if(!workspaces.items.length){p('No Workspaces are configured.',body);return;}
     if(!workspaces.items.some(w=>w.id===recoveryWorkspaceId)){
       try{
@@ -2509,8 +2266,18 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     }
   }
   async function renderActivity(own: number) {
-    const response = list(await client.request("GET", `${ADMIN}/activity`));
+    const response = list(await client.request("GET", `${ADMIN}/activity`,undefined,{signal:viewAbort?.signal}));
     if (own !== generation) return;
+    if(lastKnown?.installation===installation()){
+      const observedAt=Date.now();
+      lastKnown.activity=response.items.slice(0,100).map(row=>({
+        workspaceId:str(row.workspaceId).slice(0,128),
+        operationId:str(row.operationId).slice(0,128),
+        tool:str(row.tool).slice(0,80),
+        phase:str(row.phase).slice(0,40),
+        observedAt,
+      }));
+    }
     heading("Activity");
     p(
       "Operation outcomes are authoritative. An unknown provider effect must not be replayed. Other operations can continue while current editor source is verified. Cancelling cannot undo a dispatched provider effect.",
@@ -2677,7 +2444,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     );
   }
   async function exportDiagnostics(): Promise<void> {
-    const report = await buildDiagnosticReport(client, options.version, status);
+    const report = await buildDiagnosticReport(client, options.version, status, authority?.generation!==generation);
     client.download("perch-mcp-diagnostics.json", json(report), "application/json");
     announce("Redacted diagnostic report exported, including OAuth audit and transport failures.");
   }
@@ -2696,27 +2463,104 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       );
     }
   }
+  function renderPrivateFiles(parent: HTMLElement) {
+    if (!client.stagePrivateFile || !client.listPrivateFiles) return;
+    const own = generation;
+    const section = el("section");
+    const inventory = el("div");
+    const file = field("Private file", "", "file");
+    const destination = field("Scratch path", "scratch/");
+    const current = () => own === generation && section.isConnected;
+    heading("Private files", section);
+    on(file.input, "change", () => {
+      const name = file.input.files?.[0]?.name;
+      if (name && destination.input.value === "scratch/") destination.input.value = "scratch/" + name;
+    });
+    async function refreshInventory() {
+      const entries = await client.listPrivateFiles!();
+      if (!current()) return;
+      inventory.replaceChildren();
+      for (const entry of entries) {
+        const row = el("div", undefined, "row");
+        const digest = el("span", `${entry.path} · ${entry.bytes} bytes · ${entry.state}`);
+        digest.title = entry.sha256;
+        row.append(digest);
+        if (client.previewPrivateFileImport && client.importPrivateFile) {
+          row.append(remoteButton("Review private import", own, async () => {
+            const intent = await client.previewPrivateFileImport!(entry.id);
+            if (!current()) return;
+            requireAuthority(own);
+            confirmAction(`Import ${intent.bytes} verified bytes to ${intent.path} in the current Binding?`, async () => {
+              const imported = await client.importPrivateFile!(entry.id, intent.expectedLocalRevision);
+              if (current()) {
+                await refreshInventory();
+                announce(`Private file imported at LocalRevision ${imported.localRevision}.`);
+              }
+            }, true);
+          }));
+        }
+        inventory.append(row);
+      }
+      if (!entries.length) p("No staged private files.", inventory, "muted");
+    }
+    actions(section, file.label, destination.label, button("Stage private file", async () => {
+      const selected = file.input.files?.[0];
+      if (!selected) throw new Error("Choose a file to stage.");
+      if (selected.size > 16 * 1024 * 1024) throw new Error("Private file exceeds the 16 MiB file limit.");
+      const path = destination.input.value;
+      const bytes = new Uint8Array(await selected.arrayBuffer());
+      if (!current()) return;
+      const staged = await client.stagePrivateFile!(path, bytes);
+      if (current()) {
+        file.input.value = "";
+        await refreshInventory();
+        announce(`Staged ${staged.bytes} bytes · SHA-256 ${staged.sha256}.`);
+      }
+    }));
+    section.append(inventory);
+    parent.append(section);
+    void refreshInventory().catch(error => {
+      if (current()) p(errorText(error), inventory);
+    });
+  }
   function renderSettings() {
     heading("Setup and Settings");
     const config = client.configuration();
     p(
-      `Userscript ${options.version} · Gateway ${str(state.version, "unverified")} · schema ${str(state.schemaVersion, "unverified")}`,
+      `Userscript ${options.version} · Gateway ${authority?.generation===generation?str(state.version,"unverified"):"unverified"} · schema ${authority?.generation===generation?str(state.schemaVersion,"unverified"):"unverified"}`,
       body,
       "muted",
     );
-    p(
-      "Candidate verification gate: native preview execution, unsaved preview pixel capture, and external provider effects remain gated until their required Firefox/provider evidence passes. A connected gateway does not establish functional parity.",
-      body,
-      "muted",
-    );
+    const connected=authority?.generation===generation && authority.installation===installation();
+    const rollout=record(state.rollout);
+    const activation=el("section",undefined,"recovery-status");
+    heading("Rollout and capability state",activation);
+    p("Authoritative Gateway status: "+(connected?"Loaded now":"UNVERIFIED/OFFLINE"),activation,"muted");
+    p("Assignment contract: "+(connected?str(state.assignmentContractVersion) === '2'?'v2':'legacy':'unknown'),activation);
+    p("19-tool v2 execution: "+(connected?
+      rollout.developmentContractV2ExecutionEnabled===true?"Enabled":
+      rollout.developmentContractV2ExecutionEnabled===false?"Disabled":"not reported":"unknown"),activation);
+    p("Canonical storage: "+(connected?str(rollout.canonicalStorageMode,"not reported"):"unknown"),activation,"muted");
+    const boolStatus=(value:unknown)=>!connected||typeof value!=="boolean"?"unknown":value?"enabled":"disabled";
+    p("Push: "+boolStatus(rollout.pushNotificationsEnabled)+
+      " · binary payloads: "+boolStatus(rollout.binaryPayloadsEnabled)+
+      " · admission estimates: "+boolStatus(rollout.admissionBudgetEnabled),activation,"muted");
+    p("OAuth authorization: "+(connected && rollout.oauthGrantPersistence==='UNTIL_REVOKED'?
+      'Until explicitly revoked':'unverified/legacy'),activation);
+    const ttl=num(rollout.oauthAccessTokenTtlSeconds);
+    p("OAuth access token: "+(connected&&ttl>=60?
+      ttl>=86400?`${(ttl/86400).toFixed(1).replace(/\.0$/,'')} days`:`${Math.floor(ttl/60)} minutes`:'unverified')+
+      " · "+(connected?str(rollout.oauthAccessTokenQualification,'UNKNOWN'):'UNKNOWN'),activation,"muted");
+    p("Preview pixels: UNSUPPORTED_INTERFACE until an authorized actual-pixel provider is accepted. Production provider effects require OWNER acceptance. Account quota remains unknown.",activation,"muted");
+    body.append(activation);
     const instructions = el("details");
     instructions.open = !config.paired;
     instructions.append(el("summary", "Installation steps"));
     for (const step of [
       "Deploy the released Cloudflare gateway package with its bindings and a unique BOOTSTRAP_SECRET. No local service is needed.",
       "Enter the exact HTTPS gateway origin. Check compatibility, then pair with its one-time secret.",
-      "Open Workspaces and attach the current native editor. Create an Agent and copy its connector URL.",
-      "Authorize the external MCP connector, approve the matching request code in Agents, then call workspace_status.",
+      "Create a Connector, assign a Workspace and explicitly bind the ready native editor. Copy the Connector URL.",
+      "Authorize the external MCP Connector, approve the matching request in Connectors, then call workspace_status.",
     ])
       p(step, instructions);
     body.append(instructions);
@@ -2902,27 +2746,34 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       }),
     );
     if (client.localDrafts) {
-      p(
-        "Unpublished Resource drafts from concurrent documents remain separate. Export them before manually recovering an older draft; this export does not replace settings, source backups or the published Library.",
-        body,
-        "muted",
-      );
-      body.append(
-        button("Export unpublished Resource drafts", async () => {
-          const drafts = await client.localDrafts!();
-          client.download(
-            "perch-mcp-resource-drafts.json",
-            json(drafts),
-            "application/json",
-          );
-          announce(
-            "Unpublished Resource drafts exported separately. Published Resources and settings are unchanged.",
-          );
-        }),
-      );
+      // Never initialize or expose a legacy Library on fresh installations.
+      // Read-only export appears only if retained historical drafts actually exist.
+      const archive=el("section");
+      body.append(archive);
+      const own=generation;
+      void client.localDrafts().then(value => {
+        if(own!==generation || !archive.isConnected) return;
+        const old=record(value);
+        const rows=Array.isArray(old.drafts)?old.drafts:Array.isArray(old.documents)?old.documents:[];
+        if(rows.length===0) return;
+        const disclosure=el("details");
+        disclosure.append(el("summary","Historical unpublished Resource drafts"));
+        p("This is read-only recovery evidence. No Resource editor or publication controls are installed.",disclosure,"muted");
+        disclosure.append(button("Export unpublished Resource drafts",async()=>{
+          const current=await client.localDrafts!();
+          client.download("perch-mcp-resource-drafts.json",json(current),"application/json");
+          announce("Historical Resource drafts exported. Published Resources and settings are unchanged.");
+        }));
+        archive.append(disclosure);
+      }).catch(()=>undefined);
     }
     if (client.restoreSourceBackup) {
+      const own = generation;
       const backupInput = el("input");
+      const restoreMode = select("Restore scope", [
+        {value: "exact-binding", label: "Exact Binding with verified private files"},
+        {value: "source-only", label: "Native source only"},
+      ], "exact-binding");
       backupInput.type = "file";
       backupInput.accept = ".json";
       backupInput.hidden = true;
@@ -2936,6 +2787,21 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
               "Source backup exceeds the local 64 MiB input budget.",
             );
           const backup: unknown = JSON.parse(await file.text());
+          if (own !== generation || !backupInput.isConnected) return;
+          if (client.previewSourceRestore) {
+            requireAuthority(own);
+            const mode = restoreMode.input.value === "source-only" ? "source-only" : "exact-binding";
+            const intent = await client.previewSourceRestore(backup, mode);
+            if (own !== generation || !backupInput.isConnected) return;
+            requireAuthority(own);
+            confirmAction(
+              `Restore ${intent.fileCount} ${mode === "source-only" ? "native source" : "verified Binding"} files at revision ${intent.expectedRevision}?`,
+              async () => {
+                await client.restoreSourceBackup!(backup, intent);
+                announce("Source backup restore verified.");
+              }, true);
+            return;
+          }
           confirmAction(
             "Restore this source backup to the current native draft? The adapter must verify identity and current revision. This does not Save.",
             async () => {
@@ -2947,9 +2813,12 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       });
       body.append(
         backupInput,
-        button("Restore source backup…", () => backupInput.click()),
+        ...(client.previewSourceRestore ? [restoreMode.label,
+          markRemote(button("Restore source backup…", () => backupInput.click()))] :
+          [button("Restore source backup…", () => backupInput.click())]),
       );
     }
+    renderPrivateFiles(body);
     const settingsInput = el("input");
     settingsInput.type = "file";
     settingsInput.accept = ".json";
@@ -3081,11 +2950,11 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     const budget = el("details");
     budget.append(el("summary", "Execution limits and recovery"));
     p(
-      "Queue: 8 pending operations per Workspace. Interactive deadline: 30 seconds. Transport message: 512 KiB. Resource import: 16 MiB expanded / 500 entries. Initial checkpoints: 64 MiB total. Current deployment configuration remains authoritative.",
+      "Queue: 8 pending operations per Workspace. Interactive deadline: 30 seconds. Transport message: 512 KiB. Checkpoints: bounded local retention. Current deployment configuration remains authoritative.",
       budget,
     );
     p(
-      "Gateway outage: close this manager and keep editing normally. Reconnect verifies identity and obtains a fresh Epoch. Unknown effects stay held until read-only reconciliation.",
+      "Gateway outage: local inspection, recovery, export and native manual editing remain available. Remote mutations require fresh authority. Unknown effects stay held until read-only reconciliation.",
       budget,
     );
     p(
@@ -3097,13 +2966,16 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       heading("Remote execution");
       actions(
         body,
-        button(
-          state.paused ? "Resume all Workspaces" : "Pause all Workspaces",
+        remoteButton(
+          state.paused ? "Resume all Workspaces" : "Pause all Workspaces", generation,
           async () => {
-            if (!state.paused) await client.pauseLocal?.();
+            const own=generation;
+            const paused=state.paused===true, revision=num(state.policyRevision);
+            if (!paused) await client.pauseLocal?.();
+            requireAuthority(own);
             await client.request("POST", `${ADMIN}/pause`, {
-              expectedRevision: num(state.policyRevision),
-              paused: !state.paused,
+              expectedRevision: revision,
+              paused: !paused,
             });
             await refresh();
             announce(
@@ -3114,27 +2986,15 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
           },
           "danger",
         ),
-        button(
-          "Stop this document immediately",
-          async () => {
-            await client.pauseLocal?.();
-            setStatus({
-              ...status,
-              connection: "paused",
-              reason: "Local stop requested",
-            });
-            announce(
-              "Local admissions stopped. Previously dispatched effects may still complete.",
-            );
-          },
-          "danger",
-        ),
+        button("Stop this document immediately",stopLocal,"danger"),
       );
     }
   }
   function close() {
     if (!opened) return;
     stopApprovalRefresh();
+    dismissConfirmation();
+    authority = undefined;
     viewAbort?.abort();
     opened = false;
     ++generation;
@@ -3149,6 +3009,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   }
   async function open(next?: Tab) {
     if (destroyed) return;
+    if (next && !buttons.has(next)) throw new Error("Unknown manager tab.");
     if (next) tab = next;
     if (!opened) {
       previousFocus = doc.activeElement;
@@ -3169,7 +3030,6 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   for (const name of [
     "Workspaces",
     "Agents",
-    "Library",
     "Activity",
     "Recovery",
     "Settings",
@@ -3241,6 +3101,19 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     updateTabs();
     void refresh();
   });
+  const onVisibilityChange=()=>{
+    if(doc.visibilityState==="hidden"){
+      stopApprovalRefresh();
+      authority=undefined;
+      dismissConfirmation();
+      refreshRemoteButtons();
+    } else if(opened && !destroyed && tab==="Agents") {
+      // Returning to a visible Connector pane must reacquire current approval
+      // and Grant authority; do not replay a request from the hidden view.
+      void refresh();
+    } else if(opened && !destroyed) refreshRemoteButtons();
+  };
+  doc.addEventListener("visibilitychange",onVisibilityChange);
   doc.defaultView?.addEventListener("resize", fitVisibleTextareas);
   on(dialog, "toggle", fitVisibleTextareas, true);
   setStatus(status);
@@ -3251,10 +3124,13 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     setStatus,
     destroy() {
       stopApprovalRefresh();
+      dismissConfirmation();
+      authority = undefined;
       destroyed = true;
       opened = false;
       ++generation;
       doc.defaultView?.removeEventListener("resize", fitVisibleTextareas);
+      doc.removeEventListener("visibilitychange",onVisibilityChange);
       host.remove();
     },
   };

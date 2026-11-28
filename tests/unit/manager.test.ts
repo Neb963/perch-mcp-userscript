@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { mountManager, exportSafeSettings, renderResourcePreview, lineDiff, type ManagerClient } from '../../apps/userscript/src/manager';
+import { mountManager, exportSafeSettings, renderResourcePreview, lineDiff, approvalPollingDelay, type ManagerClient } from '../../apps/userscript/src/manager';
 import { managerStyles } from '../../apps/userscript/src/manager.css';
 function fixture(overrides: Partial<ManagerClient> = {}, synthetic = true) {
     const dom = new JSDOM('<!doctype html><html><body><input id="native-editor" value="untouched"></body></html>', { url: 'https://perchance.org/synthetic#edit', pretendToBeVisual: true });
@@ -92,44 +92,39 @@ test('setup validates origin before isolated credential prompt and never renders
     click(f.root, 'Pair installation'); await until(() => attempted === 1);
     assert.equal(prompts, 1); assert.doesNotMatch(f.root.innerHTML, /x{44}/);
 });
-test('failed Resource publish preserves edited text and durable local draft', async () => {
-    const f = fixture();
-    const delegate = f.client.request;
-    f.client.request = async (method, path, body) => { if (method === 'PUT')
-        throw new Error('Stale Resource revision'); return delegate(method, path, body); };
-    await f.handle.open('Library');
-    click(f.root, 'Test skill');
-    await until(() => !!f.root.querySelector('textarea'));
-    const area = f.root.querySelector('textarea')!;
-    area.value = '# Pending\nOperator draft';
-    area.dispatchEvent(new f.dom.window.Event('input', { bubbles: true }));
-    await tick();
-    click(f.root, 'Publish revision');
-    await until(() => /Stale Resource/.test(f.root.textContent ?? ''));
-    assert.equal(f.root.querySelector('textarea')!.value, '# Pending\nOperator draft');
-    assert.match(f.drafts.get('resource:test-skill') ?? '', /Operator draft/);
-    assert.doesNotMatch(f.root.innerHTML, /Authorization|adminCredential/);
+test('UI-LIB-01: Library authoring is absent under legacy, current and outage manager states', async () => {
+  const f=fixture();
+  await f.handle.open('Workspaces');
+  const labels=()=>[...f.root.querySelectorAll('[role=tab]')].map(n=>n.textContent);
+  assert.equal(labels().includes('Library'),false);
+  for(const target of ['Agents','Recovery','Settings'] as const) {
+    await f.handle.open(target);
+    assert.equal(labels().includes('Library'),false);
+    assert.equal([...f.root.querySelectorAll('button')].some(n=>n.textContent==='Publish revision'),false);
+  }
+  assert.equal(f.requests.some(x=>x.path.startsWith('/api/v1/admin/resources')),false);
+  await assert.rejects(f.handle.open('Library' as never),/Unknown manager tab/);
+  assert.equal(f.dom.window.document.querySelector<HTMLInputElement>('#native-editor')?.value,'untouched');
+  f.handle.destroy();
 });
-test('Resource history uses canonical restore contract and preserves metadata on publish', async () => {
-    const f = fixture();
-    await f.handle.open('Library');
-    click(f.root, 'Test skill');
-    await until(() => !!f.root.querySelector('textarea'));
-    click(f.root, 'Publish revision');
-    await until(() => f.requests.some(r => r.method === 'PUT'));
-    const request = f.requests.find(r => r.method === 'PUT')!;
-    assert.equal(request.body.expectedRevision, 1);
-    assert.equal(request.body.resource.provenance, 'Synthetic');
-    assert.equal(request.body.resource.license, 'MIT');
-    assert.deepEqual(request.body.resource.dependencies, []);
-    await until(() => !!f.root.querySelector('textarea'));
-    click(f.root, 'Revision history');
-    await until(() => f.requests.some(r => r.path.endsWith('/history')));
-    await until(() => [...f.root.querySelectorAll('button')].some(b => b.textContent === 'Restore as new revision'));
-    click(f.root, 'Restore as new revision');
-    click(f.root, 'Confirm');
-    await until(() => f.requests.some(r => r.path.endsWith('/restore')));
-    assert.deepEqual(f.requests.find(r => r.path.endsWith('/restore'))!.body, { expectedRevision: 1, historicalRevision: 1 });
+test('UI-LIB-01: historical resource archive can be exported without restoring Resource UI', async()=>{
+  const downloads: Array<{name:string,data:string|Uint8Array,mime:string}>=[];
+  const f=fixture({exportResources:async()=>new Uint8Array([80,75,3,4]),download:(name,data,mime)=>{downloads.push({name,data,mime});}});
+  const original=f.client.request;
+  f.client.request=async(method,path,body,opts)=>{
+    if(path.endsWith('/state'))return {revision:1,policyRevision:1,version:'0.3.0',assignmentContractVersion:2,libraryRevision:3};
+    if(path.endsWith('/connectors'))return {items:[],revision:1};
+    return original(method,path,body,opts);
+  };
+  await f.handle.open('Settings');
+  await until(()=>[...f.root.querySelectorAll('button')].some(x=>x.textContent==='Export legacy Resource archive'));
+  click(f.root,'Export legacy Resource archive');
+  await until(()=>downloads.length===1);
+  assert.equal(downloads[0]!.name,'perch-resource-archive.zip');
+  assert.deepEqual(Array.from(downloads[0]!.data as Uint8Array),[80,75,3,4]);
+  assert.equal([...f.root.querySelectorAll('[role=tab]')].some(x=>x.textContent==='Library'),false);
+  assert.equal(f.requests.some(x=>x.path.startsWith('/api/v1/admin/resources')),false);
+  f.handle.destroy();
 });
 test('Settings remains available offline and local stop never claims dispatched effects cancelled', async () => {
     let stopped = 0;
@@ -169,22 +164,69 @@ test('Workspace pagination loads later pages and rejects inconsistent snapshots'
     await f.handle.refresh();
     assert.match(f.root.textContent ?? '', /Registry changed while paging/);
 });
-test('late Resource loads cannot replace the newer selected Resource', async () => {
-    const f = fixture();
-    const delegate = f.client.request;
-    let finishOld: ((value: unknown) => void) | undefined;
-    f.client.request = async (method, path, body) => { if (path.endsWith('/resources'))
-        return { items: [f.resource, { ...f.resource, id: 'new-skill', title: 'New skill' }], revision: 1 }; if (path.endsWith('/resources/test-skill'))
-        return new Promise(resolve => { finishOld = resolve; }); if (path.endsWith('/resources/new-skill'))
-        return { ...f.resource, id: 'new-skill', title: 'New skill', body: 'newest content' }; return delegate(method, path, body); };
-    await f.handle.open('Library');
-    click(f.root, 'Test skill');
-    await until(() => !!finishOld);
-    click(f.root, 'New skill');
-    await until(() => f.root.querySelector('textarea')?.value === 'newest content');
-    finishOld!(f.resource);
-    await tick();
-    assert.equal(f.root.querySelector('textarea')!.value, 'newest content');
+test('S10-004 Workspace detail reports verified revision provenance, last observed result and unknown Holds without extra requests',async()=>{
+  const f=fixture();
+  const original=f.client.request;
+  const known='sha256:'+'a'.repeat(64);
+  let calls=0;
+  f.client.request=async(method,path,body,options)=>{
+    calls++;
+    if(path.endsWith('/state')) return {revision:1,policyRevision:2,version:'0.3.0',assignmentContractVersion:2};
+    if(path.endsWith('/workspaces')) return {items:[{id:'w-studio',label:'Studio',revision:1,
+      binding:{generatorId:'generator-1',draftId:'',slug:'studio',browserInstallationId:'installation-1'},
+      connectorId:'c-studio',contractVersion:2,assignmentGeneration:1,bindingGeneration:1,
+      sourceRevision:{value:known,verified:true},
+      previewRevision:{value:known,verified:false},
+      savedRevision:{value:null,verified:false},
+      observation:{dirty:true,observedAt:Date.now(),epoch:1},epoch:1,permissions:['READ_SOURCE'],
+      transition:null}],revision:1};
+    if(path.endsWith('/connectors')) return {items:[{id:'c-studio',label:'Connector',
+      revision:1,assignmentCount:1,permissionCeiling:['READ_SOURCE']}],revision:1};
+    if(path.endsWith('/activity')) return {items:[{
+      workspaceId:'w-studio',phase:'UNKNOWN',tool:'write',operationId:'held-source-1',timestamp:1
+    }],revision:1};
+    return original(method,path,body,options);
+  };
+  await f.handle.open('Workspaces');
+  const summary=[...f.root.querySelectorAll('summary')].find(n=>n.textContent==='More actions')!;
+  assert.ok(summary);
+  const before=calls;
+  const details=summary.parentElement as HTMLDetailsElement;details.open=true;
+  assert.equal(calls,before,'Local evidence disclosure cannot poll the Gateway.');
+  assert.match(details.textContent??'',/SourceRevision: sha256:a{64}/);
+  assert.match(details.textContent??'',/PreviewRevision: UNKNOWN \(no verified native readback\)/);
+  assert.match(details.textContent??'',/SavedRevision: UNKNOWN \(no verified native readback\)/);
+  assert.match(details.textContent??'',/Last result: UNKNOWN/);
+  assert.match(details.textContent??'',/In-flight\/Hold: UNKNOWN/);
+  await f.handle.open('Activity');
+  await f.handle.open('Workspaces');
+  const latest=[...f.root.querySelectorAll('summary')].find(n=>n.textContent==='More actions')!.parentElement as HTMLDetailsElement;
+  latest.open=true;
+  assert.match(latest.textContent??'',/Last result \(observed .*\): UNKNOWN · write/);
+  assert.match(latest.textContent??'',/In-flight\/Hold: UNKNOWN — inspect Recovery/);
+  f.handle.destroy();
+});
+
+test('UI-STATE-01: late stale Gateway response never replaces the currently selected manager view',async()=>{
+  const f=fixture();
+  const original=f.client.request;
+  let resolveOld:((value:unknown)=>void)|undefined;
+  let reads=0;
+  f.client.request=async(method,path,body,opts)=>{
+    if(path==='/api/v1/admin/workspaces' && reads++===0)
+      return new Promise(resolve=>{resolveOld=resolve;});
+    return original(method,path,body,opts);
+  };
+  const previous=f.handle.open('Workspaces');
+  await until(()=>resolveOld!==undefined);
+  await f.handle.open('Agents');
+  resolveOld!({items:[{id:'stale',label:'Stale Workspace',revision:1}],revision:1});
+  await previous;
+  await tick();
+  assert.equal(f.root.querySelector('[role=tab][aria-selected=true]')?.textContent,'Connectors');
+  assert.match(f.root.querySelector('[role=tabpanel]')?.textContent??'',/Connectors and OAuth/);
+  assert.doesNotMatch(f.root.querySelector('[role=tabpanel]')?.textContent??'',/Stale Workspace/);
+  f.handle.destroy();
 });
 test('uncertain-operation recovery requires evidence and explicit acknowledgement without replay', async () => {
     const resolutions: Record<string, unknown>[] = [];
@@ -440,4 +482,207 @@ test('matching native Generator with changed installation ID offers explicit Reb
  assert.match(f.root.textContent??'',/saved browser installation differs/);
  assert.ok([...f.root.querySelectorAll('button')].some(b=>b.textContent==='Rebind this editor'));
  assert.equal(attachCount,0);
+});
+
+
+test('UI-OFFLINE-04: local filtering and sorting never issue additional Gateway requests', async()=>{
+  const f=fixture();
+  const old=f.client.request;
+  f.client.request=async(method,path,body,opts)=>{
+    if(path==='/api/v1/admin/workspaces')
+      return {items:[{id:'w1',label:'Alpha',revision:1,permissions:[],paused:false,binding:null},
+                     {id:'w2',label:'Bravo',revision:1,permissions:[],paused:false,binding:null}],revision:1};
+    return old(method,path,body,opts);
+  };
+  await f.handle.open('Workspaces');
+  const baseline=f.requests.length;
+  const filter=f.root.querySelector<HTMLInputElement>('[aria-label="Filter"]')!;
+  assert.ok(filter);
+  filter.value='Bravo';
+  filter.dispatchEvent(new f.dom.window.Event('input',{bubbles:true}));
+  assert.equal(f.root.querySelectorAll('tbody tr').length,1);
+  assert.match(f.root.querySelector('tbody')?.textContent??'',/Bravo/);
+  assert.equal(f.requests.length,baseline);
+  const sort=[...f.root.querySelectorAll<HTMLButtonElement>('th button')].find(x=>x.textContent==='Workspace');
+  assert.ok(sort);
+  sort.click();
+  assert.equal(f.requests.length,baseline);
+  assert.equal(f.dom.window.document.querySelector<HTMLInputElement>('#native-editor')?.value,'untouched');
+  f.handle.destroy();
+});
+test('UI-OFFLINE-02: outage preserves local stop, local diagnostics and identity without resource initialization', async()=>{
+  let localStop=0;
+  const f=fixture({pauseLocal:async()=>{localStop++;},diagnostics:()=>({events:[]}),
+    request:async()=>{throw Object.assign(new Error('Daily quota exhausted'),{code:'GATEWAY_DEGRADED',status:503});}});
+  await f.handle.open('Workspaces');
+  assert.match(f.root.textContent??'',/Gateway unavailable/);
+  await until(()=>/Current editor: synthetic/.test(f.root.textContent??''));
+  assert.equal(f.root.querySelectorAll('[role=tab]').length,5);
+  click(f.root,'Stop this document immediately');
+  await until(()=>localStop===1);
+  assert.match(f.root.textContent??'',/Local admissions stopped/);
+  await f.handle.open('Recovery');
+  assert.equal(f.root.querySelector('[role=tab][aria-selected=true]')?.textContent,'Recovery');
+  assert.equal([...f.root.querySelectorAll('button')].some(x=>x.textContent==='Publish revision'),false);
+  assert.equal([...f.root.querySelectorAll('button')].some(x=>x.textContent==='Export local diagnostics'),true);
+  f.handle.destroy();
+});
+
+test('F22.07 background Connector view stops polling and invalidates mutation authority',async()=>{
+  const f=fixture();
+  let visibility:'visible'|'hidden'='visible';
+  Object.defineProperty(f.dom.window.document,'visibilityState',{configurable:true,get:()=>visibility});
+  await f.handle.open('Agents');
+  assert.ok(f.requests.some(r=>r.path.endsWith('/approvals')));
+  visibility='hidden';
+  f.dom.window.document.dispatchEvent(new f.dom.window.Event('visibilitychange'));
+  const calls=f.requests.length;
+  const buttons=[...f.root.querySelectorAll<HTMLButtonElement>('[data-remote-mutation]')];
+  assert.ok(buttons.every(b=>b.disabled));
+  await new Promise(resolve=>setTimeout(resolve,30));
+  assert.equal(f.requests.length,calls);
+  visibility='visible';
+  f.dom.window.document.dispatchEvent(new f.dom.window.Event('visibilitychange'));
+  await until(()=>f.requests.length>calls);
+  assert.equal(f.root.querySelector('[role=tab][aria-selected=true]')?.textContent,'Connectors');
+  f.handle.destroy();
+});
+
+test('F22.07 and F26.04 consent polling stops at idle or bounded failure, while pending requests remain visible',()=>{
+  assert.equal(approvalPollingDelay(0,0,0),4000);
+  assert.equal(approvalPollingDelay(0,29999,0),4000);
+  assert.equal(approvalPollingDelay(0,30000,0),null);
+  assert.equal(approvalPollingDelay(0,3_600_000,0),null);
+  assert.equal(approvalPollingDelay(1,3_600_000,0),4000);
+  assert.equal(approvalPollingDelay(0,30000,1),8000);
+  assert.equal(approvalPollingDelay(0,30000,2),16000);
+  assert.equal(approvalPollingDelay(0,30000,4),60000);
+  assert.equal(approvalPollingDelay(0,30000,5),null);
+  assert.equal(approvalPollingDelay(0,30000,1,300000),300000);
+  assert.equal(approvalPollingDelay(1,30000,5,300000),null);
+});
+
+test('F23 rollout Settings identifies disabled v2 execution and marks Gateway truth unknown during outage',async()=>{
+  const f=fixture();
+  const original=f.client.request;
+  f.client.request=async(method,path,body,options)=>{
+    if(path.endsWith('/state'))return {revision:3,policyRevision:2,version:'0.3.0',schemaVersion:1,
+      assignmentContractVersion:2,rollout:{developmentContractV2Enabled:true,
+        developmentContractV2ExecutionEnabled:false,canonicalStorageMode:'native',
+        pushNotificationsEnabled:false,binaryPayloadsEnabled:true,admissionBudgetEnabled:false,
+        oauthGrantPersistence:'UNTIL_REVOKED',oauthAccessTokenTtlSeconds:24*86400,
+        oauthAccessTokenQualification:'DEFAULT_BROWSER_TIMER_SAFE'}};
+    if(path.endsWith('/connectors'))return {items:[],revision:3};
+    return original(method,path,body,options);
+  };
+  await f.handle.open('Settings');
+  assert.match(f.root.textContent??'',/Rollout and capability state/);
+  assert.match(f.root.textContent??'',/Assignment contract: v2/);
+  assert.match(f.root.textContent??'',/19-tool v2 execution: Disabled/);
+  assert.match(f.root.textContent??'',/Canonical storage: native/);
+  assert.match(f.root.textContent??'',/OAuth authorization: Until explicitly revoked/);
+  assert.match(f.root.textContent??'',/OAuth access token: 24 days/);
+  f.handle.setStatus({connection:'degraded',reason:'Quota exhausted'});
+  assert.match(f.root.textContent??'',/Authoritative Gateway status: UNVERIFIED\/OFFLINE/);
+  assert.match(f.root.textContent??'',/19-tool v2 execution: unknown/);
+  f.handle.destroy();
+});
+
+test('F20 unbound Workspace never inherits stale heartbeat or dirty state',async()=>{
+ const f=fixture();
+ const original=f.client.request;
+ f.client.request=async(method,path,body,options)=>{
+  if(path.endsWith('/state'))return {revision:2,policyRevision:2,assignmentContractVersion:2,
+    version:'0.3.0',schemaVersion:1};
+  if(path.endsWith('/workspaces'))return {items:[{
+    id:'unbound',label:'Reserved development slot',revision:1,
+    contractVersion:2,binding:null,bindingRevision:2,bindingGeneration:2,
+    assignmentGeneration:2,epoch:3,permissions:['READ_SOURCE'],paused:false,
+    connectorId:null,observation:{epoch:3,dirty:false,observedAt:Date.now()},
+  }],revision:1};
+  if(path.endsWith('/connectors'))return {items:[],revision:1};
+  return original(method,path,body,options);
+ };
+ await f.handle.open('Workspaces');
+ const content=f.root.querySelector('tbody')?.textContent??'';
+ assert.match(content,/No active Binding/);
+ assert.match(content,/Dirty unknown/);
+ assert.doesNotMatch(content,/Heartbeat recent|Draft clean/);
+ f.handle.destroy();
+});
+test('OAUTH-PERSIST-01 manager displays permanent v2 Grant and exact revocation affordance',async()=>{
+ const f=fixture();
+ const original=f.client.request;
+ f.client.request=async(method,path,body,options)=>{
+  if(path.endsWith('/state'))return {revision:2,policyRevision:2,assignmentContractVersion:2,
+    version:'0.3.0',schemaVersion:1};
+  if(path.endsWith('/workspaces'))return {items:[],revision:1};
+  if(path.endsWith('/connectors'))return {items:[{id:'connector-a',label:'ChatGPT',endpoint:'https://gateway.example.workers.dev/mcp/connector-a',
+    contractVersion:2,revision:1,assignmentCount:0,permissionCeiling:['READ_SOURCE'],suspended:false}],revision:1};
+  if(path.endsWith('/grants'))return {items:[{id:'grant-a',agentId:'connector-a',workspaceId:'',
+    clientId:'client-a',state:'active',revision:1,contractVersion:2,expiresAt:null,
+    audience:'https://gateway.example.workers.dev/mcp/connector-a',permissions:['READ_SOURCE']}],revision:1};
+  return original(method,path,body,options);
+ };
+ await f.handle.open('Agents');
+ await until(()=>/Authorized — until revoked/.test(f.root.textContent??''));
+ assert.match(f.root.textContent??'',/ChatGPT/);
+ assert.match(f.root.textContent??'',/Revoke Grant/);
+ assert.doesNotMatch(f.root.querySelector('tbody')?.textContent??'',/expires null/);
+ f.handle.destroy();
+});
+
+test('F18.04 expired pending approval stays visible as disabled and cannot execute any decision',async()=>{
+  const now=Date.now();
+  const connector={id:'connector-a',label:'Terminal Client',endpoint:'https://gateway.example.workers.dev/mcp/connector-a',
+    contractVersion:2,permissionCeiling:['READ_SOURCE'],revision:3,assignmentCount:0,suspended:false};
+  let mutations=0;
+  const f=fixture({request:async(method,path,body)=>{
+    if(method!=='GET'){mutations++;throw new Error('No decision may be dispatched');}
+    if(path.endsWith('/state'))return {revision:3,policyRevision:3,version:'0.3.0',assignmentContractVersion:2};
+    if(path.endsWith('/connectors'))return {items:[connector],revision:3};
+    if(path.endsWith('/workspaces'))return {items:[],revision:3};
+    if(path.endsWith('/approvals'))return {items:[{id:'approval-old',kind:'oauth',agentId:'connector-a',
+      state:'pending',code:'ABCD-1234',audience:connector.endpoint,clientId:'client-a',redirectUri:'https://example.org/return',
+      scope:['mcp'],permissionSnapshot:['READ_SOURCE'],revision:1,digest:'f'.repeat(64),expiresAt:now-1000}],revision:3};
+    return {items:[],revision:3};
+  }});
+  await f.handle.open('Agents');
+  await until(()=>/Expired — restart authorization/.test(f.root.textContent??''));
+  const oldRow=[...f.root.querySelectorAll('tbody tr')].find(row=>row.textContent?.includes('approval-old') || row.textContent?.includes('ABCD-1234'));
+  assert.ok(oldRow);
+  assert.match(oldRow.textContent??'',/Expired — restart authorization/);
+  const buttons=[...oldRow.querySelectorAll('button')];
+  assert.deepEqual(buttons.map(b=>({name:b.textContent,disabled:b.disabled})),[
+    {name:'Approve exact request',disabled:true},{name:'Deny',disabled:true}
+  ]);
+  for(const button of buttons)button.click();
+  assert.equal(mutations,0);
+  f.handle.destroy();
+});
+test('F22.03 table count and no-match state update without extra Gateway requests',async()=>{
+  const f=fixture();
+  const old=f.client.request;
+  f.client.request=async(method,path,body,opts)=>{
+    if(path.endsWith('/workspaces'))return {items:[
+      {id:'w1',label:'Alpha',revision:1,permissions:[],paused:false,binding:null},
+      {id:'w2',label:'Bravo',revision:1,permissions:[],paused:false,binding:null}],revision:1};
+    return old(method,path,body,opts);
+  };
+  await f.handle.open('Workspaces');
+  assert.match(f.root.textContent??'',/Showing 2 of 2 entries/);
+  const count=f.root.querySelector<HTMLElement>('.table-count');
+  assert.ok(count);
+  assert.equal(count.getAttribute('aria-live'),'polite');
+  const filter=f.root.querySelector<HTMLInputElement>('[aria-label="Filter"]')!;
+  const baseline=f.requests.length;
+  filter.value='Bravo';
+  filter.dispatchEvent(new f.dom.window.Event('input',{bubbles:true}));
+  assert.match(f.root.textContent??'',/Showing 1 of 2 entries/);
+  filter.value='Not present';
+  filter.dispatchEvent(new f.dom.window.Event('input',{bubbles:true}));
+  assert.match(f.root.textContent??'',/Showing 0 of 2 entries/);
+  assert.match(f.root.textContent??'',/No matching entries/);
+  assert.equal(f.requests.length,baseline);
+  f.handle.destroy();
 });

@@ -70,3 +70,101 @@ test('incomplete phase/timestamp state blocks cutover rather than manufacturing 
     const store=new OperationStore(f.db,'native');assert.throws(()=>store.prepareStep(),/SQLITE_RECORD_CORRUPT/);assert.equal(store.blocked,true);assert.deepEqual(f.db.get('operation/incomplete'),incomplete);assert.equal(f.db.get('schema'),undefined);
   }finally{f.close();}
 });
+
+test('R04 partial terminal index excludes active rows, preserves terminal ordering and old physical schema',()=>{
+  const f=fixture();
+  try {
+    const store=new OperationStore<StoredOperation&Record<string,unknown>>(f.db,'native');
+    finish(store);
+    const ddl=f.sqlite.prepare("SELECT sql FROM sqlite_master WHERE name='operation_native_terminal_v2'").get() as {sql:string};
+    assert.match(ddl.sql,/WHERE terminal IS NOT NULL/);
+    const current={...op('partial-index'),phase:'ADMITTED',terminalAt:undefined,
+      terminalNotified:undefined,result:undefined};
+    store.put('operation/partial-index',current);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_native_v2 WHERE terminal IS NOT NULL").get()!.n,0);
+    assert.equal(f.sqlite.prepare('SELECT activeCount FROM operation_native_stats_v2 WHERE id=1').get()!.activeCount,1);
+    const dispatched=store.get('operation/partial-index')!;
+    dispatched.phase='DISPATCHED';
+    store.put('operation/partial-index',dispatched);
+    const running=store.get('operation/partial-index')!;
+    running.phase='RUNNING';
+    store.put('operation/partial-index',running);
+    const terminal=store.get('operation/partial-index')!;
+    terminal.phase='SUCCEEDED';
+    terminal.terminalAt=Date.now();
+    terminal.terminalNotified=true;
+    terminal.result={operationId:'partial-index',status:'SUCCEEDED',effectState:'NONE'};
+    store.put('operation/partial-index',terminal);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_native_v2 WHERE terminal IS NOT NULL").get()!.n,1);
+    assert.ok(store.lastActivityAt()>0);
+    f.sqlite.exec("DROP INDEX operation_native_terminal_v2");
+    f.sqlite.exec("CREATE INDEX operation_native_terminal_v2 ON operation_native_v2(terminal DESC)");
+    const legacyShape=new OperationStore<StoredOperation&Record<string,unknown>>(f.db,'legacy');
+    assert.equal(legacyShape.native,true);
+    assert.equal(legacyShape.get('operation/partial-index')!.phase,'SUCCEEDED');
+    legacyShape.delete('operation/partial-index');
+    assert.equal(legacyShape.lastActivityAt(),0);
+  }finally{f.close();}
+});
+
+test('R04 native small read selectors share canonical row, while large and mutating args retain external payloads',()=>{
+  const f=fixture();
+  try {
+    const store=new OperationStore<StoredOperation&Record<string,unknown>>(f.db,'native');
+    finish(store);
+    const small={...op('small-read'),phase:'ADMITTED',terminalAt:undefined,
+      terminalNotified:undefined,result:undefined,args:{files:[{path:'main.pjs'}]}};
+    store.put('operation/small-read',small);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_args_v2 WHERE key='operation/small-read'").get()!.n,0);
+    const raw=f.sqlite.prepare("SELECT hasArgs,context FROM operation_native_v2 WHERE key='operation/small-read'").get() as {hasArgs:number;context:string};
+    assert.equal(raw.hasArgs,0);
+    assert.deepEqual(JSON.parse(raw.context).args,small.args);
+    assert.deepEqual(store.get('operation/small-read'),JSON.parse(JSON.stringify(small)),
+      'JSON-native storage preserves every explicit value but omits JS-only undefined properties');
+    assert.deepEqual(store.budgetObligations().find(x=>x.tool==='read')?.args,small.args);
+    const large={...op('large-read'),phase:'ADMITTED',terminalAt:undefined,
+      terminalNotified:undefined,result:undefined,args:{files:[{path:'x'.repeat(2048)}]}};
+    store.put('operation/large-read',large);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_args_v2 WHERE key='operation/large-read'").get()!.n,1);
+    assert.deepEqual(store.get('operation/large-read')?.args,large.args);
+    const mutation={...op('mutating-read'),phase:'ADMITTED',terminalAt:undefined,
+      terminalNotified:undefined,result:undefined,mutating:true,args:{files:[{path:'main.pjs'}]}};
+    store.put('operation/mutating-read',mutation);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_args_v2 WHERE key='operation/mutating-read'").get()!.n,1);
+    const running=store.get('operation/small-read')!;
+    running.phase='DISPATCHED';
+    store.put('operation/small-read',running);
+    running.phase='RUNNING';
+    store.put('operation/small-read',running);
+    const terminal=store.get('operation/small-read')!;
+    terminal.phase='SUCCEEDED';
+    terminal.terminalAt=Date.now();
+    terminal.terminalNotified=true;
+    terminal.result={operationId:'small-read',status:'SUCCEEDED',effectState:'NONE'};
+    delete terminal.args;
+    store.put('operation/small-read',terminal);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_args_v2 WHERE key='operation/small-read'").get()!.n,0);
+    assert.equal(store.get('operation/small-read')?.args,undefined);
+    assert.equal(store.receiptDigest('operation/small-read')?.length,64);
+    assert.equal(new OperationStore<StoredOperation&Record<string,unknown>>(f.db,'legacy').get('operation/small-read')?.phase,'SUCCEEDED');
+  }finally{f.close();}
+});
+test('R04 small selector survives legacy migration, legacy external conversion and corruption is rejected',()=>{
+  const f=fixture();
+  try{
+    const args={files:[{path:'main.pjs'}]};
+    const legacy={...op('small-legacy'),args};
+    f.db.put('operation/small-legacy',legacy);
+    const store=new OperationStore<StoredOperation&Record<string,unknown>>(f.db,'native');
+    finish(store);
+    assert.deepEqual(store.get('operation/small-legacy')?.args,args);
+    assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_args_v2 WHERE key='operation/small-legacy'").get()!.n,0);
+    assert.deepEqual(store.budgetObligations().find(x=>x.tool==='read'),undefined);
+    const sql="UPDATE operation_native_v2 SET context=? WHERE key=?";
+    const native=f.sqlite.prepare("SELECT context FROM operation_native_v2 WHERE key='operation/small-legacy'").get() as {context:string};
+    const bad=JSON.parse(native.context) as Record<string,unknown>;
+    bad.args={files:[{path:'x'.repeat(2048)}]};
+    f.db.query(sql,JSON.stringify(bad),'operation/small-legacy');
+    assert.throws(()=>store.get('operation/small-legacy'),/SQLITE_RECORD_CORRUPT/);
+  }finally{f.close();}
+});

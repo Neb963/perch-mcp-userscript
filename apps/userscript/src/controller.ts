@@ -14,17 +14,28 @@ import {
   type Envelope,
 } from "../../../packages/contracts/src/index.js";
 import { NativeAdapter } from "./adapter.js";
-import { VirtualFileSystem } from "./vfs.js";
+import { listCheckpointMetadata, readHistoricalCheckpoint, VirtualFileSystem, type CheckpointSummary } from "./vfs.js";
+import { createSourceArchive, inspectSourceArchive, sameBackupBinding,
+  type RestoreIntent, type RestoreMode, type RestorePreview } from './operator-backup.js';
+import { OperatorPrivateFiles, type PrivateFileStageSummary } from './operator-private-files.js';
+import { inspectBoundStage, resolveBindingStorage } from './binding-storage.js';
+import {
+  acknowledgeHistoricalStage, exportHistoricalRecovery, fenceHistoricalRecoveryEpochs,
+  hasHistoricalEpochFence, historicalJournalPending, historicalStageVerifiable, listHistoricalRecoveryScopes, nativeRecoveryDigest,
+  readHistoricalJournal, requireHistoricalRecoveryScope, unresolvedHistoricalStages,
+  type HistoricalRecoveryInspection, type HistoricalRecoveryRecord, type HistoricalRecoveryScope,
+} from './historical-recovery.js';
 import { SourceTools } from "./source-tools.js";
 import { NativeLifecycle, SavedSourceReader, lifecycleApprovalDigest, type LifecycleApproval } from "./lifecycle.js";
 import { GatewayTransport, TransportError } from "./transport.js";
 import { ArtifactStore } from "./artifacts.js";
 import {
   BrowserError,
-  base64ToBytes,
-  canonicalPath,
+  bytesToBase64,
   digest,
+  equalBytes,
   equalIdentity,
+  type FileWrite,
   type KeyValueStore,
   type NativeIdentity,
 } from "./native-types.js";
@@ -45,6 +56,14 @@ interface Lease {
   expiresAt: number;
   permissions: string[];
   notifications?: { version: 1 };
+}
+const ACTIVE_OPERATION_HEARTBEAT_MS = 5000;
+interface ScopedOperationControl {
+  lease: Lease;
+  operationId: string;
+  abort: AbortController;
+  deadlineTimer: ReturnType<typeof setTimeout>;
+  heartbeatTimer: ReturnType<typeof setInterval>;
 }
 interface LocalOperation {
   operationId: string;
@@ -112,6 +131,7 @@ export class BrowserController {
   private lastAttachStage: string | null = null;
   private lastAttachCode: string | null = null;
   private executing = false;
+  private operatorWork?: Promise<unknown>;
   /** Browser-local iframe geometry uncertainty; never confused with provider effects. */
   private viewportUncertain = false;
   private localRecoveryWarning: string | null = null;
@@ -119,6 +139,7 @@ export class BrowserController {
   private sourceReadback: {state: 'not-checked'|'checking'|'verified'|'unavailable';code?:string} = {state:'not-checked'};
   private running?: Promise<void>;
   private abort?: AbortController;
+  private scopedControl?: ScopedOperationControl;
   constructor(
     readonly adapter: NativeAdapter,
     readonly store: KeyValueStore,
@@ -158,7 +179,7 @@ export class BrowserController {
   }
   async attach(workspace: Record<string, unknown>): Promise<void> {
     const workspaceId = typeof workspace.id === "string" ? workspace.id : "";
-    if (this.executing)
+    if (this.executing || this.operatorWork)
       throw Object.assign(new Error("Finish the active operation before changing the editor connection."), {code: "TAB_BUSY"});
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId))
       throw Object.assign(new Error("Choose a valid Workspace."), {code: "INVALID_INPUT"});
@@ -239,26 +260,35 @@ export class BrowserController {
       if (scoped) {
         stage = 'BINDING_STORAGE';
         this.lastAttachStage = stage;
+        const storageIdentity = {workspaceId, installationId, assignmentGeneration: claim.assignmentGeneration!,
+          bindingGeneration: claim.bindingGeneration!, epoch: claim.epoch,
+          generatorId: identity.generatorId, draftId: identity.draftId};
         try {
-          candidateVfs = await VirtualFileSystem.openBound(this.adapter, this.store, {
-            workspaceId, installationId, assignmentGeneration: claim.assignmentGeneration!,
-            bindingGeneration: claim.bindingGeneration!, epoch: claim.epoch,
-            generatorId: identity.generatorId, draftId: identity.draftId,
-          }, { assertCurrent: async () => {
+          const storageScope = await resolveBindingStorage(storageIdentity, () => undefined, true);
+          candidateVfs = await VirtualFileSystem.openBound(this.adapter, this.store, storageIdentity, { assertCurrent: async () => {
             if (this.lease !== claim || claimGeneration !== this.connectionGeneration || claim.expiresAt <= Date.now())
               throw new BrowserError('STALE_EPOCH', 'Binding storage writer has lost its lease.');
             await this.adapter.assertIdentity();
-            if (this.lease !== claim || claimGeneration !== this.connectionGeneration || claim.expiresAt <= Date.now())
+            if (await hasHistoricalEpochFence(this.store, storageScope.epochPrefix, claim.epoch) ||
+                this.lease !== claim || claimGeneration !== this.connectionGeneration || claim.expiresAt <= Date.now())
               throw new BrowserError('STALE_EPOCH', 'Binding storage writer changed during native identity verification.');
           } });
           this.localPendingHolds = (await candidateVfs.unresolved()).length;
         } catch (error) {
+          let failure = error;
+          if (error instanceof BrowserError && error.code === 'EFFECT_UNKNOWN') {
+            try {
+              await fenceHistoricalRecoveryEpochs(this.store, storageIdentity);
+            } catch (fenceError) {
+              failure = fenceError;
+            }
+          }
           if (this.lease === claim) {
             this.lease = undefined;
             try { await this.transport.tab('/api/v1/tab/release', this.ids(claim), claim.leaseCredential); }
             catch { /* The failed lease expires and cannot write. */ }
           }
-          throw error;
+          throw failure;
         }
         if (this.lease !== claim || claimGeneration !== this.connectionGeneration) return;
       }
@@ -353,6 +383,7 @@ export class BrowserController {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
     this.abort?.abort();
+    this.clearScopedControl();
     const lease = this.lease;
     this.lease = undefined;
     // A transport abort never asserts cancellation of a dispatched effect.
@@ -373,21 +404,22 @@ export class BrowserController {
       connection: this.transport.configuration().paired ? "paused" : "unpaired",
     });
   }
-  private async renew(lease: Lease): Promise<void> {
+  private async renew(lease: Lease, controlOnly = false): Promise<void> {
     if (this.stopped || this.lease !== lease || this.renewalInFlight) return;
     this.renewalInFlight = true;
     try {
+      const active = this.scopedControl?.lease === lease ? this.scopedControl : undefined;
       let observation = {};
-      if (lease.contractVersion === 2) {
+      if (lease.contractVersion === 2 && !controlOnly) {
         const current = await this.adapter.probe();
         observation = {dirty: current.ready && current.identity && this.identity &&
           equalIdentity(current.identity, this.identity) ? current.dirty ?? null : null};
       }
       const state = (await this.transport.tab(
         "/api/v1/tab/heartbeat",
-        {...this.ids(lease), ...observation},
+        {...this.ids(lease), ...observation, ...(active ? {activeOperationId: active.operationId} : {})},
         lease.leaseCredential,
-      )) as { expiresAt: number; permissions: string[]; workAvailable?: boolean };
+      )) as { expiresAt: number; permissions: string[]; workAvailable?: boolean; cancelRequestedOperationId?: string };
       if (this.stopped || this.lease !== lease) return;
       if (
         !Number.isSafeInteger(state.expiresAt) ||
@@ -395,6 +427,8 @@ export class BrowserController {
       )
         throw new Error("Expired lease.");
       lease.expiresAt = Math.max(lease.expiresAt, state.expiresAt);
+      if (active && this.scopedControl === active && state.cancelRequestedOperationId === active.operationId)
+        active.abort.abort(new BrowserError('CANCELLED', 'The scoped operation was cancelled.'));
       this.push?.reconcile(state.workAvailable === true);
       if (Array.isArray(state.permissions))
         lease.permissions = lease.permissions.filter((p) =>
@@ -438,76 +472,251 @@ export class BrowserController {
       tabInstanceId: lease.tabInstanceId,
     };
   }
-  private async backupVfs(): Promise<VirtualFileSystem> {
-    if (this.vfs && (!this.vfs.scope ||
-        (this.lease?.contractVersion === 2 && this.lease.epoch === this.vfs.scope.epoch))) return this.vfs;
-    const identity = await this.adapter.identity();
-    const scope =
-      "backup-" + (await digest(JSON.stringify(identity))).slice(0, 32);
-    return new VirtualFileSystem(this.adapter, this.store, scope);
+  private operatorVfs(): { lease: Lease; vfs: VirtualFileSystem } {
+    const lease = this.lease;
+    const vfs = this.vfs;
+    if (!lease || !vfs || this.stopped || lease.expiresAt <= Date.now() ||
+        vfs.workspaceId !== lease.workspaceId || (lease.contractVersion === 2 &&
+          (!vfs.scope || vfs.scope.epoch !== lease.epoch || vfs.scope.assignmentGeneration !== lease.assignmentGeneration ||
+            vfs.scope.bindingGeneration !== lease.bindingGeneration || vfs.scope.installationId !== lease.installationId)))
+      throw new BrowserError('TAB_OFFLINE', 'Reconnect the exact Workspace before publishing a local restore.');
+    return { lease, vfs };
   }
+
+  private async assertOperatorWriter(lease: Lease, vfs: VirtualFileSystem): Promise<void> {
+    if (this.operatorVfs().vfs !== vfs || this.lease !== lease)
+      throw new BrowserError('STALE_EPOCH', 'The confirmed operator action lost its exact lease.');
+    const native = await this.adapter.assertIdentity();
+    if (vfs.scope && (native.generatorId !== vfs.scope.generatorId || native.draftId !== vfs.scope.draftId))
+      throw new BrowserError('BINDING_MISMATCH', 'The current editor no longer matches the exact Binding.');
+    const heartbeat = await this.transport.tab('/api/v1/tab/heartbeat', this.ids(lease), lease.leaseCredential) as
+      {expiresAt?: unknown; permissions?: unknown};
+    if (this.operatorVfs().vfs !== vfs || this.lease !== lease ||
+        typeof heartbeat.expiresAt !== 'number' || !Number.isSafeInteger(heartbeat.expiresAt) ||
+        heartbeat.expiresAt <= Date.now() || !Array.isArray(heartbeat.permissions) ||
+        !heartbeat.permissions.includes('WRITE_SOURCE'))
+      throw new BrowserError('SCOPE_DENIED', 'Fresh confirmed Workspace write authority is required.');
+    await this.adapter.assertIdentity();
+  }
+
+  private async exclusiveOperatorWork<T>(action: () => Promise<T>): Promise<T> {
+    if (this.executing || this.operatorWork)
+      throw new BrowserError('TAB_BUSY', 'Wait for the active local or Connector operation to settle.');
+    const work = action();
+    this.operatorWork = work;
+    try { return await work; }
+    finally { if (this.operatorWork === work) this.operatorWork = undefined; }
+  }
+
   async sourceBackup(): Promise<unknown> {
-    return (await this.backupVfs()).exportBackup();
-  }
-  async restoreSourceBackup(value: unknown): Promise<void> {
-    if (this.executing)
-      throw new Error(
-        "Pause and settle the active operation before restoring source.",
-      );
-    if (!value || typeof value !== "object" || Array.isArray(value))
-      throw new Error("Invalid source backup.");
-    const backup = value as {
-      version?: unknown;
-      identity?: NativeIdentity;
-      files?: Record<string, unknown>;
-      sha256?: unknown;
-    };
-    if (
-      backup.version !== 1 ||
-      !backup.identity ||
-      !backup.files ||
-      typeof backup.files !== "object" ||
-      Array.isArray(backup.files) ||
-      Object.keys(backup.files).length > 1000 ||
-      !equalIdentity(backup.identity, await this.adapter.identity()) ||
-      (await digest(JSON.stringify(backup.files))) !== backup.sha256
-    )
-      throw new Error(
-        "Backup identity, version or digest does not match this native draft.",
-      );
-    const files: Record<string, Uint8Array> = Object.create(null) as Record<
-      string,
-      Uint8Array
-    >;
-    let total = 0;
-    for (const [path, data] of Object.entries(backup.files)) {
-      canonicalPath(path);
-      if (typeof data !== "string")
-        throw new Error("Invalid backup file encoding.");
-      const bytes = base64ToBytes(data);
-      total += bytes.length;
-      if (total > 64 * 1024 * 1024)
-        throw new Error("Source backup exceeds 64 MiB.");
-      files[path] = bytes;
+    if (this.vfs?.scope && this.lease && !this.stopped && this.lease.expiresAt > Date.now()) {
+      const vfs = this.vfs;
+      const scoped = vfs.scope!;
+      const source = await vfs.snapshot();
+      if (source.identity.generatorId !== scoped.generatorId || source.identity.draftId !== scoped.draftId)
+        throw new BrowserError('BINDING_MISMATCH', 'The current editor no longer matches the backup Binding.');
+      const files = Object.fromEntries(Object.entries(source.files).map(([path, bytes]) => [path, bytesToBase64(bytes)]));
+      return createSourceArchive(this.store, source.identity, source.revision, files, scoped);
     }
-    if (!files["main.pjs"] || !files["index.html"])
-      throw new Error("Backup must contain both native panels.");
-    const vfs = await this.backupVfs(),
-      before = await vfs.snapshot();
-    const paths = new Set([
-      ...Object.keys(before.files),
-      ...Object.keys(files),
-    ]);
-    const result = await vfs.writeBatch(
-      [...paths]
-        .filter((p) => !p.startsWith("imports/"))
-        .map((path) => ({ path, bytes: files[path] ?? null })),
-      before.revision,
-    );
-    if (result.status !== "SUCCEEDED")
-      throw new Error(
-        "Source restore requires reconciliation; no Save was performed.",
-      );
+    if (this.vfs && this.lease && !this.vfs.scope && !this.stopped) return this.vfs.exportBackup();
+    const source = await this.adapter.snapshot();
+    const files = Object.fromEntries(Object.entries(source.files).map(([path, bytes]) => [path, bytesToBase64(bytes)]));
+    return createSourceArchive(this.store, source.identity, source.revision, files, null);
+  }
+
+  async previewSourceRestore(archive: unknown, mode: RestoreMode): Promise<RestorePreview> {
+    const {vfs} = this.operatorVfs();
+    const {archiveSha256, files} = await inspectSourceArchive(this.store, archive, mode, vfs.scope);
+    const before = await vfs.snapshot();
+    return {mode, archiveSha256, expectedRevision: before.revision, fileCount: Object.keys(files).length};
+  }
+
+  async restoreSourceBackup(archive: unknown, requested?: RestoreIntent): Promise<void> {
+    return this.exclusiveOperatorWork(async () => {
+      const {lease, vfs} = this.operatorVfs();
+      if (vfs.scope && requested === undefined)
+        throw new BrowserError('APPROVAL_REQUIRED', 'Inspect and confirm the exact archive and current Workspace revision.');
+      if (!requested && (!archive || typeof archive !== 'object' || !('version' in archive) || archive.version !== 1))
+        throw new BrowserError('INVALID_INPUT', 'A legacy restore requires an original version 1 archive.');
+      const intent = requested ?? await this.previewSourceRestore(archive, 'source-only');
+      const {archiveSha256, files} = await inspectSourceArchive(this.store, archive, intent.mode, vfs.scope);
+      if (archiveSha256 !== intent.archiveSha256)
+        throw new BrowserError('STALE_REVISION', 'The selected backup differs from the reviewed archive.');
+      const before = await vfs.snapshot();
+      if (before.revision !== intent.expectedRevision)
+        throw new BrowserError('STALE_REVISION', 'The exact reviewed Workspace revision changed before restore.');
+      const current = Object.keys(before.files).filter(path => !path.startsWith('imports/') &&
+        (intent.mode === 'exact-binding' || !path.startsWith('scratch/')));
+      const paths = new Set([...current, ...Object.keys(files)]);
+      const writes = [...paths].filter(path => {
+        const old = before.files[path], next = files[path];
+        return !old || !next || !equalBytes(old, next);
+      }).map(path => ({path, bytes: files[path] ?? null}));
+      if (!writes.length) return;
+      await this.assertOperatorWriter(lease, vfs);
+      if ((await vfs.unresolved()).length)
+        throw new BrowserError('EFFECT_UNKNOWN', 'Resolve retained local effects before restoring the Workspace.');
+      const recovery = await this.transport.request('GET', '/api/v1/admin/workspaces/' + lease.workspaceId + '/recovery') as
+        {workspaceId?: unknown; blockingOperationsKnown?: unknown; blockingOperations?: unknown; activeLease?: {epoch?: unknown}};
+      if (recovery.workspaceId !== lease.workspaceId || recovery.activeLease?.epoch !== lease.epoch ||
+          recovery.blockingOperationsKnown !== true || !Array.isArray(recovery.blockingOperations) || recovery.blockingOperations.length)
+        throw new BrowserError('EFFECT_UNKNOWN', 'Wait for exact Gateway authority and unresolved operations to settle.');
+      if (vfs.scope && writes.some(write => !write.path.startsWith('scratch/'))) {
+        await this.applyFencedRestore(lease, vfs, writes, intent);
+        return;
+      }
+      const result = await vfs.writeBatch(writes, intent.expectedRevision, undefined, () => this.assertOperatorWriter(lease, vfs));
+      if (result.status !== 'SUCCEEDED')
+        throw new BrowserError('EFFECT_UNKNOWN', 'Restore requires reconciliation. Inspect its exact local checkpoint and journal.');
+    });
+  }
+
+  private async applyFencedRestore(lease: Lease, vfs: VirtualFileSystem,
+    writes: readonly FileWrite[], intent: RestoreIntent): Promise<void> {
+    const operationId = crypto.randomUUID();
+    const fence = async (action: 'acquire' | 'check') => {
+      if (this.operatorVfs().vfs !== vfs || this.lease !== lease)
+        throw new BrowserError('STALE_EPOCH', 'The confirmed Operator restore lost its exact editor lease.');
+      const response = await this.transport.tab('/api/v1/tab/operator-restore', {
+        ...this.ids(lease), operationId, action,
+        ...(action === 'acquire' ? {archiveSha256:intent.archiveSha256} : {}),
+      }, lease.leaseCredential) as {operationId?: unknown};
+      if (response.operationId !== operationId || this.operatorVfs().vfs !== vfs || this.lease !== lease)
+        throw new BrowserError('EFFECT_UNKNOWN', 'The exact Operator restore acknowledgement is unavailable.');
+    };
+    // No native code runs unless both Workspace and Registry have reserved this intent.
+    await fence('acquire');
+    let phase: 'SUCCEEDED' | 'REJECTED' | 'PARTIAL' | 'UNKNOWN';
+    let failure: unknown;
+    let data: Record<string, unknown> | undefined;
+    try {
+      const result = await vfs.writeBatch([...writes], intent.expectedRevision, operationId, () => fence('check'));
+      phase = result.status;
+      data = {archiveSha256:intent.archiveSha256, revision:result.revision, committedCount:result.committed.length};
+    } catch (error) {
+      failure = error;
+      phase = error instanceof BrowserError && error.code !== 'EFFECT_UNKNOWN' ? 'REJECTED' : 'UNKNOWN';
+    }
+    const error = phase === 'SUCCEEDED' ? undefined : {
+      code: phase === 'PARTIAL' ? 'PARTIAL_EFFECT' : phase === 'UNKNOWN' ? 'EFFECT_UNKNOWN' : 'PROVIDER_REJECTED',
+      message: 'Inspect the retained Operator restore evidence.',
+      retryable:false,
+      recovery:'Reconcile the exact Operation before a new restore.',
+    };
+    try {
+      await this.transport.tab('/api/v1/tab/reply', {
+        ...this.ids(lease), operationId, phase,
+        result:{operationId,status:phase,
+          effectState:phase === 'SUCCEEDED' ? 'VERIFIED' : phase === 'PARTIAL' ? 'PARTIAL' : phase === 'UNKNOWN' ? 'POSSIBLE' : 'NONE',
+          ...(data ? {data} : {}), ...(error ? {error} : {})},
+      }, lease.leaseCredential);
+    } catch {
+      throw new BrowserError('EFFECT_UNKNOWN',
+        `Local Operator restore outcome ${phase}; Gateway acknowledgement for ${operationId} is unavailable. Retained evidence requires reconciliation.`);
+    }
+    if (phase === 'REJECTED' && failure) throw failure;
+    if (phase !== 'SUCCEEDED')
+      throw new BrowserError('EFFECT_UNKNOWN', 'Operator restore requires exact checkpoint and Gateway reconciliation.');
+  }
+
+  async listCheckpoints(scopeId: string): Promise<CheckpointSummary[]> {
+    const selected = await requireHistoricalRecoveryScope(this.store, scopeId);
+    return listCheckpointMetadata(this.store, selected.prefix, selected.scope.epoch, selected.keys);
+  }
+
+  async exportCheckpoint(scopeId: string, id: string): Promise<string> {
+    const {scope, prefix} = await requireHistoricalRecoveryScope(this.store, scopeId);
+    const saved = await readHistoricalCheckpoint(this.store, prefix, id);
+    if (await nativeRecoveryDigest(saved.identity.generatorId, saved.identity.draftId) !== scope.nativeIdentityDigest)
+      throw new BrowserError('STORAGE_CORRUPT', 'Checkpoint data differs from its verified local Binding.');
+    const {installationId, workspaceId, assignmentGeneration, bindingGeneration, epoch} = scope;
+    const archive = await createSourceArchive(this.store, saved.identity, saved.revision, saved.files,
+      {installationId, workspaceId, assignmentGeneration, bindingGeneration, epoch,
+        generatorId: saved.identity.generatorId, draftId: saved.identity.draftId});
+    return JSON.stringify(archive);
+  }
+
+  async setCheckpointPinned(scopeId: string, id: string, pinned: boolean): Promise<void> {
+    return this.exclusiveOperatorWork(async () => {
+      const {vfs} = this.operatorVfs();
+      const {prefix} = await requireHistoricalRecoveryScope(this.store, scopeId);
+      if (!vfs.scope || !prefix.startsWith(vfs.scope.bindingPrefix + ':epoch:'))
+        throw new BrowserError('BINDING_MISMATCH', 'Checkpoint pin changes require this exact current Binding.');
+      await vfs.pinCheckpoint(prefix, id, pinned);
+    });
+  }
+
+  private async privateStages(): Promise<OperatorPrivateFiles> {
+    return new OperatorPrivateFiles(this.store, await this.transport.installationId());
+  }
+
+  async stagePrivateFile(path: string, bytes: Uint8Array): Promise<PrivateFileStageSummary> {
+    const store = await this.privateStages();
+    const scope = !this.stopped && this.lease && this.lease.expiresAt > Date.now() ? this.vfs?.scope : undefined;
+    const exact = scope ? {
+      workspaceId: scope.workspaceId, installationId: scope.installationId,
+      assignmentGeneration: scope.assignmentGeneration, bindingGeneration: scope.bindingGeneration,
+      epoch: scope.epoch, generatorId: scope.generatorId, draftId: scope.draftId,
+    } : null;
+    return store.stage(path, bytes, exact);
+  }
+
+  async listPrivateFiles(): Promise<PrivateFileStageSummary[]> {
+    return (await this.privateStages()).list();
+  }
+
+  async previewPrivateFileImport(id: string): Promise<{
+    expectedLocalRevision: string; path: string; bytes: number; sha256: string;
+  }> {
+    const {vfs} = this.operatorVfs();
+    if (!vfs.scope) throw new BrowserError('UPGRADE_REQUIRED', 'An exact v2 Binding is required for private import.');
+    const store = await this.privateStages();
+    const row = await store.read(id);
+    const local = await vfs.localView();
+    if (row.state === 'COMMITTING' && row.scope && sameBackupBinding(row.scope, vfs.scope) && row.expectedLocalRevision &&
+        local.revision.value !== row.expectedLocalRevision && local.files.some(file => file.path === row.path && file.sha256 === row.sha256))
+      return {path: row.path, bytes: row.bytes, sha256: row.sha256, expectedLocalRevision: row.expectedLocalRevision};
+    await store.verifiedContent(row, vfs.scope);
+    return {path: row.path, bytes: row.bytes, sha256: row.sha256, expectedLocalRevision: local.revision.value};
+  }
+
+  async importPrivateFile(id: string, expectedLocalRevision: string): Promise<{localRevision: string}> {
+    return this.exclusiveOperatorWork(async () => {
+      const {lease, vfs} = this.operatorVfs();
+      if (!vfs.scope) throw new BrowserError('UPGRADE_REQUIRED', 'An exact v2 Binding is required for private import.');
+      const store = await this.privateStages();
+      const row = await store.read(id);
+      if (row.state === 'IMPORTED' && row.scope && sameBackupBinding(row.scope, vfs.scope) &&
+          row.expectedLocalRevision === expectedLocalRevision && row.resultRevision)
+        return {localRevision: row.resultRevision};
+      if (row.state === 'COMMITTING' && row.scope && sameBackupBinding(row.scope, vfs.scope) &&
+          row.expectedLocalRevision === expectedLocalRevision) {
+        const observed = await vfs.localView();
+        if (observed.revision.value !== expectedLocalRevision &&
+            observed.files.some(file => file.path === row.path && file.sha256 === row.sha256)) {
+          await store.finish(row, observed.revision.value);
+          return {localRevision: observed.revision.value};
+        }
+        throw new BrowserError('EFFECT_UNKNOWN', 'The original staged import still requires exact readback reconciliation.');
+      }
+      const bytes = await store.verifiedContent(row, vfs.scope);
+      const local = await vfs.localView();
+      if (local.revision.value !== expectedLocalRevision)
+        throw new BrowserError('STALE_REVISION', 'Private Workspace files changed since review.');
+      await this.assertOperatorWriter(lease, vfs);
+      const intent = await store.begin(row, vfs.scope, expectedLocalRevision);
+      try {
+        const revision = await vfs.writeLocalBatch([{path: row.path, bytes}], expectedLocalRevision,
+          undefined, () => this.assertOperatorWriter(lease, vfs));
+        await store.finish(intent, revision.value).catch(() => {
+          throw new BrowserError('EFFECT_UNKNOWN', 'The private file was published but its terminal receipt needs reconciliation.');
+        });
+        return {localRevision: revision.value};
+      } catch (error) {
+        if (error instanceof BrowserError && error.code !== 'EFFECT_UNKNOWN') await store.reopen(intent);
+        throw error;
+      }
+    });
   }
   async reconcileOperation(
     operation: Record<string, unknown> & { operatorEvidence: string },
@@ -586,6 +795,140 @@ export class BrowserController {
         "Operator resolution recorded. Reconnect explicitly; original effect remains uncertain.",
     });
   }
+  localRecoveryScopes(): Promise<HistoricalRecoveryScope[]> {
+    return listHistoricalRecoveryScopes(this.store);
+  }
+  async inspectLocalRecovery(scopeId: string): Promise<HistoricalRecoveryInspection> {
+    return (await this.readHistoricalRecovery(scopeId)).inspection;
+  }
+  async exportLocalRecovery(scopeId: string): Promise<string> {
+    return exportHistoricalRecovery(this.store, scopeId);
+  }
+  async resolveRetainedLocalHold(scopeId: string, recordId: string, expectedInspection: string, evidence: string): Promise<void> {
+    if (!evidence.trim() || evidence.length > 512 || !/^[a-f0-9]{64}$/.test(expectedInspection))
+      throw new BrowserError('INVALID_INPUT', 'Exact local inspection and bounded operator evidence are required.');
+    if (this.executing || this.lease)
+      throw new BrowserError('TAB_BUSY', 'Stop the local execution controller before recording a historical resolution.');
+    const controllerGeneration = this.connectionGeneration;
+    const {inspection, actions} = await this.readHistoricalRecovery(scopeId);
+    const record = inspection.records.find(row => row.id === recordId);
+    const action = actions.get(recordId);
+    if (!action || record?.acknowledgement !== expectedInspection)
+      throw new BrowserError('STALE_REVISION', 'Historical evidence changed or is not eligible. Inspect the exact scope again.');
+    if (this.connectionGeneration !== controllerGeneration || this.executing || this.lease)
+      throw new BrowserError('TAB_BUSY', 'Local execution changed during inspection.');
+    await action(evidence.trim());
+  }
+  private async readHistoricalRecovery(scopeId: string): Promise<{
+    inspection: HistoricalRecoveryInspection;
+    actions: Map<string, (evidence: string) => Promise<void>>;
+  }> {
+    const selected = await requireHistoricalRecoveryScope(this.store, scopeId);
+    const {scope, prefix} = selected;
+    const records: HistoricalRecoveryRecord[] = [];
+    const actions = new Map<string, (evidence: string) => Promise<void>>();
+    let fenced = false;
+    let invalidFence = false;
+    try { fenced = await hasHistoricalEpochFence(this.store, prefix, scope.epoch); }
+    catch (error) {
+      if (!(error instanceof BrowserError) || error.code !== 'STORAGE_CORRUPT') throw error;
+      invalidFence = true;
+    }
+    const localStopped = !this.lease && !this.executing;
+    const fenceReason = invalidFence ? 'The historical Epoch fence is malformed. Retain it for scoped export.'
+      : !fenced ? 'A newer authenticated lease has not fenced this Epoch. Inspection and export remain available.'
+      : !localStopped ? 'Stop the local execution controller before acknowledging a historical Hold.' : undefined;
+    let observed: Awaited<ReturnType<VirtualFileSystem['snapshot']>> | undefined;
+    let sourceError: string | undefined;
+    // Stage and checkpoint inventory do not depend on a native editor probe.
+    if (selected.journalKeys.length) {
+      try {
+        const native = await this.adapter.probe();
+        if (!native.identity || await nativeRecoveryDigest(native.identity.generatorId, native.identity.draftId) !== scope.nativeIdentityDigest)
+          throw new BrowserError('BINDING_MISMATCH', 'Open the exact historical native Generator and Draft.');
+        if (!native.ready || !native.sourceRead)
+          throw new BrowserError('SOURCE_READBACK_UNAVAILABLE', 'Native source readback is unavailable.');
+        const vfs = await VirtualFileSystem.openBound(this.adapter, this.store,
+          {...scope, generatorId: native.identity.generatorId, draftId: native.identity.draftId},
+          {readOnly: true, assertCurrent: () => undefined});
+        const first = await vfs.snapshot();
+        const second = await vfs.snapshot();
+        const lastProbe = await this.adapter.probe();
+        if (first.revision !== second.revision || first.nativeRevision !== second.nativeRevision ||
+            !lastProbe.identity || !equalIdentity(first.identity, second.identity) ||
+            !equalIdentity(native.identity, second.identity) || !equalIdentity(lastProbe.identity, second.identity))
+          throw new BrowserError('STALE_REVISION', 'The native draft changed during inspection.');
+        observed = second;
+        if (!lastProbe.ready || native.sourceWriteBlocked?.length || lastProbe.sourceWriteBlocked?.length)
+          sourceError = 'NATIVE_EFFECT_UNSETTLED';
+      } catch (error) {
+        sourceError = error instanceof BrowserError ? error.code : 'SOURCE_READBACK_UNAVAILABLE';
+      }
+    }
+    for (const key of selected.journalKeys) {
+      const recordId = key.slice((prefix + ':journal:').length);
+      const raw = await this.store.get(key);
+      const row = readHistoricalJournal(raw, recordId);
+      if (!row) {
+        records.push({id:'journal-' + recordId, kind:'QUARANTINED', state:'STORAGE_CORRUPT',
+          baseRevision:null, paths:[], acknowledgement:null, reason:'Malformed local journal retained for scoped export.'});
+        continue;
+      }
+      const id = 'journal-' + row.id;
+      const acknowledgementReason = !historicalJournalPending(row) ? 'This journal is settled.'
+        : row.gatewayOperationId ? 'Resolve the original Gateway-correlated operation with authoritative Gateway recovery.'
+        : fenceReason ?? (sourceError ? 'Exact current native readback and an idle editor are required.' : undefined);
+      const snapshot = observed;
+      const fingerprint = !acknowledgementReason && snapshot ? await digest(JSON.stringify(raw)) : null;
+      const token = fingerprint && snapshot ? await digest(JSON.stringify([scope.id, id, fingerprint, snapshot.revision])) : null;
+      const paths = await Promise.all(row.paths.slice(0, 64).map(async path => ({
+        path,
+        expectedDigest: row.plannedPaths?.[path],
+        observedDigest: snapshot ? (snapshot.files[path] ? await digest(snapshot.files[path]!) : null) : undefined,
+      })));
+      records.push({id, kind:'JOURNAL', state:row.state, createdAt:row.createdAt, gatewayOperationId:row.gatewayOperationId,
+        baseRevision:row.baseRevision, paths, expectedDigest:row.plannedHash,
+        observedDigest:snapshot?.revision.split(':')[1], acknowledgement:token, reason:acknowledgementReason});
+      if (token && snapshot) actions.set(id, async evidence => {
+        const latest = await this.store.get(key);
+        if (latest === undefined || await digest(JSON.stringify(latest)) !== fingerprint)
+          throw new BrowserError('STALE_REVISION', 'The selected journal changed during acknowledgement.');
+        const settled = {...row, resolvedByOperator:true, inspectedRevision:snapshot.revision,
+          resolvedAt:Date.now(), operatorEvidence:evidence};
+        let failure: unknown;
+        try { await this.store.set(key, settled); } catch (error) { failure = error; }
+        const observed = await this.store.get(key);
+        if (observed === undefined || await digest(JSON.stringify(observed)) !== await digest(JSON.stringify(settled)))
+          throw failure ?? new BrowserError('EFFECT_UNKNOWN', 'The historical journal acknowledgement could not be verified.');
+      });
+    }
+    for (const key of selected.stageKeys) {
+      const stageId = key.slice((prefix + ':stage:').length);
+      const id = 'stage-' + stageId;
+      try {
+        const stage = await inspectBoundStage(this.store, prefix, stageId);
+        const alreadyResolved = !(await unresolvedHistoricalStages(this.store, prefix, [key])).length;
+        const reason = alreadyResolved ? 'This staged pointer was already acknowledged.'
+          : fenceReason ?? (!historicalStageVerifiable(stage)
+            ? 'The exact authoritative pointer cannot be verified. Preserve and export this stage.' : undefined);
+        const token = !reason ? await digest(JSON.stringify([scope.id, id, stage])) : null;
+        records.push({id, kind:'STAGE', state:stage.observedState, baseRevision:null, paths:[],
+          expectedDigest:stage.stagedSourceHash, observedDigest:stage.observedSourceHash, acknowledgement:token, reason});
+        if (token) actions.set(id, async evidence => {
+          const latest = await inspectBoundStage(this.store, prefix, stageId);
+          if (await digest(JSON.stringify([scope.id, id, latest])) !== token)
+            throw new BrowserError('STALE_REVISION', 'The selected staged pointer changed during acknowledgement.');
+          await acknowledgeHistoricalStage(this.store, prefix, latest, evidence);
+        });
+      } catch (error) {
+        if (!(error instanceof BrowserError) || !['STORAGE_CORRUPT','INVALID_INPUT'].includes(error.code)) throw error;
+        records.push({id, kind:'QUARANTINED', state:'STORAGE_CORRUPT', baseRevision:null,
+          paths:[], acknowledgement:null, reason:'Malformed staged pointer retained for scoped export.'});
+      }
+    }
+    return {inspection:{scope, revision:observed?.revision ?? null, sourceError, records},actions};
+  }
+
   /** Read-only local journal status; does not require a live gateway lease. */
   async localRecovery(workspaceId:string):Promise<{revision:string;sourceError?:string;holds:Array<{
     id:string;kind:string;state:string;createdAt:number;paths:string[];baseRevision:string;
@@ -616,6 +959,8 @@ export class BrowserController {
        !evidence.trim()||evidence.length>512)throw new Error('Exact hold and inspection evidence required.');
     if(this.executing)throw new Error('Wait for the active operation before local reconciliation.');
     const w=await this.getRecoveryWorkspace(workspaceId);
+    if (w.contractVersion === 2)
+      throw new BrowserError('INVALID_INPUT', 'Choose the exact retained Assignment, Binding and Epoch to resolve this Hold.');
     await this.assertRecoveryIdentity(w);
     const vfs = await this.recoveryVfs(w);
     const snapshot=await vfs.snapshot();
@@ -743,6 +1088,8 @@ export class BrowserController {
     }
   }
   private async execute(raw: unknown, lease: Lease): Promise<void> {
+    if (this.operatorWork) await this.operatorWork.catch(() => undefined);
+    if (this.stopped || this.lease !== lease) return;
     if (this.executing)
       throw Object.assign(new Error("Concurrent execution denied."), {
         code: "TAB_BUSY",
@@ -751,8 +1098,17 @@ export class BrowserController {
     try {
       await this.executeOperation(raw, lease);
     } finally {
+      this.clearScopedControl();
       this.executing = false;
     }
+  }
+  private clearScopedControl(): void {
+    const control = this.scopedControl;
+    if (!control) return;
+    clearTimeout(control.deadlineTimer);
+    clearInterval(control.heartbeatTimer);
+    if (this.abort === control.abort) this.abort = undefined;
+    this.scopedControl = undefined;
   }
   private async executeScopedOperation(raw: unknown, lease: Lease): Promise<void> {
     const parsed = browserEnvelopeV2.safeParse(raw);
@@ -764,18 +1120,30 @@ export class BrowserController {
         target.bindingGeneration !== lease.bindingGeneration || envelope.assignmentGeneration !== lease.assignmentGeneration ||
         target.assignmentGeneration !== lease.assignmentGeneration || !envelope.permissions.every(p=>lease.permissions.includes(p)))
       throw new BrowserError('STALE_EPOCH','Operation does not match this exact scoped lease.');
-    this.abort = new AbortController();
-    const signal = this.abort.signal;
-    const assertCurrent = async () => {
+    const abort = new AbortController();
+    const signal = abort.signal;
+    const assertTimeAndLease = () => {
+      if (signal.aborted && signal.reason instanceof BrowserError) throw signal.reason;
       if (signal.aborted || this.stopped || this.lease !== lease)
         throw new BrowserError('CANCELLED','Operation is cancelled or its lease is no longer active.');
       const now = Date.now();
       if (now >= lease.expiresAt || now >= envelope.deadlineMs || envelope.deadlineMs - now > 3_600_000)
         throw new BrowserError('TIMEOUT','Exact scoped operation deadline expired.');
+    };
+    const assertCurrent = async () => {
+      assertTimeAndLease();
       await vfs.scope!.assertCurrent();
+      assertTimeAndLease();
+    };
+    const operationId = envelope.operationId;
+    assertTimeAndLease();
+    this.abort = abort;
+    this.scopedControl = {lease, operationId, abort,
+      deadlineTimer: setTimeout(() => abort.abort(new BrowserError('TIMEOUT', 'Exact scoped operation deadline expired.')),
+        Math.max(0, envelope.deadlineMs - Date.now())),
+      heartbeatTimer: setInterval(() => { if (!signal.aborted) void this.renew(lease, true); }, ACTIVE_OPERATION_HEARTBEAT_MS),
     };
     await assertCurrent();
-    const operationId = envelope.operationId;
     const key = this.operationPrefix(envelope.workspaceId) + operationId;
     const seal = await digest(JSON.stringify(envelope));
     const reply = (phase: string, result?: Record<string,unknown>) => this.transport.tab(
@@ -823,9 +1191,10 @@ export class BrowserController {
     };
     try {
       const data = await (this.tools?.callDevelopment ? this.tools.callDevelopment(context) : executeDevelopment(context));
-      const reported = data as {status?:string};
+      const reported = data as {status?:string; effectState?:string};
       const status = reported?.status === 'PARTIAL' || reported?.status === 'UNKNOWN' || (reported?.status==='REJECTED' || reported?.status==='CANCELLED') ? reported.status : 'SUCCEEDED';
-      const effectState = status==='PARTIAL'?'PARTIAL':status==='UNKNOWN'?'POSSIBLE':status==='REJECTED'||status==='CANCELLED'?'NONE':'VERIFIED';
+      const effectState = status==='PARTIAL'?'PARTIAL':status==='UNKNOWN'?'POSSIBLE':
+        status==='REJECTED'||status==='CANCELLED'||(envelope.tool==='batch'||envelope.transferRecoveryOnly)&&reported?.effectState==='NONE'?'NONE':'VERIFIED';
       result = {operationId,status,effectState,data:new TextEncoder().encode(JSON.stringify(data)).length <= 240_000 ?
         data : {resultAvailability:'TOO_LARGE'}};
       if (status!=='SUCCEEDED') result.error = {code:status==='PARTIAL'?'PARTIAL_EFFECT':status==='UNKNOWN'?'EFFECT_UNKNOWN':status==='CANCELLED'?'CANCELLED':'PROVIDER_REJECTED',

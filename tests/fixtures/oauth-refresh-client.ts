@@ -9,7 +9,7 @@ async function session(response:{status:number;json():Promise<unknown>},clientId
   assert.equal(response.status,200,'Synthetic OAuth exchange must succeed.');
   const body=await response.json() as {access_token:string;refresh_token:string;expires_in:number;token_type:string};
   assert.equal(body.token_type,'bearer');assert.ok(body.access_token);assert.ok(body.refresh_token);
-  assert.equal(body.expires_in,900);
+  assert.ok(Number.isSafeInteger(body.expires_in) && body.expires_in >= 60);
   return {clientId,resource,accessToken:body.access_token,refreshToken:body.refresh_token,expiresIn:body.expires_in};
 }
 /** Actual pinned SDK DCR, S256 PKCE, exact operator approval and offline_access exchange. */

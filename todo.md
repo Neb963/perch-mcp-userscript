@@ -1,5 +1,326 @@
 # Implementation ledger
 
+## R14 — result redaction, bounded wait and selected source access (VERIFIED OFFLINE)
+
+- **S03-010**: assert malformed image projection rejects with typed error; fallback `omitDevelopmentResult` retains original identity/status, strips source/image bytes/resolution/late-observation, and does not mutate original receipt. Direct production helpers.
+- **S03-020**: execute common admission parser for all 16 execution tools with `waitMs=0/10_000`, reject invalid values, preserve native `timeoutMs` and omit transport wait from browser args; separately assert `operation_status` wait bounds and `cancel_operation` denial.
+- **S03-028/029**: real browser executor reads exactly 64 existing selected private files, byte and line ranges, rejects 65 items, fails wrong READ_SOURCE before revealing bytes and refuses stale revision.
+- [Exact-head CI 46160911551](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46160911551) succeeded on `324fd2f`: **736 PASS, 0 FAIL, 1 historical SKIP**. Promoted exactly four directly observed clauses (S03-010, S03-020, S03-028, S03-029), [R14 direct evidence](docs/verification/v0.3-remediation/r14/DIRECT-QUALIFICATION.md). Native SQL 180/44, screenshot pixels and all owner gates unchanged.
+
+## R16 — original-operation selectors and cancellation uncertainty (CI PENDING)
+
+- `S03-056/057`: extend real Workerd synthetic OAuth MCP integration with operationKey and operationId selectors; reject missing/both selectors for status/cancel; enforce original Grant/Target (cross-Grant and wrong-target 404); prove status does not replay or mutate admission.
+- Demonstrate cooperative cancellation's two distinct branches: undispatched operation cancels with proven `effectState=NONE`, but an already RUNNING write reports `cancelRequested=true` and `effectState=UNKNOWN` pending a real terminal receipt. Then record a terminal UNKNOWN receipt without unsafe replay.
+- Qualify only after exact-head offline CI succeeds; no live provider or browser use. Native 180/44 budget remains a separate failed requirement.
+
+## R15 — direct capability-ceiling qualification (VERIFIED OFFLINE)
+
+- Test actual userscript executor `executeDevelopment` for `S03-031/033/035/037/049`: zero-byte transfer start with WRITE_SOURCE only, commit with WRITE+READ, and matching delete/rename source-digest preconditions; all denied variants must leave file revision and publication permits unchanged.
+- Test `list_files` metadata-only with READ_SOURCE, deny WRITE_SOURCE-only; QuickJS declared local read/write requires COMPUTE plus exact READ_SOURCE/WRITE_SOURCE. Include real positive filesystem effects, isolated compute and negative capability checks.
+- Exact-head [CI 46161586058](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46161586058) succeeded on `1a859abc` with **737 PASS, 0 FAIL, 1 historical SKIP**. Added direct R15 evidence and promoted exactly five original permission clause rows `S03-031/033/035/037/049`. [R15 direct report](docs/verification/v0.3-remediation/r15/DIRECT-QUALIFICATION.md). Native SQL **180/44** still FAIL; no provider/live browser operations.
+
+## W2B — admission expiration fast-path (REJECTED AND REVERTED)
+
+- [Exact-head offline CI 46159986488](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46159986488) passed typecheck and offline tests and measured identical native lifecycle **181 reads / 44 writes**, versus R11 baseline **180/44**; legacy unchanged at **244/74**. Admission was **45/10** rather than **44/10**; all other stages unchanged.
+- The native-only indexed maintenance shortcut incurred one extra read and therefore cannot justify the extra conditional runtime path. **Removed the new method and restored original full admission cleanup**; original revision-gating, historical recovery and deadlines remain unchanged.
+- [R13 rejection report](docs/verification/v0.3-remediation/r13/SQL-EXPERIMENT-NEGATIVE.md). Do not retry another version of the same admission expiration shortcut absent a measured counterexample. Next measurable structural target: Registry terminal/read amplification and physical write/index schema. Native SQL target remains unmet.
+
+
+## W4 — exact development catalog and batching input qualification (OFFLINE VERIFIED)
+
+- Candidate atomic clauses: S03-011/012/014 (19-tool Workerd catalog, unavailable capture metadata, conservative read-only annotations); S03-015/021/022/023 (closed nested batch, effect operationKey, optional pure-read key and nested delivery field rejection).
+- Added direct true SDK tools/list assertions in `tests/integration/result-scope-v2.test.ts`; added positive/negative real production parser tests in `tests/unit/development-v2.test.ts`.
+- The source [`5451c65`](https://github.com/Neb963/perch-mcp-userscript/commit/5451c65b80cc0a0b25ac9905f03c15ddd7ccdfea) passed [exact-head offline CI 46159246081](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46159246081): **733 PASS/0 FAIL/1 historical SKIP**. Direct observation allowed exactly seven atomic row promotions in `SPEC-00-05.md` (S03-011/012/014/015/021/022/023); [R12 evidence](docs/verification/v0.3-remediation/r12/DIRECT-QUALIFICATION.md). No live provider testing, permissions or production effects.
+
+## W2 — scoped result authorization SQL experiment (VERIFIED partial improvement)
+
+- Hypothesis: Worker repeats a generic Registry authorization for result/status or cancel before Workspace performs the necessary *original Operation scope* authorization. Removing the former avoids redundant per-operation Registry SQL while the latter retains fresh revocation, Grant, Target, permission and bindingRevision checks.
+- Changed `apps/gateway/src/index.ts#mcpDevelopment` to route result/cancel by authenticated opaque scope directly to Workspace. In `workspace.ts#authorizeScopedResult`, use that same authoritative Registry result to enforce the former bindingRevision fence without an earlier Worker request.
+- Added Workerd integration coverage for original Grant read/cancel, unrelated Grant denial, altered Target denial and no unauthorized cancellation. This is **not** a completed SQL-budget fix. Compare identical native fixture with 187/44, and revert if there is no measured improvement.
+- The first W2 CI (46158519983) passed the new original-Grant negative test but exposed a genuine regression in image-result delivery: removed Worker auth had supplied `bindingRevision` to the image hydration guard. Reuse the revision from the Workspace's mandatory fresh Registry authorization instead; preserve the separate image and post-hydration revocation checks (three fresh boundaries, not four). CI was red; no performance result claimed.
+- Exact-head [CI 46158850513](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46158850513) passed after binding revision fix. Same five-stage native fixture **187/44 → 180/44**; unchanged five-stage legacy **251/74 → 244/74**. Status stage Registry **18 → 11** rows read; writes unchanged. Safety tests include real Workerd original Grant Target denial, cancellation, image hydration and post-hydration revocation. See [R11 benchmark report](docs/verification/v0.3-remediation/r11/SQL-EXPERIMENT.md).
+- SQL requirement stays FAIL: native 180/44 still exceeds ≤120/40 by 60 reads and 4 writes. Next structural proof: inspect terminal write/index overhead and Registry/Workspace admission and dispatch reads, including old schema and rollback. No unmeasured optimization claims.
+
+## R10 — browser effect-boundary preflight and checkpoint reconciliation (OFFLINE VERIFIED)
+
+- Verified entry branch HEAD: `8d979e6c97e499bf8d43c5bc3cf4feef2b743738`; exact-head [CI 46156655650](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46156655650) passed 730/0/1. Updated stale FINISHING-STATE.md commit/CI/artifact fields.
+- Recheck standalone development tool arguments through canonical admission preflight before browser execution; reject reserved transport/delivery fields, malformed bytes, duplicate paths, and invalid mutation preconditions even after upstream admission. Preserve permission ceilings and batch host policy checks.
+- Added direct `S03-009` negative tests and one valid write in `tests/unit/development-v2.test.ts`; [CI 46158172940](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46158172940) verified 731 PASS/0 FAIL/1 historical SKIP at `cbef2a2`. Marked only S03-009 PASS after direct evidence.
+- Next: measure W2 auth read duplication against the same 187/44 native lifecycle, validate original Grant and binding revision fencing, then verify exact-head CI. No live tests, deployments, owner data modifications or merge.
+
+
+## R09 — bounded v2 input admission (offline verified)
+
+- Exact source `2e2f5221baddf0bf404accfe66ea8c3be230c46f`; [offline CI 46156403985](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46156403985) **730 PASS, 0 FAIL, 1 historical SKIP**. Executed full pinned CI test/build/benchmark/artifact workflow; no production or native Firefox operations.
+- Added iterative input-structure validation (depth ≤16, nodes ≤16,384, no shared/cyclic object references) before any Registry/Workspace work, and serialized UTF-8 envelope budget on standalone requests. The original batch budget remains. Bounded positive and over-limit negative cases are directly asserted by `S03-007/008` tests in `tests/unit/development-v2.test.ts`.
+- Promoted only **S03-007** and **S03-008** in existing `SPEC-00-05.md` register on exact named test evidence ([R09](docs/verification/v0.3-remediation/r09/DIRECT-QUALIFICATION.md)). Register: **1,317 = 124 PASS, 4 FAIL, 1,150 NOT_STARTED, 24 DEFERRED_OWNER, 1 BLOCKED_FEASIBILITY, 14 superseded**.
+- **Next executable**: Profile native five-stage SQL physical query/index amplification under current authority and choose one measurable safe structural reduction, then exact same 120/40 benchmark and historical-compatibility negative tests; separately qualify next P0 recovery/authorization requirement with direct assertions. S07-023 screenshot remains blocked on operator authorization and demonstrable exact unsaved-preview pixels.
+- PR #25 remains draft and unmerged. Do not deploy, run provider/production tests, request browser permissions or merge.
+
+## R08 — finishing state, direct Target/discovery and pre-admission qualifications (offline verified)
+
+- Baseline: source/docs `d9906633467e72d3ecb1364fb60139b5110a3698`, [successful offline CI 46150920907](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46150920907), 727 PASS / 0 FAIL / 1 historical SKIP; 1,317 clauses = 112 PASS / 4 FAIL / 1,162 NOT_STARTED / 24 OWNER / 1 feasibility BLOCKED / 14 superseded.
+- [`FINISHING-STATE.md`](docs/verification/v0.3-remediation/FINISHING-STATE.md) created at `bf60957c05c86d2afe87d10a363d147b5178bf74`. This is the cross-agent restart index, not a second requirements database. Includes roadmap, decision register, exact blocker/evidence totals, local reproduction constraints, and next-agent action.
+- Added direct `S02-009` boundary test at `542e9ec496f4ed71bf108b070b7402e9509406f0` to `tests/integration/assignment-contract.test.ts`. It asserts canonical Target zero/MAX_SAFE_INTEGER, all four extreme generation combinations, rejected negative/fractional/unsafe/nonfinite inputs, invalid textual variants, and exact increment overflow. Source behavior unchanged. Do not promote requirement to PASS until exact-head CI observes the named test passing.
+- Same preserved native lifecycle: 187/44 vs required <=120/40; legacy 251/74. No SQL target claim. Previous read-cache trial saved zero SQL rows and is not being repeated.
+- **Next:** inspect exact CI outcome for `542e9ec`; if green, record its named test and exact SHA as direct `S02-009` proof and update existing register. Continue P0 connector authorization/recovery cases, then safe structural SQL reductions measured on original five-stage denominator.
+- Runtime limitation in this executor: pinned `npm ci --offline` cannot install uncached `zod@3.25.76`; use exact-head offline GitHub CI for meaningful verification, never claim local test execution. No live provider, Cloudflare preview/deploy, real Firefox, OAuth or merge.
+
+## R07 — eleven directly qualified T0 document contracts (CI SUCCESS)
+
+- Baseline exact code d78a023 and verified R06 register commit 3956255, no live calls/deploy/merge.
+- Source checks: S00-003 architecture boundaries; S00-010 labeled historical docs; S00-011 all 52 old tool/permission dispositions; S00-012 unchanged scope; S00-013 exact R00 evidence; S00-015 phase ledger; S00-016 original A01–A34 mapped one-for-one; S02-049 explicit Target; S02-101 exact stale MCP catalog recovery; S04-016 operation-key replay prohibition; S04-080 cross-segment partial and separate Save.
+- Change only narrow Connector setup guidance and agent-side instructions plus eleven T0 assertions. The client steps are intentionally UI-agnostic: no fake button names; live external client acceptance remains OWNER.
+- Exact source 5cf2aa7 / [CI 46150545750](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46150545750) **727 PASS / 0 FAIL / 1 historical SKIP**, eleven named S00/S02/S04 document-only assertions passed. All package/hash/dry-run and synthetic benchmark steps succeeded. R07 promoted eleven T0-only rows; resulting strict inventory **112 PASS / 4 FAIL / 1162 NOT_STARTED / 24 OWNER / 1 feasibility BLOCKED / 14 SUPERSEDED =1317**. [R07 proof](docs/verification/v0.3-remediation/r07/DOCUMENT-QUALIFICATION.md). No browser/runtime/provider gate inferred.
+- Objective SQL native ≤120/40 still **unmet at 187/44**; native unsaved preview pixel gate and owner-only external conditions still blocked. No Cloudflare or browser provider interaction.
+
+
+
+## R06 — reject ineffective transaction read cache; qualify eight documentation contracts
+
+- [Trial 6a25baf / offline CI 46148963399](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46148963399): **713 pass / 0 fail / 1 historical skip**; locked typecheck, full tests, source/build hashes and Wrangler dry-run PASS. Direct native lifecycle counters are **44/10 admission, 50/8 poll, 14/1 RUNNING, 56/25 terminal, 23/0 status; total 187/44**. Legacy **251/74**. The cache trial has **exactly zero savings** versus verified 0c4a44e. No cross-request or cross-await cache was attempted.
+- **Decision:** restore byte-exact baseline `apps/gateway/src/sql.ts`, delete the rejected experimental cache test and retain no production feature/complexity without benefit. Preserve canonical part corruption checks from 0c4a44e.
+- **Verified DOC authority:** exact code [d78a023](https://github.com/Neb963/perch-mcp-userscript/commit/d78a023ad0f2171cbf0732d24fdb0b73b9ea85dc), [offline CI 46149708275](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46149708275) **716 pass / 0 fail / 1 historical skip**, full locked typecheck, tests, native/legacy cost, package checksums, dry-run. Eight independently asserted T0 document-only clauses S00-001,002,004–009 promoted, with exact log evidence; previous first attempt's test matcher failure was fixed and retested. Registry **101 PASS, 4 FAIL, 1173 NOT_STARTED, 24 OWNER, 1 blocked feasibility, 14 superseded = 1317**. [R06 direct qualifications](docs/verification/v0.3-remediation/r06/S00-DOC-QUALIFICATION.md). This is no runtime/provider pass.
+- **Release unchanged:** S07-023 exact screenshot pixel capability remains unsupported, native SQL ≤120/40 failed by 67 reads/4 writes, remaining individually unqualified requirements and owner-only gates unresolved. No provider, preview, deployment or merge.
+
+## R00–R05 v0.3 conformance remediation
+
+### 2026-11-28 exact A01 and canonical-integrity qualification
+
+- Exact implementation source `0c4a44e9c1006f329f2efe3cf9813a712c1c4425`, [CI 46147393916](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46147393916): **708 passed, zero failed, one historical skip**; complete offline build, inventory, hashes and Wrangler dry-run. Native 187/44, legacy 251/74; SQL target FAIL remains. All eight downloaded hashes and TXT/JS identity independently verified.
+- [A01 direct evidence](docs/verification/v0.3-remediation/r05/A01-DISCOVERY-QUALIFICATION.md) records actual production-route test of exact three-Connector owned discovery, no foreign record reads or Workspace lookup, 50-row bounded pagination and stale cursor rejection. Five rows promoted to PASS; current 1,317: PASS 93, FAIL 4, NOT_STARTED 1,181, OWNER 24, BLOCKED 1, SUPERSEDED 14. This is not proof of the other clauses or full release eligibility.
+- Evidence-only commit records the already verified code SHA, not a self-referential artifact SHA. No live action or deployment. No authorization or durable receipt weakening.
+
+### Fresh Registry index benchmark; canonical integrity and A01 evidence
+
+- `ec4b9fd` [offline CI 46147027731](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46147027731) passes all steps. Native five-stage workerd measurement is **187 reads / 44 writes** versus 187/46 baseline (terminal 56/25 rather than 56/27). Legacy is 251/74 versus 249/76; the fresh-only layout trades two additional legacy reads for two fewer writes. Existing databases retain their original index; no migration. Native objective remains unmet.
+- Canonical `SqlRecords.get` now validates actual part positions and per-part bounds before interpreting JSON. Focused SQLite tests 5/5 pass, including valid-JSON gaps, missing initial parts, negative/fractional positions, oversized parts, nonmutation on failure and valid multi-part Unicode round-trip. The existing activity scan counter follows the updated projection.
+- Added A01 production Registry route acceptance test for exact owned bound targets, empty Connector, all 50 owned Workspaces in bounded pages, stale cursor after unassignment, zero foreign record reads and zero Workspace namespace lookups. Explicitly requested synthetic-only trace records every SQL statement and namespace lookup in request-local context; it cannot silently truncate and is not included in deployed Worker.
+- Await exact-head locked CI before promoting A01 rows or recording final measured costs. No live operations or deployment.
+
+### R04 fresh Registry partial workspace indexes (2026-11-28)
+
+- Resume from verified `7260a9b` (offline CI 46143736524). Existing native benchmark 187/46 vs ≤120/40; strict inventory 88 PASS, 4 FAIL, 1186 NOT_STARTED, 24 OWNER, 1 capture blocker, 14 superseded.
+- Fresh-only replacement of the broad workspace index with three partial indexes matching the actual active Grant, consumed permit and unresolved Hold lookup predicates. Canonical records, due indexes, terminal retention and rollback compatibility remain unchanged. Existing physical layouts retain the original index.
+- Local focused production-module SQLite tests 4/4 passed (TypeScript transpile with locally available compiler; not pinned full-suite qualification). EXPLAIN confirms all three indexed query plans; 1000 successful terminal notices/permits do not obstruct live Grant and Hold lookups, unresolved and resolved outcomes retain exact predicates, and historical full index still works after reopen.
+- Locked local install unavailable (uncached dependency). Use existing nondeploying offline CI to measure the same five-stage native/legacy workload; retain only if measured net benefit without safety regression. No new PASS claim or production action. Continue unresolved requirements independently.
+
+
+### 2026-11-28 complete takeover offline verification exit
+
+- `a736513`, [CI 46143344849](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46143344849) **705 pass/0 fail/1 skip**; exact checked-out tree, full builds/hashes/dry-run passed; no live operations. UI exact-bundle: 30 screenshots, 10/8/2 complete rows, zero outbound requests; local filter/approval/reassign/recovery/UNKNOWN revision details all pass.
+- Updated **four still-FAILED** matrix records to their **actual latest values** rather than stale R00 measurements. S08-058 + F13.01/.02 native five-stage lifecycle **187/46** vs **≤120/40**; S07-023 actual preview pixels unsupported. Firefox 2026 Region Capture remains unavailable and Violentmonkey has no tab-pixel API; owner-authored new component/flow required.
+- See [R05 exact-head exit](docs/verification/v0.3-remediation/r05/FINAL-OFFLINE-STATUS.md) for complete traceability, source/security boundaries and owner checklist. Matrix 1317: PASS 88, FAIL 4, NOT_STARTED 1186, OWNER 24, BLOCKED 1, SUPERSEDED 14. Strict release gate NOT ELIGIBLE. Remaining work must not be relabeled as complete; PR remains draft, unmerged, no Cloudflare deployment.
+
+### 2026-11-28 exact S10-004 Workspace observation proof
+
+- `9956d04` [CI 46142955098](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46142955098): 705 PASS, 0 FAIL, 1 historical skip; typecheck/build/hashes/dry-run passed. Verified native revision hashes only when the projection supplies `verified:true`; unverified Source, Preview, Saved remain UNKNOWN. Local Activity observation includes Workspace, phase, tool and observedAt with installation scope; does not assert a current clear Hold.
+- Same installer rendered 30 screenshots in local Chromium, 10/8/2 complete Workspace rows at 1440×900, 1024×768, 390×844, no overflow or external requests. Extended `tests/offline-manager/closure-r05.py` also checked UNKNOWN/observed outcome on expanded row and 0 Gateway requests on expansion.
+- [Direct acceptance evidence](docs/verification/v0.3-remediation/r05/S10-004-PROVENANCE-QUALIFICATION.md) promotes S10-004 to PASS. Register now 1317: PASS 88, FAIL 4, NOT_STARTED 1186, OWNER 24, BLOCKED_CAPTURE 1, SUPERSEDED 14. The SQL target 187/46 vs 120/40 and actual unsaved preview capture remain unresolved. No production, provider or deployment action.
+
+### R03 S10-004 local-first Workspace detail evidence
+
+- Workspace `More actions` detail now discloses SourceRevision, PreviewRevision and SavedRevision; only explicitly verified SHA-256 projections are shown, and unverified/missing native state is labeled UNKNOWN.
+- After Activity is intentionally opened, bounded installation-scoped cached Activity metadata records Workspace ID, tool, phase and observedAt. The Workspace detail labels its last **observed** result and warns that current Holds must be inspected in Activity/Recovery; it does not infer a clear state from stale cached history.
+- No new auto Gateway request, no native scan, and no change to collapsed Workspace table density. Unit test `S10-004 Workspace detail...` asserts verified/unknown and cached-result cases, and 0 extra management requests while expanding. Pending exact-code CI and bundled Chromium geometry before promoting S10-004.
+- This is an operator observation improvement, not an authorization predicate or trustworthy Save revision. Owner acceptance and SQL/pixel gates remain separate.
+
+### Clean-install Resource retirement S09-003
+
+- Source `2a49d88`, [CI 46142275476](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46142275476) passed 704 tests / 0 failed / 1 historical skip. New no-legacy `resourceStorageMaintenance` short circuit prevents inactive Resource schema/trigger writes in native/prepare mode, while legacy data appearing later still migrates.
+- Strengthened the test's SQL-write assertion to refuse every CREATE, INSERT, UPDATE, DELETE, DROP, ALTER or REPLACE SQL statement; no incorrect regex can permit an unobserved Resource write. Direct hermetic Chromium manager remains five tabs with zero Library navigation.
+- [S09-003 qualification](docs/verification/v0.3-remediation/r05/RESOURCE-RETIREMENT-EVIDENCE.md) moves one previously FAIL clause to PASS. Matrix now 1,317: PASS 87, FAIL 5, NOT_STARTED 1186, OWNER 24, BLOCKED 1, SUPERSEDED 14. Remaining F14 subclauses still require independent verification.
+- Pending new exact-head CI for strengthened invariant; no live infrastructure or deployment.
+
+### R03 F14/F25 Resource clean-install storage short circuit
+
+- New v2 workspaces and a fresh native-mode Registry do **not** imply a legacy Resource library exists. `resourceStorageMaintenance` now checks for a legacy library before installing Resource SQL schema/triggers. Legacy/native authority markers stay mandatory if migration was previously started; existing native installations still use their original migration readers.
+- The bounded no-resource test verifies `legacy`, `prepare` and `native` initialize zero Resource tables and write no Resource SQL data when no legacy library is present. A legacy library subsequently appearing is migrated to native with exact snapshot verification. A trailing orphan part causes `RESOURCE_SNAPSHOT_CHUNK_GAP`, never silent omission.
+- Combined with existing v2 retired resource-tool denial and exact bundled no-Library UI tests, this aims to close S09-003 after exact CI. No cloud migration, deployment, or account access.
+
+### Exact-head CI closure F12/A10/A15/S10-021
+
+- `b7daa00` [offline 46141689975](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46141689975): 703 passed, 0 failed, one historical skip; typecheck, native/legacy benchmarks, package hash, Wrangler dry-run PASS.
+- Immutable public revision manifests preserve prior byte-identical source copies and block archive-address collision. Targeted old-Epoch Hold resolution, stale staged-transfer abort, and delayed manager response all have focused production-path negative regressions.
+- [R05 independent proof](docs/verification/v0.3-remediation/r05/F12-HISTORICAL-AND-MANAGER-EVIDENCE.md) promotes four previously FAIL clauses. Register 1317: PASS 86, FAIL 6, NOT_STARTED 1186, OWNER 24, CAPTURE blocked 1, superseded 14.
+- Native ordinary SQL benchmark still **187/46 >120/40**, unsaved preview pixel capability unsupported, and remaining 1186 normative clauses lack independently accepted evidence. No production tests, deployment, or merge.
+
+### 2026-11-28 F12 integration-test fixture and R05 semantic evidence fix
+
+- The offline public-generator adapter reads provider metadata twice per independent snapshot and does two independent snapshots. Synthetic version generation must therefore advance every **four** requests, not two. The 89ac2b3 offline test correctly failed on inconsistent fake snapshots before publication; fixed the test fixture without altering the production source or weakening the check.
+- R05 evidence audit heuristically rejected two `PASS` rows solely because their **operational** descriptions included `pending` (a live state, not a verification state). Retained exact tests, SHA and PASS criteria; clarified these as **unanswered approval** and **unresolved request**, keeping the strict verifier unchanged. Earlier 7c688d9 run had 700 pass / 1 fail / 1 skip; 89ac2b3 run had 701 pass / 2 fail / 1 skip, with these two specific causes.
+- Recheck exact new source tree via complete offline CI. No deployment, preview, production request or release-gate relaxation.
+
+### R03 F12 immutable public import publication (2026-11-28)
+
+- Restore verified revision-addressed source under `imports/<slug>/perch-revisions/<snapshotId>/files/`, with an immutable `manifest.json`. Keep backward-compatible `imports/<slug>/<path>` and active `perch-receipt.json` pointing at the exact immutable manifest.
+- All alias/immutable paths publish in one binding-local durable pointer and exact readback. On repeated same revision, verify existing immutable bytes, refuse changes before publication; retain previous revision across a new import. Reject reserved metadata path collisions/duplicate selectors and mark selective imports as `materialization:selected` instead of claiming full materialization.
+- Trade-off: immutable archives consume physical GM space; existing 64 MiB budget and refusal/recovery safeguards remain, no silent eviction, no new cloud store. Source/doc acceptance remains unqualified until exact-source CI and tests pass; no real public provider request.
+- Focused tests: `tests/unit/development-v2.test.ts` F12 original, two successive revisions, corrupt archive, timeout, and existing negative tests. Do not promote S06-048 until verified.
+
+### R05 synthetic bundled manager closure and digest correction (2026-11-28)
+
+- Added reproducible offline Playwright `tests/offline-manager/closure-r05.py` (actual shipped manager, local Chromium, zero network). F18 urgent approval survives foreign Connector filter; F22 three local filter operations add 0 GET; F19 all 6 conflicting controls disabled with delayed rebind; F26 Recovery/Settings local-first during 60s pending Gateway read; F25 no Library destination across v1/v2/outage/unpaired.
+- Downloaded candidate `perch-mcp-candidate.zip` SHA-256 `0f0121f5740328ffdbfc3834d10eebb39d771678f5100cb72b6ca7b9b5d20076`; matching PR body, RELEASE metadata and artifacts. TXT/JS digest `7eeb0c71a050bc040cd820b93db51c01ad6a46a7f68e9896e839398c141f2059`.
+- Direct evidence [R05 manager closure](docs/verification/v0.3-remediation/r05/MANAGER-CLOSURE.md). Nine previously FAIL rows moved to PASS. Revised 1,317-row register: 82 PASS, 10 FAIL, 1,186 NOT_STARTED, 24 OWNER, 1 capture blocker, 14 superseded; strict release gate remains blocked. Independently unresolved actual preview pixels and native 187/46 vs ≤120/40.
+- Offline UI fixture is NOT live Firefox/provider evidence; no production calls, cloud operations or merge.
+
+### 2026-11-28 exact-head F09/OAuth/manager qualification
+
+- Safe demand-driven native compute read path committed at `5c045bc` after detecting and fixing a write-only manual-edit race. The existing size/prefix negatives remain intact, with added 100-file selector and same-size-edit regressions.
+- [Offline run 46140138366](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46140138366): 701 PASS, 0 FAIL, 1 historical skip, build/artifacts/dry-run PASS. Local synthetic Chromium exact-installer: 30 screenshots, 10/8/2 complete Workspace rows, 52px desktop row, no external requests.
+- Native full five-stage lifecycle still **187 SQL reads / 46 writes**, legacy 249/76. The ≤120/40 objective remains **UNMET**; do not relabel aggregate batching as ordinary per-operation compliance.
+- R05 reconciled 19 atomic clauses with direct evidence in [qualification report](docs/verification/v0.3-remediation/r05/F09-OAUTH-UI-QUALIFICATION.md). Requirement inventory remains mostly unverified; screenshot and OWNER gates still block release.
+- Next: resolve other normative requirements with independently reproducible tests and safe corrections, investigate SQL terminal/dispatch amplification without weakening authority, preserve draft PR and no live access.
+
+Baseline `298f3b9619335364c668a69b6f04570ae530fcab` (tree `c07b3e7e25ea0e4d063ee11435cc58e3d524059b`), same tree as audited PR #24 head. Work on `repair/v0.3-conformance`. [Authority](docs/v0.3/REMEDIATION-AUTHORITY.md) and [verification index](docs/verification/v0.3-remediation/REQUIREMENT-TRACEABILITY.md).
+
+| Phase | Verification gate | State |
+| --- | --- | --- |
+| R00 | Pin authority and baseline, build an atomic requirement inventory, rerun the offline suite, replay the P0 reports, and record measured baselines. | Baseline verified |
+| R01 | Preflight full batches, fence execution at effect boundaries, preserve receipt uncertainty, and bind operator actions and consent to exact intent. | Regressions verified |
+| R02 | Recover transfers and historical local state, deduplicate immutable storage, and exercise publication faults. | Scoped recovery verified. Historical reclamation remains open. |
+| R03 | Qualify permanent OAuth, clean installation, all feasible development behavior, and the local-first manager. | OAuth, manager and v2 Resource denial verified offline; F12 retrieval and UI density next; F11 capture feasibility blocked |
+| R04 | Meter comparable workflows and quotas, calibrate admission, and qualify long finite access lifetimes. | Pending |
+| R05 | Rebuild and test the exact candidate, reconcile every requirement, and verify artifact bytes and the unmerged PR. | In progress: atomic coverage inventory, UI expiry gate, exact-head CI and final PR verification; full normative closure remains blocked |
+
+R01 local verification passed strict TypeScript, 615 tests with zero failures and four phase-gated probes, and the final focused renderer detected zero external requests. [R01 evidence](docs/verification/v0.3-remediation/r01/README.md).
+
+R02 scoped historical recovery, staged transfers, and exact operator writer fencing were verified in local fixtures. [R02 evidence](docs/verification/v0.3-remediation/r02/README.md).
+
+R03 takeover: extend v2 Grants with explicit null expiry, separate token renewal from execution, preserve suspended Connector resource metadata, exclude revoked Grants from active capacity, and add bounded revoked retention. Qualify actual SDK exchange/rotation/revoke and KV expiry across nine finite TTL candidates. One-year default is provisional until ten-year evidence; no production credentials touched. The first takeover checkpoint 84242a5 passed strict typecheck, 665 of 666 tests (one deliberately skipped historical baseline), artifact verification and Wrangler dry-run in run 46091943832. The pinned SDK qualified nine access lifetimes including ten years. Live client compatibility remains OWNER-only.
+
+Next scoped change removes the active Library under every manager state; preserves historical archive export without lazy initialization in v2; isolates local manager rendering during outages; adds local-only filter/sort, compact Workspace/Connector disclosures, and exact issuer/generation-scoped stale summaries. New UI and legacy-archive regressions require a second exact-head offline qualification before marking PASS.
+
+Local Chromium and workerd fixtures use synthetic data. Production, provider, live OAuth and browser acceptance, deployment, preview, and merge are reserved for the operator.
+
+### R03 second-checkpoint investigation
+
+The 3fac671 manager release passed strict typecheck and 667/670 tests in offline run 46093062222: two new legacy Resource-retirement cases failed because the GET harness itself demanded HTTP 200 before exposing a 410 response; the intended gateway rejection was observed. The test assertions are repaired to inspect raw authorized HTTP status/error codes. No production failure was inferred from the tests.
+
+F10 status semantics: stale heartbeat is not verified source. Registry detail must explicitly report unverified SourceRevision/LocalRevision/PreviewRevision/SavedRevision, effective tool permissions, unsupported pixel capture and scoped blockers without reading source. Native generator_info must return reasoned revision objects without implicit verification. A focused local-workerd test exercises a READ_SOURCE-only Connector, unbound discovery, bound Target detail, unauthorized write capability and explicit unavailable verified-source path. Verification pending exact-head CI.
+
+### R04 inline bounded read-only native selectors (2026-11-28)
+
+- Corrected partial terminal-index CI ef6671c run 46111436457 PASS. Exact native operation 194 reads/48 writes; legacy249/76. This is one additional write reduction with unchanged five-stage denominator and compatible existing indexes.
+- New measured candidate: only if operation tool is read, mutating===false, and JSON-encoded arguments <=512 UTF-8 bytes, persist exact selector in existing canonical operation context rather than an additional operation_args_v2 row. Preserve all large/mutating args and every result in external payload tables. Strict decode rejects context/external duplicates and unsupported inline shape. Metadata remains inside the private Workspace Durable Object; no external projection may expose args.
+- Legacy native migration uses the same shape(), preserving canonical(legacy) equality and all receipt digests. Old external read-selector rows get deleted only when the new canonical row is updated atomically. `activeObligations` must read either layout. Test positive/negative, Unicode, oversized, transition, cold reopen, migration and corrupt external payload. Retain only on equal-workload measured write savings without additional reads or authorization regressions.
+### R04 measured Activity savings and native terminal partial index (2026-11-28)
+
+- cacc613 exact-head CI 46110889498 succeeded. Native lifecycle now 194 reads/49 writes; legacy249/76. Removing the new-only combined Activity index reduced one write per complete native terminal and retained correctness of ordered Workspace/phase query and native readback.
+- For newly initialized native operation tables only, change operation_native_terminal_v2 from indexing NULL active rows to a partial index `WHERE terminal IS NOT NULL`. The existing lastTerminal aggregate/cleanup query explicitly filters nonnull terminal, so the same ordering/plan applies with fewer write-amplifying entries.
+- Verify ADMITTED->RUNNING->SUCCEEDED transition and native stats, durable receipt, cold reopen and compatibility with an old physical full terminal index. All historical databases retain their original index via CREATE INDEX IF NOT EXISTS. Re-measure both modes; revert if negative or ineffective.
+### R04 measured count savings and native Activity index (2026-11-28)
+
+- Exact-head 9de5803 CI 46110662684 PASS: native 194 reads/50 writes; legacy249/76, versus prior native 194/52; verifies fresh selective Registry counts and retained UNKNOWN binding hold.
+- New-only canonical_activity_v2 removes the combined `(workspace,phase,rank,sort_time,key)` index; the already-present `canonical_activity_workspace_v2` covers Workspace+phase queries within 1000-entry canonical visibility window. Preserve global order, workspace-only, phase-only, serial/expiry indexes and keyset cursor revision checks. Existing databases keep the prior index.
+- Focused unit asserts index set, SQL query plan, 200 mixed workspace/phase events and exact sorted combined filters with/without historical index. Run exact-head CI and compare actual native and legacy write rows before deciding to retain.
+### R04 selective derived count maintenance (2026-11-28)
+
+- Exact ad6d01a CI 46110343560 PASSED and measured native 194 reads / 52 writes, legacy 249 / 78. The omitted new-only `registry_kind_v1` index reduced two writes per complete lifecycle and preserved 100-row ordered paging, 213 Grant entries, expiry and corruption rejection.
+- Introduce a further new-only SQLite trigger optimization: registry_counts_v1 persists only kinds with hot calls (`workspace`, `agent`, `idempotency`). Permit and terminal-notice counts remain exactly computable on demand from registry_entity_v1 and no longer increment a redundant counter in the common dispatch/terminal path. Existing derived-index schema is left untouched and remains compatible.
+- Test UNKNOWN terminal-notice bind holds, permit delete, count fallback, persisted hot counts and cold reconstruction. Preserve Activity, 7d expiry and read/list pagination. Evaluate exact-head native and legacy benchmarks; if any regression occurs, revert without changing protocol semantics.
+### R04 exact measured physical canonical storage and Registry index (2026-11-28)
+
+- Exact-head 1b053013 CI 46109926275 succeeded. A fresh canonical records WITHOUT ROWID table measured native five-stage **194 reads /54 writes**, legacy **250/80**, compared with previous rowid baseline 193/57 and 246/85. This is a three-write reduction with one additional native read; no existing DO physical schema was migrated. Keep explicit fresh-install-only qualification.
+- Follow-up measured-index hypothesis: remove redundant registry_kind_v1 secondary index on *new* RegistryIndex instances; use the canonical kind-prefixed primary key range for deterministic 100-row paging, preserving expired approval filtering and corruption checks. Existing RegistryIndex schema marker prevents unrequested index replacement. Verify EXPLAIN, 213 Grant records, approval expiry, indexed workspace Grant lookup, legacy coexisting secondary index and full external permission negatives.
+- Commit only with exact-head offline CI, compare both legacy/native SQL and repeat at 0/150/999/1000 histories as practical. Threshold 120/40 still unmet; no permission checks or durable receipts removed.
+### R04 measured no-op fast path and fresh physical schema (2026-11-28)
+
+- ce51cf6 exact-head CI 46109712786 succeeded, but SQL rows native five-stage **193/57**, legacy **246/85**, identical to verified de350a/34657 baseline. The active-poll deadline shortcut adds complexity without measured SQL saving. Revert the Workspace source and remove its additional test before further optimization.
+- For new installations only, change the SqlRecords `records` canonical table declaration to `WITHOUT ROWID` (one composite PRIMARY KEY B-tree, not a rowid table with separate key index). Do NOT rebuild or migrate existing `records` tables. Preserve the original schema automatically for previously created Durable Objects via `CREATE TABLE IF NOT EXISTS`.
+- Qualify both fresh WITHOUT ROWID and pre-existing rowid shapes under SQLite: chunked Unicode, rollback, triggers, write/delete, cold reopen and exact authorization. Verify actual Miniflare native/legacy SQL rows before claiming a benefit; revert if reads or writes increase or state semantics change.
+- Keep fresh-vs-existing physical layout distinction visible in the report and rollout. Owner has expressed willingness to reconfigure credentials, but no live drop/reset or migration is authorized.
+### R04 measured rollback and bounded active polling (2026-11-28)
+
+- CI 46109244898 at fbe2132 passed offline typecheck/tests/build, but SQL IN-plan increased five-stage native reads 193→203 and legacy 246→256, with unchanged writes. Revert and remove test; a measured regression cannot remain.
+- Reuse exact idle-probe SQL plus durable alarm verification on positive native activeCount. Skip expiry scans only if all operation/maintenance deadlines are future and pending/dirty/outbox/preparation are absent and retention <=1000. Keep every dispatch/Target/lease/phase fence.
+- Native Miniflare regression covers successful dispatch, missing-alarm fallback and expired-op rejection. Legacy behavior is unchanged. R04 numeric objective remains unverified until equal-denominator CI benchmarks.
+### R04 canonical multi-key authorization read (2026-11-28)
+
+- Exact-head benchmark 34657b7 / run 46105833686 still measures 193 SQL rows read and 57 written per native five-stage operation, target strive <=120/40. Do not silently alter numerator/denominator.
+- Add a bounded getMany read to SqlRecords, using one prepared SQLite IN query with 1–8 unique keys, ordered chunk assembly and corruption failure, no source, secrets or SQL string interpolation. The canonical maps exist only in the current function invocation.
+- V2 authenticateConnector reads fresh Grant and *claimed* Connector candidates in one SELECT, then executes unchanged owner, credentialEpoch, audience, suspension, permission-ceiling and revocation checks. Identity is never accepted merely because a requested candidate row exists. Existing v1 reads are unchanged.
+- Verify updated suite and exact-head five-stage/legacy synthetic workload before accepting any reduction. If Cloudflare query plan reads more rows or changes revocation semantics, revert the optimization; it is a reversible query-only change.
+### R04 scoped admission and cost plan
+
+1. Correct v2 `execute_js` admission: local broker reads/write staging are not 1,000 nested remote child RPCs. Preserve v1 estimate, strict conservative positive reserves, exact epoch/transaction state and no weakening of admission accounting. Add v2 batch 1–32 cost bounds and rollover tests.
+2. Reproduce true local SDK/Registry/Workspace costs at 0/150/999/1000 histories, ten individual writes versus one grouped write, ten heterogeneous individual calls versus one 10-step batch, 1/5/10/20/30/50 Workspace indexed discovery and 10/20 isolated Connectors.
+3. Measure native and legacy canonical storage independently. Compare against v0.2 and verified v0.3 baseline; report SQL reads/writes, KV operations, Worker/DO requests, bytes, incomplete billing dimensions, and target breaches without claiming account-global quota.
+4. Retain <=120 SQL reads / <=40 writes as an *unmet* normative target until an exact-head measured workload passes; do not remove fresh scope/revocation/readback checks to improve synthetic metrics. Track OWNER-04 provider billing separately.
+
+### R03 evidence and next gate
+
+- Exact-head b125c32 CI run [46093489526](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46093489526) passed offline typecheck, unit/integration, build, checksum verification and Wrangler dry-run. Earlier 84242a5 run 46091943832 independently qualified nine OAuth SDK lifetimes up to ten years, nonexpiring v2 consent/refresh/client, suspension and revocation. The v2 access-token default is 24 days (browser timer-safe); ten years is an explicitly configured OWNER-02-gated experimental override. Consent and refresh registration remain indefinite.
+- The exact tested userscript was rendered in isolated Chromium with 30/50-Workspace synthetic fixtures and zero external network requests. At CI head e742f091 the 1440×900, 1024×768 and 390×844 Workspace views fit 11, 8 and 2 complete rows respectively; all original 8/6/1 density targets pass, no overflow. F17, F21, F25, F26 and F27 checks pass: local identity, stop, scoped Recovery export and private staging remain functional in a cold outage. Obsolete F26 fixture expectations were corrected to test actual local operability rather than invent remote rows.
+- The revised exact e742f091 bundle renders 11 desktop (1440×900), 8 laptop (1024×768), and 2 mobile (390×844) complete Workspace rows, satisfying 8/6/1 limits with zero measured horizontal overflow and no external requests.
+- F12 changes in next checkpoint: validate optional provider SHA-256, enforce cancellation/deadline for paired public reads, atomically publish a revision-pinned local receipt with import bytes, and cover failed/mismatched/time-out branches without any unauthorized network access.
+- R04 offline benchmark at e742f091 in run 46095386706 measured native full read 225 SQL reads / 57 writes, legacy 280/85. Mixed ten individual native calls used 2,485 reads / 554 writes; one ten-step batch used 266 reads / 57 writes. Targets <=120/40 still FAIL. Six indexed discovery sizes and 10/20 Connector synthetic issuance/discovery passed; these are not account-global free-tier guarantees. The benchmark artifacts are uploaded independently before dist cleanup.
+- Chromium timer qualification: values above 2^31-1 milliseconds schedule near-immediately; ten-year expires_in is unsafe as a universal client default. Use 24 days (2,073,600 seconds) as timer-safe default with permanent refresh consent, and retain explicit ten-year override as OWNER-02-gated.
+- Remaining: F06 conservative historical storage reclamation, actual preview pixels feasibility, all remaining A01–A34 matrix entries, full R04 performance and R05 final exact-head qualification. No unfinished row is PASS.
+R05 first exact-head CI qualification at `42ab329` [run 46097599704](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46097599704) succeeded: 686 tests passed, zero failed, one skipped, both offline cost paths, inventory generation, release build/hash check and Wrangler dry-run. Inventory has 1,317 distinct clauses: 54 PASS, 1,196 NOT_STARTED, 28 FAIL, 24 DEFERRED_OWNER, 1 BLOCKED_FEASIBILITY and 14 SUPERSEDED; the strict release gate fails by design. The artifact initially stamped synthetic PR merge `GITHUB_SHA`; next checkpoint corrects provenance to the checked-out source SHA and tree, enforcing expected PR head in CI.
+
+### R04 measured 34657b7 result and batching guidance
+
+- Exact-head native/legacy benchmark [46105833686](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46105833686): **193/57 native**, **246/85 legacy** for equivalent full ordinary lifecycle; native admission stats consolidated one read (194→193). The objective is *Strive <=120/40* (original spec §8.1), not a waiver of mandatory safe replay/revocation/recovery.
+- Ten heterogeneous separate native Gateway lifecycles consumed 2,130 reads / 550 writes; one synthetic ten-step batch lifecycle consumed 233 / 57, reductions 89.1%/89.6%. Browser nested effects were not executed in this benchmark, so runtime effect cost remains unverified.
+- Update packaged agent knowledge to prefer correctly scoped, fully preflighted 1–32-step batches and explicit per-step receipts, keeping Save/POST, stale dependent actions and unknown effects separate. This operationally reduces free-tier overhead without speculative durability redesign.
+- Further 73-read/17-write difference requires substantial Registry/Workspace persistence/index changes. Do not drop independent canonical receipts or indexes simply to satisfy the aspirational metric; design additive, reversible migration and prove full fault coverage before treating a structural rewrite as ready.
+### R04 native atomic admission caps snapshot
+
+- `dfdbc6c` native full read lifecycle measured **194 SQL reads / 57 writes**; exact v2 terminal reply removed five global-expiry read rows and retained late-observation UNKNOWN outcome. Native and legacy tests passed.
+- OperationStore native admission checks `pendingFull`, `holdsFull` and (mutating only) `holds` from the same canonical SQLite statistics row with separate point SELECTs. Replace with one validated `admissionCaps()` snapshot inside the *same synchronous* admission transaction, before any operation mutation. For legacy storage call original index methods. Preserve limits (128 pending, 128 unresolved), rollback behavior and fail-closed corruption errors.
+- Native and legacy exact-head cost benchmark and capacity tests must pass; preserve expiry, UNKNOWN holds, pending outbox and writer transitions. Do not treat the snapshot as cached authority across awaits.
+### R04 v2 exact terminal expiry reconciliation
+
+- `ab790965` succeeded exact-head offline tests. Same-denominator native **199 SQL reads / 57 writes**, legacy 253/85; all receipt and Activity tests pass.
+- V2 terminal browser reply need not scan unrelated operation/maintenance indexes before acknowledging one exact operation. As with v2 RUNNING, use the canonical exact-operation expireOperation in the same synchronous transaction, with a durable UNKNOWN state and lateObservation if the deadline passed. Throw stale/retired errors *after* the transaction, never roll back reconciliation. Legacy/other routes preserve global expiry/alarms.
+- Added distinct expired terminal reply test: time-shift one DISPATCHED operation into the past in offline-only fixture, deliver a late SUCCEEDED observation, verify phase remains UNKNOWN/effect UNKNOWN and lateObservation equals original bytes. Preserve old late RUNNING and F05 image revocation tests.
+### R04 ordinary terminal Activity null-overlay optimization
+
+- Exact-head 5469b81 passed offline CI; native lifecycle **201 SQL reads / 57 writes**. Direct v2 RUNNING acknowledgment reduced its Workspace stage from 20 reads to 15 while preserving late-dispatch UNKNOWN records.
+- RegistryIndex.sync currently calls CanonicalActivity.setNotice(null) for every immutable successful/known terminal notice. Such receipts never have a `UNKNOWN`/`PARTIAL` overlay; this re-reads Activity metadata and entry without changing state. Skip only the no-op for nonuncertain notices; retain all uncertain overlay creation, resolution updates, tombstone cleanup, and full Activity correctness.
+- Verify against existing Activity native/legacy migration and image-revocation tests plus exact native cost benchmark. Record actual read reduction, not inferred savings.
+### R04 v2 RUNNING exact-expiry fast path (2026-11-28)
+
+- Native 6a1012 CI 46104277932 passed all offline checks and measured **206 SQL reads / 57 writes** for the equivalent full read lifecycle; generic MCP auth skip saved 12 reads, and synchronous nonimage result recheck skip saved 7 more. The asynchronous image pixel recheck and F05 late-revocation test remain intact.
+- Profiled v2 RUNNING acknowledgment repeatedly scans unrelated operation/maintenance due indexes, even though this acknowledgment cannot itself perform effects and the regular poll, heartbeat, terminal and durable alarm perform bounded global cleanup. Fastpath only for v2 RUNNING; preserve legacy, terminal and all other routes.
+- On direct RUNNING, verify the exact active lease and operation identity *before* state changes, and expire this exact record under transactionSync. If its deadline already passed, commit a truthful UNKNOWN/REJECTED receipt, then reject the stale acknowledgment *outside* the transaction. Never throw inside transactionSync after mutating expiry or it would roll back the evidence.
+- Regression: real Miniflare/native operation lifecycle, scoped status, measured SQL read reduction, test-only time-travel injection of a DISPATCHED operation deadline, stale reply rejection and durable UNKNOWN status. Test-only injection route exists solely in the offline optimization fixture; none of its hooks are packaged into the Worker.
+### R04 synchronous status read-cost reduction (2026-11-28)
+
+- `3a668b7` CI 46104037084 passed offline regression and measured native 213 SQL reads / 57 writes for an identical read lifecycle (12 reads fewer than baseline 225/57). Admission and status each omit one redundant generic Registry authorization; the precise Target/Grant ACL remains authoritative. Image revocation fault-injection after hydration passed.
+- Non-image status and cancellation currently perform a second Registry auth after the first successful Target ACL despite no asynchronous boundary in between. Identify image-tool types from one canonical `isImageTransferTool` predicate; retain async hydrate and *late* Registry recheck for all image tool results. Synchronous read/write/compute/other status and cancellation still check their Grant exactly once immediately before materializing the scoped result.
+- Keep the original image/revocation fault-injection, stale Binding/Grant/Target, late operator recovery, and operation_status/cancel tests. Require exact-head native and legacy benchmark before marking a read reduction; any result leak or test failure must be fixed or reverted.
+### R04 cloned-body oversize rejection (2026-11-28)
+
+- CI on f30ca88 showed a bounded JSON classifier unit hanging with an oversized cloned Request body. Root cause: parseBody awaits reader.cancel() on a clone tee whose sibling body is not consumed. Implement nonblocking cancellation on the >512 KiB error branch, preserving immediate 413 behavior and never treating oversized input as a valid scoped tool call.
+- Add a bounded wall-clock regression test for invalid/oversized request shapes so a hung reader cannot cancel the whole test subprocess silently. Existing F05 late-revocation image test passed in the same run; do not change its post-hydration Grant recheck.
+### R04 48027bd fault-injection correction
+
+- CI 46103447198 found a test packaging error: the pure unit classifier imported the Cloudflare Worker entrypoint under Node. Move the same bounded classifier to pure `mcp-scope.ts` and retain it as an index.ts dependency. No runtime authority changes.
+- F05 image-transfer late-revocation probe was configured for five auth checks including the now-removed duplicate generic ingress check. The safe v2 path has four: exact Target, Workspace status, image read, and post-hydration result ACL. Re-arm at check four and independently verify no pixel disclosure after revocation. Never relax the late-recheck or disable the fault-injection assertion.
+- Do not claim a read reduction until same-denominator CI benchmark demonstrates it. Roll back scoped skip on any ACL regression.
+### R04 targeted double-authorization elimination (2026-11-28)
+
+- Detailed exact-head SQL profile run 46102908402: the Registry receives multiple /internal/authorize RPCs per valid MCP call. The outer mcp() performs a generic Grant check; the v2 tools/call handler performs a second fresh, Target-specific authorization. There is no operator/provider effect between these two checks. The second specific check remains mandatory.
+- For a bounded and schema-valid v2 tools/call only when the v2 execution flag is enabled, skip the redundant generic precheck. The inner handler still checks current Grant, revocation, exact audience, permission ceiling, Target, and (for discovery) Connector-owned Workspace index. Tools/list, invalid or oversized JSON, other methods and disabled rollout keep original generic precheck.
+- Request cloning is bounded to <=512 KiB, does not consume the actual MCP request stream, and does not cache authorization across requests. Security regression: suspend and revoke must deny tool calls; tools/list and malformed tools must return 403. Equal-denominator benchmark must measure SQL changes before claiming a reduced cost.
+- This is a scoped read-cost optimization only, not a removal of fresh Registry authorization or a replacement for effect permits. If the test reveals lost HTTP error semantics, revert and investigate another approach.
+### R04 forensic SQL-cost profiling (2026-11-28)
+
+- Authoritative native lifecycle at 282ecef: **225 reads / 57 writes** vs <=120/40. Registry 97/27, Workspace 128/30 across admission, poll, RUNNING, terminal and status. This is synthetic gateway lifecycle, not provider billing.
+- Before storage rewrites, add opt-in SQL_TELEMETRY_DETAIL_ENABLED sampled query-shape fingerprints, SQL table and allowlisted key-kind to bounded telemetry. Never log SQL parameters, credentials, generator IDs or source text. Disabled mode must produce zero output.
+- Enable profiling only for the native offline benchmark; retain unprofiled legacy comparator. Use exact-head CI to identify dominant query families. Change only measured paths; preserve rollback behavior and fail-closed replay, revocation, Target, lease and terminal receipts.
+- This checkpoint is instrumentation, NOT a performance fix or release acceptance. Do not assert <=120/40 until equal-denominator measured lifecycle passes.
+### R05 exact-head release audit
+
+1. Read all four atomic requirement matrices mechanically. Validate unique IDs, legal statuses, structural completeness, and that no PASS carries pending or missing verification evidence. Export a deterministic JSON inventory with every unresolved clause. Treat `--strict` as release-blocking until the requirements actually qualify; do not fill gaps by assumption.
+2. Complete F18 expired OAuth approval state (visible, disabled with recovery instruction), local table counts/no-match behavior, and ordinary v1/retained v2 UX regression tests. Ensure UI mutation buttons remain disabled under stale authority, hidden document, expired approval, and changed credential pairing.
+3. Retain complete historical Resource archives and v1 compatibility without activating the deprecated Library in v2. No production endpoint, account, generator, or tunnel operation.
+4. Rebuild exact head with strict TypeScript, locked tests, both native and legacy measured benchmarks, package hashes, offline worker dry-run. Publish unmerged PR with explicit failures and four OWNER-only gates. Verify source and generated TXT/JS checksums match.
+5. Normative limitations remain explicit: capture of actual unsaved preview pixels lacks qualified browser surface, ordinary native full lifecycle measured 225 SQL reads/57 writes vs required <=120/40, and 1,196 atomic clauses still had NOT_STARTED at the last baseline. Reconcile individual rows with concrete evidence, never mass-mark PASS.
+
 ## V00–V10 development contract (2026-11-27)
 
 Starting point: `main` at `9524583b04e480875011f3675a581357afe315c3`, tree `1179db13df0112c15f7e7942dca198e7d0486dbe`, equal to the merged v0.2.0 qualification head `3fd1e48630737a1defd96484a3af3d3d881c84a1`. The working branch is `development/v0.3.0`. Use local synthetic fixtures and local workerd. Production and preview calls, deployment, real browser/provider tests, production readiness dispatch and merging are operator-only.

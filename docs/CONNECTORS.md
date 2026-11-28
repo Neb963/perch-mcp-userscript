@@ -8,7 +8,19 @@ A Connector is the OAuth principal at the exact resource URL `https://<gateway>/
 4. On normal idle/clean rebind, keep the Connector endpoint and v2 Grant. The old Target becomes stale and the browser obtains a new lease. Resolve Holds and acknowledge dirty or unknown old state before committing.
 5. Use `operation_status` with the original Operation ID/key and Target when a response is lost. Never issue a new key to replay an uncertain effect.
 
-Legacy v1 routes, approvals and Grants remain fixed to the original Workspace and Binding during staged rollout. Freeze targetless admission, settle old work, verify browser compatibility and complete fresh Connector-level OAuth consent before the atomic v2 authority switch. Refresh the client catalog after the switch. One-time reauthorization may be needed even with the existing endpoint URL. Do not copy an admin credential or token into connector configuration or put one in a URL. Exact rollout predicates are in [the v0.3 implementation specification](v0.3/PERCH-MCP-V0.3-IMPLEMENTATION-SPEC.md#25-compatibility-migration).
+Legacy v1 routes, approvals and Grants remain fixed to the original Workspace and Binding during staged rollout. Freeze targetless admission, settle old work, verify browser compatibility and complete fresh Connector-level OAuth consent before the atomic v2 authority switch. Refresh the client catalog after the switch. One-time reauthorization may be needed even with the existing endpoint URL.
+
+### Stale MCP tool catalog after v2 activation (Operator/client procedure)
+
+1. Stop all new tool effects. Finish or reconcile existing operations with their original Operation ID and operationKey; do not invent a new key for an uncertain effect.
+2. Verify that the configured MCP resource URL is unchanged and belongs to the intended Connector. Check the version and contract advertised by the Connector; if it is not v2, do not try a v2 mutation.
+3. In the MCP client, disconnect the existing Connector session and reconnect the **same resource URL** to refresh the client's cached tool catalog. Clients have different UI labels for this refresh; a hard-coded menu path is not portable.
+4. If the reconnect reports revoked consent or changed scopes, have the Operator explicitly approve the **v2 Connector OAuth consent**. Do not paste administrator credentials or tokens into the client configuration.
+5. Compare the refreshed tool catalog against the 19 names in `docs/TOOLS.md`. Call `workspace_status` without a Target to discover only the Connector's owned assignments. Confirm the intended Workspace and use its **current explicit Target**, never a cached or first-listed Target.
+6. If the client still advertises retired v1 names, disconnect and remove/re-add that Connector in the client using the **same resource URL**, then repeat the explicit consent and catalog verification. If the client cannot refresh or the server reports `UPGRADE_REQUIRED`, block execution and request a compatible MCP client/Connector version; do not silently downgrade or switch endpoints.
+
+Client-specific UI clicks and real OAuth refresh behavior require Operator acceptance. This procedure is an explicit recovery contract, not proof that every external client implements a particular refresh button.
+ Do not copy an admin credential or token into connector configuration or put one in a URL. Exact rollout predicates are in [the v0.3 implementation specification](v0.3/PERCH-MCP-V0.3-IMPLEMENTATION-SPEC.md#25-compatibility-migration).
 
 ## Historical v1 Agent connectors and operational evidence
 

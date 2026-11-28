@@ -14,6 +14,12 @@ export interface SaveContext {
   onDispatch?(): Promise<void>;
   receipt?: { status: string };
 }
+/** The live adapter observed a stop after the journal fence but before calling native code. */
+export class NativeEffectNotInvoked extends Error {
+  constructor(cause: unknown) {
+    super('Native effect stopped before invocation.', {cause});
+  }
+}
 function identityString(value: unknown, field: string): string { if (typeof value === 'string' && value.length <= 512) return value; if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value); throw new BrowserError('UNSUPPORTED_INTERFACE', `Native ${field} is not a losslessly serializable identifier.`); }
 /** Read only an explicit native ownership/access predicate. Async predicate
  * results must settle to an actual boolean within a bounded deadline. */
@@ -274,6 +280,9 @@ export class NativeAdapter {
   async readSelectedSource(paths: readonly string[]): Promise<Map<string, Uint8Array | null>> {
     if (paths.length < 1 || paths.length > 64)
       throw new BrowserError('LIMIT_EXCEEDED', 'Selected read requires 1 to 64 native files.');
+    return this.readSourceView(paths, [], 64, this.options.maxSnapshotBytes ?? 64 * 1024 * 1024);
+  }
+  async readSourceView(paths: readonly string[], prefixes: readonly string[], maxFiles: number, maxBytes: number) {
     const probe = await this.probe();
     if (!probe.ready) throw new BrowserError('TAB_BUSY', 'Native editor is not ready.');
     const identity = await this.assertIdentity();
@@ -282,26 +291,37 @@ export class NativeAdapter {
       if (path !== 'main.pjs' && path !== 'index.html' && !path.startsWith('src/'))
         throw new BrowserError('PATH_DENIED', 'Not a native source file.');
     }
+    for (const prefix of prefixes) {
+      if (!prefix.startsWith('src/') || !prefix.endsWith('/'))
+        throw new BrowserError('PATH_DENIED', 'Native source view requires a canonical src directory.');
+      if (prefix !== 'src/') canonicalPath(prefix.slice(0, -1));
+    }
     const src = this.page.srcState!;
-    const hasAssets = paths.some(path => path.startsWith('src/'));
+    const hasAssets = prefixes.length > 0 || paths.some(path => path.startsWith('src/'));
     if (hasAssets) {
       await src.ready();
       if (src.idle) await src.idle();
     }
     const rows = hasAssets ? await this.nativeManifest() : [];
     const listed = new Map(rows.map(row => [row.path, row.bytes]));
+    const selectedPaths = new Set([...paths, ...rows.filter(row => prefixes.some(prefix => row.path.startsWith(prefix))).map(row => row.path)]);
+    if (selectedPaths.size > maxFiles)
+      throw new BrowserError('LIMIT_EXCEEDED', 'Native source view exceeds its selected file limit.');
     const read = async (path: string): Promise<Uint8Array | null> => {
       if (path === 'main.pjs') return utf8.encode(boundedString(this.page.modelTextEditor!.getValue()));
       if (path === 'index.html') return utf8.encode(boundedString(this.page.outputTemplateEditor!.getValue()));
       if (!listed.has(path)) return null;
-      return nativeBytes(await src.readFile(path.slice(4)), this.page.Uint8Array, listed.get(path) ?? undefined);
+      const listedBytes = listed.get(path);
+      if (listedBytes != null && listedBytes > maxBytes)
+        throw new BrowserError('LIMIT_EXCEEDED', 'Selected source exceeded its byte limit.');
+      return nativeBytes(await src.readFile(path.slice(4)), this.page.Uint8Array, listedBytes ?? undefined);
     };
     const selected = new Map<string, Uint8Array | null>();
     let bytes = 0;
-    for (const path of paths) {
+    for (const path of selectedPaths) {
       const value = await read(path);
       bytes += value?.length ?? 0;
-      if ((value?.length ?? 0) > 16 * 1024 * 1024 || bytes > (this.options.maxSnapshotBytes ?? 64 * 1024 * 1024))
+      if ((value?.length ?? 0) > 16 * 1024 * 1024 || bytes > Math.min(maxBytes, this.options.maxSnapshotBytes ?? 64 * 1024 * 1024))
         throw new BrowserError('LIMIT_EXCEEDED', 'Selected source exceeded its byte limit.');
       selected.set(path, value);
     }
@@ -321,34 +341,63 @@ export class NativeAdapter {
     const report = await this.probe(); if (!report.ready) throw new BrowserError('TAB_BUSY', 'Native source write interfaces not ready.'); this.assertMutationReady(); if (!report.sourceWrite) throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native source setter interfaces unavailable.');
     let expected = await this.snapshot(); if (expected.revision !== expectedRevision) throw new BrowserError('STALE_REVISION', 'Source changed before native mutation.');
     const names = new Set<string>(); for (const write of writes) { canonicalPath(write.path); if (write.path.startsWith('scratch/') || write.path.startsWith('imports/')) throw new BrowserError('PATH_DENIED', 'Not a native source path.'); if (names.has(write.path.toLowerCase())) throw new BrowserError('PATH_DENIED', 'Duplicate/colliding write path.'); names.add(write.path.toLowerCase()); if ((write.path === 'main.pjs' || write.path === 'index.html') && write.bytes === null) throw new BrowserError('PATH_DENIED', 'Native panels cannot be deleted.'); }
-    const committed: string[] = []; let dispatched = false;
+    const committed: string[] = [];
+    let dispatchRecorded = false;
+    let invoked = false;
+    let unverifiedPath: string | undefined;
     try {
     for (const write of writes) {
-      const now = await this.snapshot(); if (now.revision !== expected.revision) return { status: committed.length ? 'PARTIAL' : 'UNKNOWN', revision: now.revision, committed, error: { code: 'STALE_REVISION', message: 'Manual/native change interrupted batch; preserved both versions.', recovery: 'Inspect checkpoint and current source. Do not replay the batch.' } };
+      const now = await this.snapshot();
+      if (now.revision !== expected.revision)
+        throw new BrowserError('STALE_REVISION', 'Manual/native change interrupted batch.');
       this.assertMutationReady();
-      if (!dispatched) await onDispatch?.(); // Durable fence before the first native effect.
+      if (!invoked && onDispatch) {
+        await onDispatch();
+        dispatchRecorded = true;
+      }
       if (assertCurrent) {
         await assertCurrent();
         if ((await this.snapshot()).revision !== expected.revision)
           throw new BrowserError('STALE_REVISION', 'Native source changed after the dispatch fence.');
         this.assertMutationReady();
       }
+      const panel = write.path === 'main.pjs' || write.path === 'index.html';
+      const nativeBytes = write.bytes && !panel
+        ? this.options.cloneInto ? this.options.cloneInto(write.bytes) : write.bytes.slice()
+        : null;
+      const text = panel ? new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(write.bytes!) : undefined;
+      if (assertCurrent) {
+        await assertCurrent();
+        this.assertMutationReady();
+      }
       try {
-        dispatched = true;
-        if (write.path === 'main.pjs' || write.path === 'index.html') { const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(write.bytes!); const editor = write.path === 'main.pjs' ? this.page.modelTextEditor! : this.page.outputTemplateEditor!; await editor.setValue(text); }
-        else if (write.bytes === null) await this.page.srcState!.deleteFile(write.path.slice(4));
-        else { const copied = this.options.cloneInto ? this.options.cloneInto(write.bytes) : write.bytes.slice(); await this.page.srcState!.writeFile(write.path.slice(4), copied); }
+        invoked = true;
+        unverifiedPath = write.path;
+        if (panel) {
+          const editor = write.path === 'main.pjs' ? this.page.modelTextEditor! : this.page.outputTemplateEditor!;
+          await editor.setValue(text!);
+        } else if (write.bytes === null) await this.page.srcState!.deleteFile(write.path.slice(4));
+        else await this.page.srcState!.writeFile(write.path.slice(4), nativeBytes);
         if (this.page.srcState!.idle) await this.page.srcState!.idle!();
-      } catch { return { status: 'UNKNOWN', revision: expected.revision, committed, error: { code: 'EFFECT_UNKNOWN', message: 'Native write threw; its effect may have occurred.', recovery: 'Read source and reconcile the operation. Never automatically replay.' } }; }
+      } catch { return { status: 'UNKNOWN', revision: expected.revision, committed, uncertainPaths: [write.path], error: { code: 'EFFECT_UNKNOWN', message: 'Native write threw; its effect may have occurred.', recovery: 'Read source and reconcile the operation. Never automatically replay.' } }; }
       const after = await this.snapshot(); const planned = { ...expected.files }; if (write.bytes === null) delete planned[write.path]; else planned[write.path] = write.bytes;
       const desiredRevision = await snapshotRevision(expected.identity, planned);
-      if (after.revision !== desiredRevision) return { status: 'PARTIAL', revision: after.revision, committed, error: { code: 'PARTIAL_EFFECT', message: 'Native readback did not match complete planned source.', recovery: 'Inspect current source and checkpoint; preserve manual changes.' } };
-      committed.push(write.path); expected = after;
+      if (after.revision !== desiredRevision) return { status: committed.length ? 'PARTIAL' : 'UNKNOWN', revision: after.revision, committed, uncertainPaths: [write.path], error: { code: committed.length ? 'PARTIAL_EFFECT' : 'EFFECT_UNKNOWN', message: 'Native readback did not match complete planned source.', recovery: 'Inspect current source and checkpoint; preserve manual changes.' } };
+      committed.push(write.path);
+      unverifiedPath = undefined;
+      expected = after;
     }
     return { status: 'SUCCEEDED', revision: expected.revision, committed };
     } catch (error) {
-      if (!dispatched) throw error;
-      return {status:committed.length?'PARTIAL':'UNKNOWN',revision:expected.revision,committed,error:{code:'EFFECT_UNKNOWN',message:'Native mutation was dispatched before readiness/readback failed.',recovery:'Inspect the retained checkpoint and operation; do not replay.'}};
+      if (!invoked) {
+        if (dispatchRecorded) throw new NativeEffectNotInvoked(error);
+        throw error;
+      }
+      return {status:committed.length?'PARTIAL':'UNKNOWN',revision:expected.revision,committed,
+        ...(unverifiedPath ? {uncertainPaths: [unverifiedPath]} : {}),error:{
+        code: committed.length && error instanceof BrowserError ? error.code : 'EFFECT_UNKNOWN',
+        message:'Native mutation was dispatched before a later check or readback failed.',
+        recovery:'Inspect the retained checkpoint and operation; do not replay.'}};
     }
   }
   async undoRedo(panel: 'pjs' | 'html', direction: 'undo' | 'redo', expectedRevision?: string): Promise<NativeSnapshot> { this.assertMutationReady(); const before = await this.snapshot(); if (expectedRevision && before.revision !== expectedRevision) throw new BrowserError('STALE_REVISION', 'Source changed before undo/redo.'); const manager = this.page.editorUndoManagers?.[panel]; if (!manager || typeof manager[direction] !== 'function') throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native panel undo manager unavailable.'); try { await manager[direction]!(); return await this.snapshot(); } catch { throw new BrowserError('EFFECT_UNKNOWN','Native undo/redo was dispatched; complete readback is unavailable.','Reconcile current native source before any repeat.'); } }
@@ -373,11 +422,19 @@ export class NativeAdapter {
     // A failure to persist the fence MUST prevent the native dispatch.
     if (context.assertCurrent) await context.assertCurrent();
     await context.onDispatch?.();
-    if (context.assertCurrent) {
-      if ((await this.snapshot()).revision !== intendedRevision)
-        throw new BrowserError('STALE_REVISION', 'Native draft changed before Save dispatch.');
-      this.assertMutationReady();
-      await context.assertCurrent();
+    try {
+      if (context.assertCurrent) {
+        if ((await this.snapshot()).revision !== intendedRevision)
+          throw new BrowserError('STALE_REVISION', 'Native draft changed before Save dispatch.');
+        this.assertMutationReady();
+        await context.assertCurrent();
+        this.assertMutationReady();
+        if (typeof this.page.app?.saveGenerator !== 'function')
+          throw new BrowserError('UNSUPPORTED_INTERFACE', 'Native Save method became unavailable.');
+      }
+    } catch (error) {
+      if (context.onDispatch) throw new NativeEffectNotInvoked(error);
+      throw error;
     }
     let receipt: unknown;
     try { receipt = await this.page.app.saveGenerator(); } catch { return this.unknownSave(intendedRevision); }

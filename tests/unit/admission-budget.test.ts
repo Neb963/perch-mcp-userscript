@@ -239,3 +239,42 @@ test('retained cleanup counts are evaluated only on activation/UTC rollover',()=
   db.transaction(()=>reserveAdmission(db,p,{tool:'read'},()=>[],now+86_400_000,summary));
   assert.equal(calls,2);
 });
+
+test('R04 v2 execute_js costs one bounded local compute operation, not a thousand remote children',()=>{
+  const args={js:'return 1;',access:{read:['main.pjs']}};
+  const legacy=completionReservation('execute_js',args);
+  const v2=completionReservation('execute_js',args,2);
+  assert.ok(legacy.sqlReads>=512_000 && legacy.sqlWrites>=96_000);
+  assert.ok(legacy.workerRequests>=1000);
+  assert.ok(v2.sqlReads<1500 && v2.sqlWrites<700);
+  assert.ok(v2.workerRequests<=20 && v2.durableObjectRequests<=40);
+  assert.ok(v2.logEvents<20);
+  assert.ok(BUDGET_DIMENSIONS.every(key=>Number.isSafeInteger(v2[key])&&v2[key]>=0));
+  const p=policy();p.caps.sqlWrites=900;
+  const isolated=admit(new Store(),p,now,{tool:'execute_js',args,props:{contractVersion:2}});
+  assert.ok(isolated && isolated.reservation.sqlWrites<700);
+  assert.throws(()=>admit(new Store(),p,now,{tool:'execute_js',args}),/headroom/);
+});
+
+test('R04 v2 batch estimate is bounded and monotonic in declared actions, including UTC rollover',()=>{
+  const actions=(n:number)=>Array.from({length:n},(_,i)=>({tool:i%2?'write':'read',args:{path:'main.pjs'}}));
+  const one=completionReservation('batch',{actions:actions(1)},2);
+  const ten=completionReservation('batch',{actions:actions(10)},2);
+  const max=completionReservation('batch',{actions:actions(32)},2);
+  assert.ok(one.sqlReads < ten.sqlReads && ten.sqlReads < max.sqlReads);
+  assert.ok(one.sqlWrites < ten.sqlWrites && ten.sqlWrites < max.sqlWrites);
+  assert.ok(max.sqlReads < 4000 && max.sqlWrites<1400);
+  assert.ok(max.workerRequests<=20 && max.durableObjectRequests<100);
+  assert.deepEqual(BUDGET_DIMENSIONS.filter(key=>max[key]<0||!Number.isSafeInteger(max[key])),[]);
+  assert.throws(()=>completionReservation('batch',{actions:[]},2),/1–32/);
+  assert.throws(()=>completionReservation('batch',{actions:actions(33)},2),/1–32/);
+  assert.throws(()=>completionReservation('batch',{actions:'invalid'},2),/1–32/);
+  const db=new Store(),p=policy();
+  const op:BudgetOperation={tool:'batch',props:{contractVersion:2},args:{actions:actions(10)}};
+  const first=admit(db,p,now,op)!;
+  assert.deepEqual(first.reservation,ten);
+  const outstanding=()=>[{...op,budgetReservation:ten}];
+  const second=admit(db,p,now+120_000,{tool:'read',props:{contractVersion:2}},outstanding)!;
+  assert.equal(second.status.reserved.sqlWrites,
+    p.baseline.sqlWrites+ten.sqlWrites+second.reservation.sqlWrites);
+});

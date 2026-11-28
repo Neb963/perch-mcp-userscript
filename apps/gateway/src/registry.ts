@@ -1,3 +1,4 @@
+import { DEFAULT_ACCESS_TOKEN_TTL_SECONDS, grantCleanupDue, grantIsActive, persistentAccessTokenTTL } from './oauth-lifetime.js';
 import { withSqlUsage } from "./sql-meter.js";
 import { validateRegistryCore, type RegistryCore } from "./registry-core.js";
 import { appendOAuthDiagnostic, readOAuthDiagnostics } from "./oauth-diagnostics.js";
@@ -87,7 +88,8 @@ export interface GrantRecord {
   permissions: string[];
   state: "active" | "revoked";
   clientId: string;
-  expiresAt: number;
+  expiresAt: number | null;
+  revokedAt?: number;
   revision: number;
 }
 interface Approval {
@@ -174,9 +176,10 @@ export class Registry {
     for (const key of this.catalog.due("approval",now))
       if (this.db.get<{ expiresAt: number }>(key).expiresAt < now)
         this.db.delete(key);
-    for (const key of this.catalog.due("grant",now))
-      if (this.db.get<{ expiresAt: number }>(key).expiresAt < now)
-        this.db.delete(key);
+    for (const key of this.catalog.due("grant",now)) {
+      const grant = this.db.get<GrantRecord>(key);
+      if (grant && grantCleanupDue(grant, now)) this.db.delete(key);
+    }
     for (const key of this.catalog.due("permit",now)) {
       const row = this.db.get<{ state: string; createdAt?: number }>(key);
       if (
@@ -270,6 +273,7 @@ export class Registry {
       const g = this.db.get<GrantRecord>(key);
       if (g.workspaceId === workspaceId && g.state === "active") {
         g.state = "revoked";
+        g.revokedAt = Date.now();
         g.revision++;
         this.db.put(key, g);
       }
@@ -286,7 +290,7 @@ export class Registry {
     return c;
   }
   async fetch(request: Request): Promise<Response> {
-    return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","registry",new URL(request.url).pathname,()=>this.fetchMetered(request));
+    return withSqlUsage(this.env.SQL_TELEMETRY_ENABLED==="true","registry",new URL(request.url).pathname,()=>this.fetchMetered(request),this.env.SQL_TELEMETRY_DETAIL_ENABLED==="true");
   }
   private async fetchMetered(request: Request): Promise<Response> {
     let healthStage = "SQL_INIT";
@@ -390,7 +394,7 @@ export class Registry {
         paired: c.paired,
         resources: keys
           .map((k) => this.db.get<AgentRecord|undefined>(k))
-          .filter((a):a is AgentRecord => !!a && !a.suspended)
+          .filter((a):a is AgentRecord => !!a && (!a.suspended || a.contractVersion === 2))
           .map((a) => a.endpoint),
         version: VERSION,
         schemaVersion: 1,
@@ -627,7 +631,7 @@ export class Registry {
             if (a.completionRedirect) {
               const grant = a.completionGrantId
                 ? this.db.get<GrantRecord>("grant/" + a.completionGrantId) : null;
-              return grant?.state === "active" && grant.expiresAt > Date.now()
+              return grantIsActive(grant)
                 ? { state: "completed", redirectTo: a.completionRedirect }
                 : { state: "revoked" };
             }
@@ -638,12 +642,12 @@ export class Registry {
           this.verifyApprovalScope(a, c);
           this.cleanup();
           if (
-            this.catalog.count("grant") >=
+            this.catalog.activeGrantCount(Date.now()) >=
             configuredBudget(this.env.REGISTRY_GRANT_BUDGET, 1000)
           )
             throw new ApiError(
               "QUOTA_EXCEEDED",
-              "Grant budget reached; revoke and wait for expired grants to retire.",
+              "Active Grant budget reached; explicitly revoke an unused Grant before authorizing another.",
               429,
             );
           const g: GrantRecord = {
@@ -656,7 +660,7 @@ export class Registry {
               audience: a.audience, credentialEpoch: a.credentialEpoch } : {}),
             state: "active",
             clientId: a.clientId,
-            expiresAt: Date.now() + 30 * 86400000,
+            expiresAt: a.contractVersion === 2 ? null : Date.now() + 30 * 86400000,
             revision: 1,
           };
           a.state = "consumed";
@@ -741,6 +745,7 @@ export class Registry {
         const g = this.db.get<GrantRecord>("grant/" + grantId);
         if (g && g.state === "active") {
           g.state = "revoked";
+          g.revokedAt = Date.now();
           g.revision++;
           this.db.put("grant/" + g.id, g);
         }
@@ -764,6 +769,18 @@ export class Registry {
         ),
       );
     }
+    // Token renewal authenticates consent, not current execution eligibility.
+    if (path === "/internal/oauth/token-authorize") {
+      const b = await parseBody(request);
+      return json(this.db.transaction(() => {
+        if ((b.props as AuthProps | undefined)?.contractVersion === 2) {
+          this.authenticateConnector(b, true);
+          return { ok: true };
+        }
+        this.authorize(b);
+        return { ok: true };
+      }));
+    }
     if (path === "/internal/authorize") {
       const b = await parseBody(request);
       if ((b.props as AuthProps | undefined)?.contractVersion === 2 && b.target === undefined)
@@ -786,8 +803,26 @@ export class Registry {
         const w = resolveTarget(this.db, agent.id, args.target);
         if (args.verifySource)
           throw new ApiError("UPGRADE_REQUIRED", "Verified browser source is unavailable during contract preparation.", 409);
-        return { ...common, ...projectAssignment(w, grant.permissions), sourceRevision: null,
-          localRevision: null, previewRevision: null, savedRevision: null };
+        const readable = grant.permissions.includes('READ_SOURCE') && w.permissions.includes('READ_SOURCE');
+        const observed = w.observation?.epoch===w.epoch ? w.observation : undefined;
+        const reason = readable ? 'NOT_VERIFIED_IN_REGISTRY' : 'SCOPE_DENIED';
+        const revision = {value:null,verified:false,reason};
+        const projection=projectAssignment(w,grant.permissions);
+        return { ...common, ...projection,
+          sourceRevision:revision,localRevision:revision,previewRevision:revision,savedRevision:revision,
+          ...(args.detail === true ? {
+            diagnostics: {
+              observationEpoch:readable?observed?.epoch??null:null,
+              bindingEpoch:readable?w.epoch:null,
+              observationAgeMs:observed?Math.max(0,Date.now()-observed.observedAt):null,
+              observationVerification:'HEARTBEAT_ONLY',
+              blockers:[...(!w.binding?['UNBOUND']:[]),...(w.paused?['PAUSED']:[]),
+                ...(w.transition?['TRANSITION_PENDING']:[]),
+                ...(!observed?['NO_OBSERVATION']:observed.observedAt+60_000<Date.now()?['STALE_HEARTBEAT']:[])],
+            },
+            negotiatedLimits: {maxWorkspaces:50,maxFiles:1000,maxBatchActions:32,
+              maxInlineResultBytes:256*1024,maxStagedFileBytes:16*1024*1024},
+          } : {}) };
       }));
     }
     if (path === '/api/v1/tab/rebind-proof') {
@@ -811,6 +846,29 @@ export class Registry {
           credentialEpoch: core.credentialEpoch, expiresAt: Date.now() + 30_000 };
         this.db.put(bindingProofKey(w.id), row);
         return { proof, expiresAt: row.expiresAt };
+      }));
+    }
+    if (path === '/internal/operator-restore-fence') {
+      const b = await parseBody(request, 4096);
+      return json(this.db.transaction(() => {
+        const core = this.core(), w = requireAssignment(this.getWorkspace(id(b.workspaceId)));
+        this.requireDevelopmentContract(core);
+        if (!w.binding || w.transition || core.paused || w.paused || w.epoch !== b.epoch ||
+            w.bindingRevision !== b.bindingRevision || core.credentialEpoch !== b.credentialEpoch ||
+            !w.permissions.includes('WRITE_SOURCE'))
+          throw new ApiError('SCOPE_DENIED', 'Exact Operator restore authority changed.', 403);
+        const operationId = id(b.operationId);
+        if (this.db.get('terminal-notice/' + w.id + '/' + operationId) ||
+            this.db.get('resolution/' + w.id + '/' + operationId))
+          throw new ApiError('CONFLICT', 'The exact Operator restore is already terminal.', 409);
+        const key = 'reservation/' + w.binding.generatorId;
+        const current = this.db.get<{operationId: string; workspaceId: string; epoch?: number; operatorRestore?: boolean}>(key);
+        if (current?.operatorRestore && current.operationId === operationId &&
+            current.workspaceId === w.id && current.epoch === w.epoch) return {operationId};
+        if (current || b.action !== 'acquire')
+          throw new ApiError('TRANSITION_BLOCKED', 'An exact Operator restore writer reservation is unavailable.', 409);
+        this.db.put(key, {operationId, workspaceId: w.id, epoch: w.epoch, operatorRestore: true});
+        return {operationId};
       }));
     }
     if (path === "/internal/lease-check") {
@@ -906,11 +964,13 @@ export class Registry {
         const operationId = id(b.operationId);
         const key = 'permit/' + operationId;
         const parent = this.db.get<{workspaceId: string; epoch: number; state: string; target?: string;
-          grantId?: string; segments?: SegmentRequest[]} | undefined>(key);
+          grantId?: string; segments?: SegmentRequest[]; transferRecoveryOnly?: true} | undefined>(key);
         if (!parent || parent.state !== 'consumed' || parent.workspaceId !== w.id || parent.grantId !== grant.id ||
             parent.target !== b.target || parent.epoch !== w.epoch || b.epoch !== w.epoch ||
             b.bindingRevision !== w.bindingRevision)
           throw new ApiError('STALE_EPOCH', 'Segment has no current consumed parent authority.', 409);
+        if (parent.transferRecoveryOnly)
+          throw new ApiError('SCOPE_DENIED', 'Transfer recovery has no effect-capable segment authority.', 403);
         const previous = parent.segments ?? [];
         if (segment.sequence !== previous.length || previous.length >= 128)
           throw new ApiError('CONFLICT', 'Segment permit is already consumed or out of sequence.', 409);
@@ -950,14 +1010,16 @@ export class Registry {
               );
             return result;
           }
+          const transferRecoveryOnly = b.transferRecoveryOnly === true && w.contractVersion === 2 && b.tool === 'write';
           this.db.put("permit/" + operationId, {
             workspaceId: w.id,
             epoch: w.epoch,
             createdAt: Date.now(),
             state: "consumed",
             ...(result.grant.contractVersion === 2 ? {target: b.target, grantId: result.grant.id} : {}),
+            ...(transferRecoveryOnly ? {transferRecoveryOnly: true} : {}),
           });
-          if (requiresGeneratorReservation(String(b.tool ?? ''), b.mutating === true) && w.binding) {
+          if (!transferRecoveryOnly && requiresGeneratorReservation(String(b.tool ?? ''), b.mutating === true) && w.binding) {
             const key = "reservation/" + w.binding.generatorId,
               existing = this.db.get<{
                 workspaceId: string;
@@ -1077,10 +1139,20 @@ export class Registry {
       throw new ApiError("NOT_FOUND", "Route not found.", 404);
     const hash = await digest(bearer(request));
     this.auth(hash);
-    if (path.startsWith("/api/v1/admin/resources"))
+    if (path.startsWith("/api/v1/admin/resources")) {
+      // v2 retires active Resource authoring and prevents lazy seed on fresh
+      // installations. Historical bytes remain accessible through explicit
+      // read-only export; no automatic migration, mutation or deletion.
+      if (this.core().assignmentContractVersion === 2) {
+        if (path !== "/api/v1/admin/resources/export" || request.method !== "GET")
+          throw new ApiError("UPGRADE_REQUIRED", "The legacy Resource interface is retired for v2.", 410);
+        if (this.db.get("library") === undefined && !resourceLibraryIsNative(this.db))
+          throw new ApiError("NOT_FOUND", "No historical Resource archive is stored.", 404);
+      }
       return resourceAdmin(request, this.db, () => {
         this.auth(hash);
       });
+    }
     if (request.method === "GET") return this.readAdmin(path, url);
     const expectedMethod =
       /^\/api\/v1\/admin\/(workspaces|agents|connectors)\/[^/]+$/.test(path)
@@ -1367,6 +1439,9 @@ export class Registry {
         return { current } as const;
       }
       this.validateTransition(current, action, input, core);
+      if (current.binding && this.db.get<{operatorRestore?: boolean}>(
+          'reservation/' + current.binding.generatorId)?.operatorRestore)
+        throw new ApiError('TRANSITION_BLOCKED', 'The exact Operator restore must settle before the Binding changes.', 409);
       if (current.binding && !input.acknowledgeDirty &&
           !(current.observation?.epoch === current.epoch && current.observation.dirty === false &&
             current.observation.observedAt + 60_000 > Date.now()))
@@ -1455,7 +1530,7 @@ export class Registry {
       throw new ApiError("AUTH_REQUIRED", "Grant context required.", 401);
     const c = this.core(),
       g = this.db.get<GrantRecord>("grant/" + id(props.grantId));
-    if (!g || g.contractVersion !== undefined || g.state !== "active" || g.expiresAt <= Date.now())
+    if (!g || g.contractVersion !== undefined || !grantIsActive(g))
       throw new ApiError("REVOKED", "Grant is revoked or expired.", 403);
     const a = this.getAgent(g.agentId),
       w = this.getWorkspace(g.workspaceId);
@@ -1523,15 +1598,16 @@ export class Registry {
     if (this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true' || core.assignmentContractVersion !== 2)
       throw new ApiError('UPGRADE_REQUIRED', 'The v2 assignment contract is disabled.', 409);
   }
-  private authenticateConnector(b: Record<string, unknown>): { agent: AgentRecord; grant: GrantRecord; core: Core } {
+  private authenticateConnector(b: Record<string, unknown>, renewal = false): { agent: AgentRecord; grant: GrantRecord; core: Core } {
     const props = b.props as AuthProps | undefined;
     const core = this.core();
-    this.requireDevelopmentContract(core);
+    if (!renewal) this.requireDevelopmentContract(core);
+    else if (core.assignmentContractVersion !== 2)
+      throw new ApiError('UPGRADE_REQUIRED', 'Connector authority is unavailable.', 409);
     if (!props || props.contractVersion !== 2)
       throw new ApiError('AUTH_REQUIRED', 'A v2 Grant is required.', 401);
     const grant = this.db.get<GrantRecord | undefined>('grant/' + id(props.grantId));
-    if (!grant || grant.contractVersion !== 2 || grant.state !== 'active' ||
-        !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= Date.now() ||
+    if (!grant || grant.contractVersion !== 2 || !grantIsActive(grant) ||
         grant.agentId !== props.agentId || grant.agentId !== b.agentId ||
         grant.credentialEpoch !== core.credentialEpoch || grant.credentialEpoch !== props.credentialEpoch ||
         grant.clientId !== props.clientId || grant.audience !== props.audience ||
@@ -1541,9 +1617,11 @@ export class Registry {
         grant.workspaceId !== '' || grant.bindingRevision !== 0)
       throw new ApiError('REVOKED', 'Connector Grant is unavailable.', 403);
     const agent = this.getAgent(grant.agentId);
-    if (agent.contractVersion !== 2 || agent.suspended || agent.endpoint !== grant.audience ||
+    if (agent.contractVersion !== 2 || agent.endpoint !== grant.audience ||
         agent.endpoint !== core.issuer + '/mcp/' + agent.id)
       throw new ApiError('REVOKED', 'Connector Grant is unavailable.', 403);
+    if (agent.suspended && !renewal)
+      throw new ApiError('PAUSED', 'Connector execution is suspended; authorization is retained.', 403);
     const ceiling = permissionCeiling(agent.permissionCeiling);
     const granted = permissionCeiling(grant.permissions);
     return { agent, grant: { ...grant, permissions: granted.filter((value) => ceiling.includes(value)) }, core };
@@ -1586,7 +1664,24 @@ export class Registry {
       return json({
         revision: c.revision,
         policyRevision: c.policyRevision,
-        ...(this.env.DEVELOPMENT_CONTRACT_V2_ENABLED === 'true' ? { assignmentContractVersion: 2 } : {}),
+        assignmentContractVersion: c.assignmentContractVersion ?? 1,
+        rollout: {
+          developmentContractV2Enabled: this.env.DEVELOPMENT_CONTRACT_V2_ENABLED === 'true',
+          developmentContractV2ExecutionEnabled: this.env.DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED === 'true',
+          canonicalStorageMode: this.env.CANONICAL_STORAGE_MODE ?? 'legacy',
+          pushNotificationsEnabled: this.env.PUSH_NOTIFICATIONS_ENABLED === 'true',
+          binaryPayloadsEnabled: this.env.BINARY_PAYLOADS_ENABLED === 'true',
+          admissionBudgetEnabled: this.env.ADMISSION_BUDGET_ENABLED === 'true',
+          actualPixelCapture: 'UNSUPPORTED_INTERFACE',
+          accountQuotaKnown: false,
+          oauthGrantPersistence: c.assignmentContractVersion===2?'UNTIL_REVOKED':'LEGACY_FINITE',
+          oauthAccessTokenTtlSeconds: c.assignmentContractVersion===2 || this.env.DEVELOPMENT_CONTRACT_V2_ENABLED==='true' ?
+            persistentAccessTokenTTL(this.env.OAUTH_ACCESS_TOKEN_TTL_SECONDS) : 900,
+          oauthAccessTokenQualification: this.env.OAUTH_ACCESS_TOKEN_TTL_SECONDS===undefined?
+            'DEFAULT_BROWSER_TIMER_SAFE' :
+            persistentAccessTokenTTL(this.env.OAUTH_ACCESS_TOKEN_TTL_SECONDS)>DEFAULT_ACCESS_TOKEN_TTL_SECONDS?
+            'EXPERIMENTAL_EXTERNAL_CLIENT_REQUIRED':'EXPLICIT_TIMER_SAFE',
+        },
         paused: c.paused,
         paired: c.paired,
         version: VERSION,
@@ -2006,6 +2101,7 @@ export class Registry {
       if (!g) throw new ApiError("NOT_FOUND", "Grant not found.", 404);
       revision(b.expectedRevision, g.revision);
       g.state = "revoked";
+      g.revokedAt = Date.now();
       g.revision++;
       this.db.put("grant/" + g.id, g);
       return g;

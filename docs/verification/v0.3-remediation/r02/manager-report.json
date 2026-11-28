@@ -1,0 +1,236 @@
+{
+  "v1": {
+    "selected": "Workspaces",
+    "tabNames": [
+      "Workspaces",
+      "Agents",
+      "Library",
+      "Activity",
+      "Recovery",
+      "Settings"
+    ],
+    "panel": "Workspaces\n\nConnection: connected\n\nEditor connected\n\nThis tab has a verified lease. Leave it open for the agent.\n\nCreate another Workspace\nFilter\nRefresh\nWorkspace\tBinding / connection\tActions\n\n01 \u00b7 Image studio\n\nw-1\n\n\t\n\nimage-studio-1 \u00b7 ID generator-1 \u00b7 draft draft-1\n\nActive\n\n\t\nPause\nReconnect\nWorkspace settings\n\n\n02 \u00b7 Story generator\n\nw-2\n\n\t\n\nstory-generator-2 \u00b7 ID generator-2 \u00b7 draft draft-1\n\nActive\n\n\t\nPause\nReconnect\nWorkspace settings\n\n\n03 \u00b7 Usage analytics\n\nw-3\n\n\t\n\nusage-analytics-3 \u00b7 ID generator-3 \u00b7 draft draft-1\n\nActive\n\n\t\nPause\nReconnect\nWorkspace settings\n\n\n04 \u00b7 Game studio\n\nw-4\n\n\t\n",
+    "enabled": [
+      "",
+      "Refresh",
+      "Workspace",
+      "Binding / connection",
+      "Actions",
+      "Pause",
+      "Reconnect",
+      "",
+      "",
+      "",
+      "Pause",
+      "Reconnect",
+      "",
+      "",
+      "",
+      "Pause",
+      "Reconnect",
+      "",
+      "",
+      ""
+    ],
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/state"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/workspaces"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/agents"
+      }
+    ]
+  },
+  "v2": {
+    "selected": "Workspaces",
+    "tabNames": [
+      "Workspaces",
+      "Connectors",
+      "Activity",
+      "Recovery",
+      "Settings"
+    ],
+    "panel": "Workspaces\nWorkspace name\nCreate Workspace\nFilter\nRefresh\nWorkspace\tBinding and status\tActions\n\n01 \u00b7 Image studio\n\nChatGPT 01\n\n\t\n\nimage-studio-1 \u00b7 generator-1 \u00b7 draft draft-1\n\nLast heartbeat verified\n\nDraft clean\n\n\t\n\nThis tab \u00b7 new-image-workshop \u00b7 generator-new \u00b7 draft draft-2026\n\nReassign to this tabReconnectDetachPause\nPermissions\nDestination Connector\nChatGPT 02\nChatGPT 03\nChatGPT 04\nChatGPT 06\nChatGPT 07\nChatGPT 08\nChatGPT 09\nChatGPT 10\nChatGPT 11\nChatGPT 12\nTransferUnassign\n\n\n02 \u00b7 Story generator\n\nChatGPT 02\n\n\t\n\nstory-generator-2 \u00b7 generator-2 \u00b7 draft draft-1\n\nLast heartbeat verified\n\nDr",
+    "enabled": [
+      "Create Workspace",
+      "Refresh",
+      "Workspace",
+      "Binding and status",
+      "Actions",
+      "Reassign to this tab",
+      "Reconnect",
+      "Detach",
+      "Pause",
+      "",
+      "Transfer",
+      "Unassign",
+      "Reassign to this tab",
+      "Reconnect",
+      "Detach",
+      "Pause",
+      "",
+      "Transfer",
+      "Unassign",
+      "Reassign to this tab"
+    ],
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/state"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/workspaces"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/connectors"
+      }
+    ]
+  },
+  "outage": {
+    "selected": "Workspaces",
+    "tabNames": [
+      "Workspaces",
+      "Agents",
+      "Library",
+      "Activity",
+      "Recovery",
+      "Settings"
+    ],
+    "panel": "Workspaces\n\nGateway unavailable. Remote actions require a fresh connection.",
+    "enabled": [],
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/state"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/workspaces"
+      }
+    ]
+  },
+  "unpaired": {
+    "selected": "Settings",
+    "tabNames": [
+      "Workspaces",
+      "Agents",
+      "Library",
+      "Activity",
+      "Recovery",
+      "Settings"
+    ],
+    "panel": "Setup and Settings\n\nUserscript 0.3.0 \u00b7 Gateway unverified \u00b7 schema unverified\n\nCandidate verification gate: native preview execution, unsaved preview pixel capture, and external provider effects remain gated until their required Firefox/provider evidence passes. A connected gateway does not establish functional parity.\n\nInstallation steps\n\nDeploy the released Cloudflare gateway package with its bindings and a unique BOOTSTRAP_SECRET. No local service is needed.\n\nEnter the exact HTTPS gateway origin. Check compatibility, then pair with its one-time secret.\n\nOpen Workspaces and attach the curren",
+    "enabled": [
+      "Check gateway",
+      "Pair installation",
+      "",
+      "Export complete diagnostics (OAuth + network)",
+      "Read-only editor probe",
+      "Export settings",
+      "Export source backup separately",
+      "Export unpublished Resource drafts",
+      "Restore source backup\u2026",
+      "Import settings\u2026",
+      ""
+    ],
+    "requests": []
+  },
+  "warm-outage-connectors": {
+    "selected": "Connectors",
+    "tabNames": [
+      "Workspaces",
+      "Connectors",
+      "Activity",
+      "Recovery",
+      "Settings"
+    ],
+    "panel": "Connectors\n\nGateway unavailable. Remote actions require a fresh connection.",
+    "enabled": [],
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/state"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/workspaces"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/connectors"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/state"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/workspaces"
+      }
+    ]
+  },
+  "warm-outage-recovery": {
+    "selected": "Recovery",
+    "tabNames": [
+      "Workspaces",
+      "Connectors",
+      "Activity",
+      "Recovery",
+      "Settings"
+    ],
+    "panel": "Recovery\n\nGateway unavailable. Remote actions require a fresh connection.",
+    "enabled": [],
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/state"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/workspaces"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/connectors"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/state"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/workspaces"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/state"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/admin/workspaces"
+      }
+    ]
+  },
+  "confirmationCount": 1,
+  "confirmationWrites": [
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/workspaces/w-2/rebind"
+    }
+  ],
+  "approvalText": "oauth \u00b7 4821\n\nConnector ChatGPT 01 \u00b7 c-1\n\nClient fixture-client-new \u00b7 expires 11/28/2026, 1:47:08 AM\n\n\t\n\nAudience: https://fixture.invalid/mcp/c-1\n\nApplication permission ceiling: READ_SOURCE, WRITE_SOURCE, PREVIEW_CONTROL, PREVIEW_EXECUTE, COMPUTE, SAVE\n\nRedirect: https://fixture.invalid/oauth/callback\n\nOAuth scopes: mcp, offline_access\n\nDigest: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n\n\t\n\npending\n\nApprove exact request\nDeny",
+  "obsoleteConfirmationWrites": 0,
+  "mismatchedApprovalDisabled": true,
+  "lostTransitionWritesAcrossRemount": 1,
+  "localRecoveryExportGatewayRequests": 0,
+  "offlinePrivateFileStaged": true,
+  "externalRequests": 0
+}

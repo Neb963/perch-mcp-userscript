@@ -46,3 +46,21 @@ export async function sha256(value: string | Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
 }
+
+/** Files cannot share a name or occupy an ancestor directory in the same plan. */
+export function assertNoFilePathConflicts(paths: readonly string[]): void {
+  assertNoPathCollisions(paths);
+  const keys = new Set(paths.map(path => path.toLowerCase()));
+  for (const key of keys) {
+    const parts = key.split('/');
+    for (let depth = 2; depth < parts.length; depth++) {
+      if (keys.has(parts.slice(0, depth).join('/'))) {
+        throw new ToolError('PATH_DENIED', 'File and directory paths overlap.');
+      }
+    }
+  }
+}
+
+export function pathMatchesRules(path: string, rules: readonly string[]): boolean {
+  return rules.some(rule => rule.endsWith('/') ? path.startsWith(rule) : path === rule);
+}

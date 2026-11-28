@@ -554,3 +554,33 @@ test("indexed historical cleanup cannot hide an expired active operation",async(
    assert.ok(index.due(Date.now()).some(o=>o.operationId==="fixture-operation"));
  }finally{f.db.close();}
 });
+
+test("R04 new canonical records use one composite SQLite B-tree, existing legacy rowid tables stay readable", () => {
+  const fresh=fixture(),legacy=fixture();
+  try {
+    const db=new SqlRecords(fresh.storage);
+    const shape=fresh.db.prepare("SELECT wr FROM pragma_table_list WHERE name='records'").get() as {wr:number};
+    assert.equal(shape.wr,1,"Fresh canonical storage must use WITHOUT ROWID");
+    const value={id:'g1',contents:'x'.repeat(70000),emoji:'🎯'};
+    db.put('grant/g1',value);
+    db.enableJournalIdleInvalidation();
+    db.put('workspace-journal-idle/v1',{safe:true});
+    db.put('operation/one',{phase:'ADMITTED'});
+    assert.equal(db.get('workspace-journal-idle/v1'),undefined,
+      'Native journal trigger must invalidate the exact hint');
+    assert.deepEqual(new SqlRecords(fresh.storage).get('grant/g1'),value);
+    db.delete('grant/g1');
+    assert.equal(db.get('grant/g1'),undefined);
+
+    legacy.db.exec("CREATE TABLE records (key TEXT NOT NULL, part INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(key, part))");
+    legacy.db.exec("INSERT INTO records(key,part,value) VALUES('core',0,'{\"revision\":7}')");
+    const prior=legacy.db.prepare("SELECT wr FROM pragma_table_list WHERE name='records'").get() as {wr:number};
+    assert.equal(prior.wr,0);
+    const writer=new SqlRecords(legacy.storage);
+    assert.equal((legacy.db.prepare("SELECT wr FROM pragma_table_list WHERE name='records'").get() as {wr:number}).wr,0,
+      'Existing physical schema must not be silently migrated');
+    assert.deepEqual(writer.get('core'),{revision:7});
+    writer.put('core',{revision:8});
+    assert.deepEqual(writer.get('core'),{revision:8});
+  } finally { fresh.db.close(); legacy.db.close(); }
+});

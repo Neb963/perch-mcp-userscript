@@ -41,6 +41,39 @@ jobs:
         run: npm run typecheck
       - name: Unit and integration tests
         run: timeout --signal=TERM --kill-after=10s 240s npm test
+      - name: Offline v2 capacity measurement (no provider/deployment)
+        env:
+          BENCHMARK_HISTORIES: "0"
+          BENCHMARK_NATIVE: "true"
+          BENCHMARK_MULTI_CONNECTOR: "true"
+          BENCHMARK_TRACE: "true"
+          BENCHMARK_SQL_PROFILE: "true"
+        run: |
+          timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/benchmark-development-v2.ts "$RUNNER_TEMP/remediation-native.json"
+          BENCHMARK_SQL_PROFILE=false BENCHMARK_NATIVE=false timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/benchmark-development-v2.ts "$RUNNER_TEMP/remediation-legacy.json"
+      - name: Publish offline cost measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: perch-mcp-remediation-cost-evidence
+          path: |
+            ${{ runner.temp }}/remediation-native.json
+            ${{ runner.temp }}/remediation-legacy.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Enumerate atomic requirements (strict release gate remains separate)
+        env:
+          # GITHUB_SHA is often the synthetic PR merge commit even when checkout
+          # explicitly selects the source head. Validate against that head.
+          PERCH_EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          node scripts/audit-requirements.mjs --out "$RUNNER_TEMP/requirement-coverage.json"
+      - name: Publish atomic requirement inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: perch-mcp-requirement-inventory
+          path: ${{ runner.temp }}/requirement-coverage.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Build userscript and Worker package
         run: npm run build
       - name: Verify release package hashes

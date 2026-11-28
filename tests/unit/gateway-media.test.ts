@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { projectMcpImages } from "../../apps/gateway/src/mcp-media.js";
+import { ApiError, omitDevelopmentResult } from "../../apps/gateway/src/common.js";
 const png =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6N2sAAAAASUVORK5CYII=";
 function outcome(tool = "read_image", base64 = png, mimeType = "image/png") {
@@ -65,4 +66,33 @@ test("image projection rejects malformed MIME, base64, identity and cumulative o
     () => projectMcpImages(outcome("read_image", "A".repeat(1400000))),
     /1 MiB/,
   );
+});
+
+test("S03-010 rejected image projection keeps the original success receipt and hides all raw bytes", () => {
+  const secret = "PRIVATE-SOURCE-FIXTURE-MUST-NEVER-ESCAPE";
+  const original: Record<string,unknown> = {
+    ...outcome("capture_page_image", png, "image/jpeg"),
+    resolution: {internal: secret},
+    lateObservation: {internal: secret},
+    result: {providerPayload: secret},
+  };
+  const raw = original.data as Record<string,unknown>;
+  const terminal = raw.data as Record<string,unknown>;
+  terminal.hiddenOriginalSource = secret;
+  const before = structuredClone(original);
+  assert.throws(() => projectMcpImages(original),
+    (error:unknown) => error instanceof ApiError && error.code === "INVALID_INPUT");
+  const omitted = omitDevelopmentResult(original, "UNAVAILABLE");
+  assert.equal(omitted.status, "SUCCEEDED");
+  assert.equal(omitted.operationId, "image-op");
+  assert.equal(omitted.result, null);
+  assert.equal(omitted.resultAvailability, "UNAVAILABLE");
+  assert.deepEqual(omitted.error, {
+    code: "RESULT_UNAVAILABLE",
+    message: "The requested result bytes cannot be delivered.",
+    retryable: false,
+    recovery: "Inspect the retained operation receipt. Do not replay this intent to recover its result.",
+  });
+  assert.doesNotMatch(JSON.stringify(omitted), /PRIVATE-SOURCE-FIXTURE|iVBORw0KGgo/);
+  assert.deepEqual(original, before, "projection and redaction must not mutate the durable operation summary");
 });

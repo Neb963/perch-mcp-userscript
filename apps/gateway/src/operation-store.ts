@@ -26,6 +26,17 @@ const BOOLEANS = new Set(['terminalNotified','mutating']);
 const PHASES = ['ADMITTED','DISPATCHED','RUNNING','SUCCEEDED','REJECTED','UNKNOWN','PARTIAL','CANCELLED'];
 const TERMINAL = ['SUCCEEDED','REJECTED','UNKNOWN','PARTIAL','CANCELLED'];
 const PAYLOADS = ['args','result'] as const;
+const INLINE_READ_ARGS_MAX_BYTES=512;
+/** No native source or mutation arguments share the metadata row. Only
+ * small nonmutating read selectors are eligible, with byte-sized and
+ * schema-checked representation. The exact bytes remain canonical. */
+function inlineReadArgs(value:StoredOperation):boolean {
+  if(value.tool!=='read'||(value as {mutating?:unknown}).mutating!==false||
+     !object(value.args))return false;
+  const encoded=JSON.stringify(value.args);
+  return typeof encoded==='string' &&
+    new TextEncoder().encode(encoded).byteLength<=INLINE_READ_ARGS_MAX_BYTES;
+}
 const TABLE = 'operation_native_v2';
 const RECOVERY = '(pending=1 OR hold=1 OR leaseBlock=1)';
 const WEEK = 7 * 86400000;
@@ -61,9 +72,12 @@ function shape(value:StoredOperation): Record<string,string|number|null> {
     if(own(input,field)&&v!==undefined)presence.push(field);
     delete input[field];
   }
-  delete input.args;delete input.result;
+  const inlineArgs=inlineReadArgs(value);
+  if(!inlineArgs)delete input.args;
+  delete input.result;
   row.context=JSON.stringify(input);row.presence=JSON.stringify(presence);
-  row.hasArgs=Number(value.args!==undefined);row.hasResult=Number(value.result!==undefined);
+  row.hasArgs=Number(value.args!==undefined&&!inlineArgs);
+  row.hasResult=Number(value.result!==undefined);
   const terminal=value.terminalAt??0;
   const active=terminal?0:1;
   const pending=terminal&&!value.terminalNotified?1:0;
@@ -94,8 +108,13 @@ function decode<T extends StoredOperation>(row:NativeRow):T {
     const has=row[kind==='args'?'hasArgs':'hasResult'];
     const payload=row[kind+'Value'];
     if(has!==0&&has!==1)corrupt();
-    if(has===1){if(payload===null||payload===undefined)corrupt();value[kind]=parsed(payload);}
-    else if(payload!==null&&payload!==undefined)corrupt();
+    if(has===1){
+      if(payload===null||payload===undefined||own(context,kind))corrupt();
+      value[kind]=parsed(payload);
+    } else if(payload!==null&&payload!==undefined)corrupt();
+    if(kind==='args'&&has===0&&own(context,'args')&&!inlineReadArgs(value as unknown as StoredOperation))
+      corrupt();
+    if(kind==='result'&&own(context,'result'))corrupt();
   }
   validate(value);
   return value as T;
@@ -150,7 +169,11 @@ export class OperationStore<T extends StoredOperation> {
       this.db.query(`CREATE INDEX IF NOT EXISTS operation_native_active_v2 ON ${TABLE}(active,sequence) WHERE active=1`);
       this.db.query(`CREATE INDEX IF NOT EXISTS operation_native_recovery_v2 ON ${TABLE}(created) WHERE ${RECOVERY}`);
       this.db.query(`CREATE INDEX IF NOT EXISTS operation_native_due_v2 ON ${TABLE}(due) WHERE due IS NOT NULL`);
-      this.db.query(`CREATE INDEX IF NOT EXISTS operation_native_terminal_v2 ON ${TABLE}(terminal DESC)`);
+      // Active operations have terminal=NULL. Keep them out of the terminal
+      // ordering index so admitting/dispatching an operation cannot rewrite
+      // that B-tree before a genuine terminal transition. Existing old-index
+      // databases remain compatible; IF NOT EXISTS never replaces them.
+      this.db.query(`CREATE INDEX IF NOT EXISTS operation_native_terminal_v2 ON ${TABLE}(terminal DESC) WHERE terminal IS NOT NULL`);
       this.db.query(`CREATE INDEX IF NOT EXISTS operation_native_retention_v2 ON ${TABLE}(retention) WHERE retention IS NOT NULL`);
       for(const [event,row]of [['INSERT','NEW'],['DELETE','OLD']]as const) {
         this.db.query(`CREATE TRIGGER IF NOT EXISTS operation_migration_${event.toLowerCase()}_v2 AFTER ${event} ON records WHEN ${row}.key LIKE 'operation/%' BEGIN INSERT INTO operation_migration_dirty_v2 VALUES(${row}.key) ON CONFLICT(key) DO NOTHING; END`);
@@ -231,8 +254,13 @@ export class OperationStore<T extends StoredOperation> {
       if(changed.length)this.db.query(`UPDATE ${TABLE} SET ${changed.map(([column])=>column+'=?').join(',')} WHERE key=?`,...changed.map(([,v])=>v),key);
     }
     for(const kind of PAYLOADS) {
-      if(value[kind]!==undefined)this.db.query(`INSERT INTO operation_${kind}_v2 VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value<>excluded.value`,key,JSON.stringify(value[kind]));
-      else this.db.query(`DELETE FROM operation_${kind}_v2 WHERE key=?`,key);
+      // A new small read selector is already preserved in context. Avoid
+      // writing an extra argument row; migrate older external rows only when
+      // necessary. No result, mutation or oversized argument is ever inline.
+      const external=kind==='args'?next.hasArgs===1:next.hasResult===1;
+      if(external)this.db.query(`INSERT INTO operation_${kind}_v2 VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value<>excluded.value`,key,JSON.stringify(value[kind]));
+      else if(previous?.[kind==='args'?'hasArgs':'hasResult']===1)
+        this.db.query(`DELETE FROM operation_${kind}_v2 WHERE key=?`,key);
     }
   }
   /** One transaction, at most 16 logical records and 1 MiB JSON plus one accepted record. */
@@ -340,7 +368,7 @@ export class OperationStore<T extends StoredOperation> {
     }else keys=this.legacy().obligationKeys();
     return keys.map(({key})=>{
       let row:{tool:string;args:string|null;reservation:string|null}|undefined;
-      if(this.native)row=this.db.query<{tool:string;args:string|null;reservation:string|null}>(`SELECT o.tool,a.value AS args,json_extract(o.context,'$.budgetReservation') AS reservation FROM ${TABLE} o LEFT JOIN operation_args_v2 a USING(key) WHERE o.key=?`,key)[0];
+      if(this.native)row=this.db.query<{tool:string;args:string|null;reservation:string|null}>(`SELECT o.tool,COALESCE(a.value,json_extract(o.context,'$.args')) AS args,json_extract(o.context,'$.budgetReservation') AS reservation FROM ${TABLE} o LEFT JOIN operation_args_v2 a USING(key) WHERE o.key=?`,key)[0];
       else {
         if(!this.legacyPartsPresent(key))corrupt();
         row=this.db.query<{tool:string;args:string|null;reservation:string|null}>("SELECT json_extract(value,'$.tool') AS tool,json_extract(value,'$.args') AS args,json_extract(value,'$.budgetReservation') AS reservation FROM (SELECT group_concat(value,'') AS value FROM (SELECT value FROM records WHERE key=? ORDER BY part))",key)[0];
@@ -362,6 +390,20 @@ export class OperationStore<T extends StoredOperation> {
   pendingFull():boolean{return this.native?this.count('pendingCount')>=128:this.legacy().pendingFull();}
   holds():boolean{return this.native?this.count('holdCount')>0:this.legacy().holds();}
   holdsFull():boolean{return this.native?this.count('holdCount')>=128:this.legacy().holdsFull();}
+  /** One canonical capacity snapshot for synchronous admission. Native counts
+   * share one durable SQLite row; there is no await between the capacity check
+   * and the atomic admission commit. Legacy keeps its original index methods. */
+  admissionCaps():{pendingFull:boolean;holdsFull:boolean;holds:boolean} {
+    if(!this.native) {
+      const old=this.legacy();
+      return {pendingFull:old.pendingFull(),holdsFull:old.holdsFull(),holds:old.holds()};
+    }
+    const row=this.db.query<{pendingCount:number;holdCount:number}>(
+      'SELECT pendingCount,holdCount FROM operation_native_stats_v2 WHERE id=1')[0];
+    if(!row || !Number.isSafeInteger(row.pendingCount) || row.pendingCount<0 ||
+        !Number.isSafeInteger(row.holdCount) || row.holdCount<0)corrupt();
+    return {pendingFull:row.pendingCount>=128,holdsFull:row.holdCount>=128,holds:row.holdCount>0};
+  }
   leaseBlocked():boolean{return this.native?this.count('leaseCount')>0:this.legacy().leaseBlocked();}
   leaseBlockers():T[]{return this.native?this.load(this.keys(`SELECT key FROM ${TABLE} WHERE ${RECOVERY} AND leaseBlock=1 ORDER BY created LIMIT 128`)):this.legacy().leaseBlockers();}
   due(now:number):T[]{return this.native?this.load(this.keys(`SELECT key FROM ${TABLE} WHERE active=1 AND due<=? ORDER BY sequence LIMIT 9`,now)).concat(this.load(this.keys(`SELECT key FROM ${TABLE} WHERE active=0 AND due IS NOT NULL AND due<=? ORDER BY due LIMIT 128`,now))):this.legacy().due(now);}

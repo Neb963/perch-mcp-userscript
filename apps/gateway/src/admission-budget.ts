@@ -40,6 +40,7 @@ export interface BudgetState {
 export interface BudgetOperation {
   tool: string;
   args?: Record<string, unknown>;
+  props?: {contractVersion?:number};
   budgetReservation?: BudgetVector;
 }
 export interface BudgetView {
@@ -105,9 +106,11 @@ export function admissionBudgetPolicy(env: BudgetEnvironment): BudgetPolicy {
   // Unknown earlier-day traffic is not silently initialized to zero. This
   // configurable margin is a local allocation assumption, never account proof.
   const defaultBaseline=Object.fromEntries(BUDGET_DIMENSIONS.map(key => [key,Math.ceil(caps[key]*0.2)])) as BudgetVector;
-  // One measured continuously active client rotates 96 times/day at 2 KV puts
-  // per rotation. Reserve 256 to include issuance and retry margin. Additional
-  // clients require an explicit Operator baseline; this is not a KV limiter.
+  // Legacy v1 uses 900-second tokens and may rotate 96 times/day at two
+  // KV puts per refresh. V2 qualifies a much longer finite access TTL but
+  // cannot infer account-wide OAuth issuance, independent clients or retries.
+  // Retain conservative 256 baseline until the operator measures account use.
+  // This Workspace-local estimate is not an account-wide KV limiter.
   defaultBaseline.kvWrites=Math.max(defaultBaseline.kvWrites,256);
   const baseline=configuredVector(env.ADMISSION_BUDGET_BASELINE_JSON,defaultBaseline,true);
   if (BUDGET_DIMENSIONS.some(key => baseline[key] > caps[key]))
@@ -119,25 +122,35 @@ export function admissionBudgetPolicy(env: BudgetEnvironment): BudgetPolicy {
  * Conservative coefficients, deliberately larger than the small-payload
  * lifecycle target. Includes bounded payload transfer, one retained late
  * observation as well as the original 512 KiB result, result retention/deletion,
- * auth, alarms and retry margin. A compute parent reserves its maximum 1000
- * child broker calls. Repeated arbitrary status traffic and other installations
+ * auth, alarms and retry margin. A legacy v1 compute parent reserves its maximum 1000
+ * remote child broker calls. V2 isolates local reads and uses declared batch segments. Repeated arbitrary status traffic and other installations
  * are outside this model and must be measured separately.
  */
-export function completionReservation(tool: string, args: Record<string,unknown> = {}): BudgetVector {
+export function completionReservation(tool: string, args: Record<string,unknown> = {}, contractVersion?: number): BudgetVector {
   const argBytes = new TextEncoder().encode(JSON.stringify(args)).byteLength;
   if (argBytes > 512 * 1024) throw new ApiError('LIMIT_EXCEEDED', 'Admission argument size exceeds transport bounds.', 413);
   const mediaBytes = tool === 'generate_music' ? 8 * 1024 * 1024
     : ['generate_image','read_image','capture_page_image'].includes(tool) ? 1024 * 1024 : 0;
   const payloadRows = Math.ceil(mediaBytes / CHUNK_BYTES) + Math.ceil((argBytes + 2 * 512 * 1024) / 32_000);
-  const childCalls = tool === 'execute_js' ? 1000 : 0;
+  const isV2 = contractVersion === 2;
+  // v1 can invoke nested remote Helper calls. v2 compute runs inside a
+  // bounded isolated Worker with a local read view and <=1 publication.
+  const childCalls = tool === 'execute_js' && !isV2 ? 1000 : 0;
+  const steps = isV2 && tool === 'batch' ?
+    Array.isArray(args.actions) && args.actions.length >= 1 && args.actions.length <= 32 ?
+      args.actions.length : -1 : isV2 ? 1 : 0;
+  if (steps < 0) throw new ApiError('INVALID_INPUT', 'v2 batch reservation requires 1–32 declared actions.');
+  // These are deliberately conservative local estimates, not billed account
+  // counters. Batch steps can incur read-view and segment authorization, but
+  // never become arbitrary 1000-child external gateway RPC fanout.
   return {
-    sqlReads: 512 + payloadRows * 16 + childCalls * 512,
-    sqlWrites: 96 + payloadRows * 12 + childCalls * 96,
+    sqlReads: 512 + payloadRows * 16 + childCalls * 512 + steps * 64,
+    sqlWrites: 96 + payloadRows * 12 + childCalls * 96 + steps * 20,
     workerRequests: 12 + Math.ceil(mediaBytes / CHUNK_BYTES) * 2 + childCalls,
-    durableObjectRequests: 24 + Math.ceil(mediaBytes / CHUNK_BYTES) * 4 + childCalls * 2,
+    durableObjectRequests: 24 + Math.ceil(mediaBytes / CHUNK_BYTES) * 4 + childCalls * 2 + steps * 2,
     durationMs: operationTimeoutMs(tool,args) + 30_000,
     storageBytes: 4096 + argBytes + 2 * 512 * 1024 + mediaBytes,
-    kvReads: 4, kvWrites: 0, logEvents: 8 + childCalls,
+    kvReads: 4, kvWrites: 0, logEvents: 8 + childCalls + steps,
   };
 }
 export function emptyCleanupSummary():RetainedCleanupSummary {
@@ -237,10 +250,10 @@ export function reserveAdmission(
       let carried = add(policy.baseline,retainedCleanup);
       for (const item of obligations)
         carried = add(carried, item.budgetReservation === undefined
-          ? completionReservation(item.tool,item.args) : vector(item.budgetReservation));
+          ? completionReservation(item.tool,item.args,item.props?.contractVersion) : vector(item.budgetReservation));
       state = {schemaVersion:1,utcDay,observedAt:effectiveNow,reserved:carried,admissions:0,retainedCleanup,cleanupSummary:cleanup};
     } else state = {...old,observedAt:effectiveNow};
-    const before = view(state,policy), reservation = completionReservation(operation.tool,operation.args);
+    const before = view(state,policy), reservation = completionReservation(operation.tool,operation.args,operation.props?.contractVersion);
     const after = view({...state,reserved:add(state.reserved,reservation)},policy);
     if (after.ratio >= 0.95 || (before.ratio >= 0.85 && costly(operation.tool)))
       throw new ApiError('QUOTA_EXCEEDED', `Local Workspace ${after.limiting} estimate would reach ${Math.ceil(after.ratio*100)}%; new admission is restricted to preserve recovery headroom.`, 429,

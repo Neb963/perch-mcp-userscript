@@ -9,7 +9,9 @@ const native = process.env.BENCHMARK_NATIVE === 'true';
 const histories = (process.env.BENCHMARK_HISTORIES ?? '0,150,999,1000').split(',').map(Number);
 assert.ok(histories.every((count,index)=>Number.isInteger(count)&&count>=0&&count<=1000&&(index===0||count>histories[index-1]!)));
 const vars = {DEVELOPMENT_CONTRACT_V2_ENABLED:'true',DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED:'true',
-  ...(native ? {CANONICAL_STORAGE_MODE:'native',BINARY_PAYLOADS_ENABLED:'true'} : {})};
+  ...(native ? {CANONICAL_STORAGE_MODE:'native',BINARY_PAYLOADS_ENABLED:'true'} : {}),
+  ...(process.env.BENCHMARK_SQL_PROFILE==='true' ? {
+    SQL_TELEMETRY_ENABLED:'true',SQL_TELEMETRY_DETAIL_ENABLED:'true'} : {})};
 const h = await createCapacityHarness(1,vars,{entryPoint:'tests/fixtures/optimization-runtime.ts'});
 const admin='/api/v1/admin';
 try {
@@ -32,16 +34,29 @@ try {
     await operation();
     samples.push({name,tag,elapsedMs:performance.now()-clock,usage:metricDelta(start,await fixtureSnapshot(h,fixture))});
   }
+  let tracePending=process.env.BENCHMARK_TRACE==='true';
   async function cycle(tool:string,args:Record<string,unknown>,effect?:'source-publication') {
+    const traced=tracePending;
+    if(traced)tracePending=false;
+    async function step<T>(name:string,fn:()=>Promise<T>):Promise<T> {
+      if(!traced)return fn();
+      const baseline=await fixtureSnapshot(h,fixture),clock=performance.now();
+      const result=await fn();
+      samples.push({name:'trace:'+name,tag:0,elapsedMs:performance.now()-clock,
+        usage:metricDelta(baseline,await fixtureSnapshot(h,fixture))});
+      return result;
+    }
     const operationKey='k2.'+Date.now()+'.'+crypto.randomUUID();
-    const admitted=await syntheticMcp(h,fixture,token,tool,{target,operationKey,...args});
+    const admitted=await step('mcp-admission',()=>syntheticMcp(h,fixture,token,tool,{target,operationKey,...args}));
     const operationId=String(admitted.operationId);
-    const polled=await h.browser(fixture,'poll',{waitMs:0});
+    const polled=await step('browser-poll',()=>h.browser(fixture,'poll',{waitMs:0}));
     assert.equal((polled.operations as Record<string,unknown>[])[0]?.operationId,operationId);
-    await h.browser(fixture,'reply',{operationId,phase:'RUNNING'});
-    if(effect)await h.browser(fixture,'segment',{operationId,segment:{sequence:0,kind:effect,digest:'a'.repeat(64)}});
-    await h.browser(fixture,'reply',{operationId,phase:'SUCCEEDED',result:{operationId,status:'SUCCEEDED',effectState:'VERIFIED',data:{fixture:true}}});
-    const status=await syntheticMcp(h,fixture,token,'operation_status',{target,operationKey});
+    await step('browser-running',()=>h.browser(fixture,'reply',{operationId,phase:'RUNNING'}));
+    if(effect)await step('browser-segment',()=>h.browser(fixture,'segment',{operationId,
+      segment:{sequence:0,kind:effect,digest:'a'.repeat(64)}}));
+    await step('browser-terminal',()=>h.browser(fixture,'reply',{operationId,phase:'SUCCEEDED',
+      result:{operationId,status:'SUCCEEDED',effectState:'VERIFIED',data:{fixture:true}}}));
+    const status=await step('mcp-status',()=>syntheticMcp(h,fixture,token,'operation_status',{target,operationKey}));
     assert.equal(status.phase,'SUCCEEDED');
   }
   const read={files:[{path:'main.pjs'}]};
@@ -56,6 +71,17 @@ try {
     for(const file of files)await cycle('write',{files:[file]},'source-publication');
   });
   await measure('one-ten-file-write',history+11,()=>cycle('write',{files},'source-publication'));
+  // Comparable 10-action heterogeneous workload versus ten separate
+  // transactions. No actual provider effect: synthetic browser replies settle
+  // the same durable MCP/Registry/Workspace lifecycle for each tool.
+  const mixed=Array.from({length:10},(_,i)=>i%2===0?
+    {tool:'read',args:{files:[{path:'main.pjs'}]}}:
+    {tool:'write',args:{files:[{path:'scratch/mixed-'+i,encoding:'utf8',content:'fixture',ifAbsent:true}]}});
+  await measure('ten-mixed-individual-actions',history+12,async()=>{
+    for(const step of mixed)await cycle(step.tool,step.args,
+      step.tool==='write'?'source-publication':undefined);
+  });
+  await measure('one-ten-action-mixed-batch',history+13,()=>cycle('batch',{actions:mixed},'source-publication'));
   for(const count of [1,5,10,20,30,50]) {
     const state=await h.get(admin+'/workspaces');
     const owned=(state.items as unknown[]).length;

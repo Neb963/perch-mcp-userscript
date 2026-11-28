@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ImageTransferHandler, IMAGE_MAX_BYTES, IMAGE_CHUNK_BYTES, IMAGE_TTL_MS, type ImageLease, type ImageOperation } from "../../apps/gateway/src/image-transfer.js";
+import { ImageTransferHandler, isImageTransferTool, IMAGE_MAX_BYTES, IMAGE_CHUNK_BYTES, IMAGE_TTL_MS, type ImageLease, type ImageOperation } from "../../apps/gateway/src/image-transfer.js";
 import { uploadImageResult } from "../../apps/userscript/src/image-transfer.js";
 import { projectMcpImages } from "../../apps/gateway/src/mcp-media.js";
 
@@ -229,4 +229,12 @@ test("malformed image expiry never becomes an unlimited-lived result", async () 
     f.op.phase="SUCCEEDED";const manifest=f.db.get<Record<string,unknown>>("image/manifest/operation/0");manifest.expiresAt=expiresAt;f.db.put("image/manifest/operation/0",manifest);
     await assert.rejects(()=>f.handler.read(uploaded.content[0]!.imageTransfer,"image/png",f.scope),/SQLITE_RECORD_CORRUPT/);
   }
+});
+
+test('R04 only image tools can create an async result-hydration/revocation window',()=>{
+  assert.deepEqual(['read_image','generate_image','capture_page_image'].map(isImageTransferTool),
+    [true,true,true]);
+  for(const tool of ['read','write','batch','operation_status','execute_js','save_generator',
+    'list_files','workspace_status','cancel_operation','fetch_generator','capture_page_image_extra'])
+    assert.equal(isImageTransferTool(tool),false,tool);
 });

@@ -361,6 +361,28 @@ test('Cold Resource marker/table loss cannot select the stale retained library s
   }
 });
 
+test('F14 clean development-only native mode never seeds or installs Resource SQL tables', async () => {
+  const f=fixture();
+  try {
+    const before=f.queries.length;
+    for (const mode of ['legacy','prepare','native'] as const) {
+      assert.deepEqual(resourceStorageMaintenance(f.db,mode,1),
+        {phase:'LEGACY',verified:false,sourcePart:0,sourceBytes:0,generation:0});
+      assert.equal(resourceStorageStatus(f.db).phase,'LEGACY');
+    }
+    const normal=f.queries.slice(before);
+    assert.equal(normal.filter(row=>['CREATE','INSERT','UPDATE','DELETE','DROP','ALTER','REPLACE']
+      .some(verb=>row.sql.trimStart().toUpperCase().startsWith(verb+' '))).length,0,
+      'No Resource schema, migration, or lifecycle writes without legacy authority.');
+    assert.deepEqual(f.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'resource_%'"),[]);
+    // If old Resource state appears later, keep the compatible migration path.
+    f.db.put('library',{schemaVersion:1,revision:0,resources:{},assignments:[]});
+    assert.equal(migrate(f.db).phase,'NATIVE');
+    assert.deepEqual(new NativeResourceLibrary(f.db).snapshot(),
+      {schemaVersion:1,revision:0,resources:{},assignments:[]});
+  } finally {f.close();}
+});
+
 test('An empty native Resource library still requires its marker while unstarted schema remains valid', async () => {
   const f=fixture();try {
     resourceStorageMaintenance(f.db,'prepare',1);

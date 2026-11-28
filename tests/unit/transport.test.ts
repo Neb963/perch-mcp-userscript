@@ -199,3 +199,27 @@ test("explicit provider SQL quota hint slows connectivity only; successful healt
   await transport.health();
   assert.equal(transport.connectivityRetryDelayMs(),0);
 });
+
+test('F26.05 nonsecret pairing instance changes on explicit credential recovery without rotating installation identity',async()=>{
+ const storage=new MemoryStore();
+ let calls=0;
+ const fetcher=(async()=>{
+   calls++;
+   return Response.json({adminCredential:'new-admin-'+calls,executionCredential:'new-exec-'+calls});
+ }) as typeof fetch;
+ const t=new GatewayTransport(storage,fetcher);
+ await t.pair('https://perch.example.workers.dev','a'.repeat(64));
+ const old=t.configuration();
+ assert.equal(old.paired,true);
+ assert.match(old.pairingInstanceId??'',/^[0-9a-f-]{36}$/);
+ await t.recover('https://perch.example.workers.dev','b'.repeat(64));
+ const next=t.configuration();
+ assert.equal(next.origin,old.origin);
+ assert.equal(next.browserInstallationId,old.browserInstallationId);
+ assert.match(next.pairingInstanceId??'',/^[0-9a-f-]{36}$/);
+ assert.notEqual(next.pairingInstanceId,old.pairingInstanceId);
+ assert.doesNotMatch(JSON.stringify(next),/new-admin|new-exec/);
+ const resumed=new GatewayTransport(storage,fetcher);
+ await resumed.initialize();
+ assert.equal(resumed.configuration().pairingInstanceId,next.pairingInstanceId);
+});

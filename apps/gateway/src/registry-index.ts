@@ -4,6 +4,9 @@ import { CanonicalActivity, type ActivityStorageMode, type ActivityMigrationStat
 type Event = Record<string,unknown>;
 type Key = { key: string };
 type Kind = "approval"|"grant"|"permit"|"terminal-notice"|"idempotency"|"workspace"|"agent"|"library";
+/** Only these kinds have hot count reads. Derived counts for all others are
+ * computed on demand from indexed rows, avoiding permit/terminal write costs. */
+const COUNTED_KINDS=new Set<Kind>(["idempotency","workspace","agent"]);
 const PREFIXES = ["approval/","grant/","permit/","terminal-notice/","idempotency/","workspace/","agent/"] as const;
 const TRACKED = (row:string) => `(${PREFIXES.map(p=>`${row}.key LIKE '${p}%'`).join(" OR ")} OR ${row}.key IN ('activity','library'))`;
 const RETENTION = 7*86400000;
@@ -26,14 +29,23 @@ export class RegistryIndex {
     if (tables.some(row => row.name === "registry_index_version_v1")) return;
     db.transaction(()=>{
       db.query("CREATE TABLE registry_entity_v1 (key TEXT PRIMARY KEY, kind TEXT NOT NULL, due INTEGER, expires INTEGER, workspace TEXT NOT NULL, state TEXT NOT NULL, hold INTEGER NOT NULL, revision INTEGER, endpoint TEXT) WITHOUT ROWID");
-      db.query("CREATE INDEX registry_kind_v1 ON registry_entity_v1(kind,key)");
+      // Fresh v1 indexes can use the canonical key prefix for bounded pages.
+      // The redundant kind/key index amplified every permit/terminal-notice
+      // UPSERT. Already initialized databases retain their old index until a
+      // separately authorized compatible migration; this is additive-safe.
       db.query("CREATE INDEX registry_due_v1 ON registry_entity_v1(kind,due) WHERE due IS NOT NULL");
-      db.query("CREATE INDEX registry_workspace_v1 ON registry_entity_v1(kind,workspace,state,hold)");
+      // Only three authoritative queries use a workspace index. Completed
+      // permits and known terminal notices cannot satisfy any of them. Fresh
+      // schemas therefore index only live grants, consumed permits and holds.
+      // Existing initialized databases retain their original covering index.
+      db.query("CREATE INDEX registry_workspace_grant_v1 ON registry_entity_v1(workspace,key) WHERE kind='grant' AND state='active'");
+      db.query("CREATE INDEX registry_workspace_permit_v1 ON registry_entity_v1(workspace,key) WHERE kind='permit' AND state='consumed'");
+      db.query("CREATE INDEX registry_workspace_hold_v1 ON registry_entity_v1(workspace,key) WHERE kind='terminal-notice' AND hold=1");
       db.query("CREATE INDEX registry_approval_v1 ON registry_entity_v1(kind,expires,key) WHERE kind='approval'");
       db.query("CREATE TABLE registry_dirty_v1 (key TEXT PRIMARY KEY) WITHOUT ROWID");
       db.query("CREATE TABLE registry_counts_v1 (kind TEXT PRIMARY KEY, count INTEGER NOT NULL) WITHOUT ROWID");
-      db.query("CREATE TRIGGER registry_count_insert_v1 AFTER INSERT ON registry_entity_v1 BEGIN INSERT INTO registry_counts_v1 VALUES(NEW.kind,1) ON CONFLICT(kind) DO UPDATE SET count=count+1; END");
-      db.query("CREATE TRIGGER registry_count_delete_v1 AFTER DELETE ON registry_entity_v1 BEGIN UPDATE registry_counts_v1 SET count=count-1 WHERE kind=OLD.kind; END");
+      db.query("CREATE TRIGGER registry_count_insert_v1 AFTER INSERT ON registry_entity_v1 WHEN NEW.kind IN ('idempotency','workspace','agent') BEGIN INSERT INTO registry_counts_v1 VALUES(NEW.kind,1) ON CONFLICT(kind) DO UPDATE SET count=count+1; END");
+      db.query("CREATE TRIGGER registry_count_delete_v1 AFTER DELETE ON registry_entity_v1 WHEN OLD.kind IN ('idempotency','workspace','agent') BEGIN UPDATE registry_counts_v1 SET count=count-1 WHERE kind=OLD.kind; END");
       db.query("CREATE TABLE registry_activity_v1 (key TEXT PRIMARY KEY, base TEXT, notice TEXT, workspace TEXT NOT NULL, phase TEXT NOT NULL, held INTEGER NOT NULL, updated INTEGER NOT NULL) WITHOUT ROWID");
       db.query("CREATE INDEX registry_activity_order_v1 ON registry_activity_v1(held DESC,updated DESC,key)");
       db.query("CREATE INDEX registry_activity_workspace_v1 ON registry_activity_v1(workspace,held DESC,updated DESC,key)");
@@ -89,14 +101,19 @@ export class RegistryIndex {
             if(!v||typeof v!=="object"||Array.isArray(v))throw new Error("SQLITE_RECORD_CORRUPT");
             let due:number|null=null, expires:number|null=null, hold=0;
             const event=v.event as Event|undefined;
-            if(kind==="approval"||kind==="grant"){due=expires=num(v.expiresAt);}
+            if(kind==="approval"||kind==="grant"){due=expires=num(v.expiresAt); if(kind==="grant"&&v.state==="revoked"&&num(v.revokedAt)!==null)due=Number(v.revokedAt)+RETENTION;}
             else if(kind==="idempotency")due=num(v.expires);
             else if(kind==="permit"&&v.state==="terminal"&&num(v.createdAt)!==null)due=Number(v.createdAt)+RETENTION;
             else if(kind==="terminal-notice"){
               const uncertain=UNCERTAIN.includes(String(v.phase));
               hold=Number(uncertain&&!event?.resolution&&event?.tool!=="set_viewport_size");
               if(!hold)due=num(v.expires);
-              this.setActivity(key.slice("terminal-notice/".length),"notice",uncertain&&event?event:null);
+              // A known-terminal immutable receipt never had an uncertain
+              // overlay. Setting a null notice would re-read canonical Activity
+              // metadata and entry without changing them. Retain explicit
+              // deletion cleanup and every UNKNOWN/PARTIAL overlay transition.
+              if(uncertain&&event)
+                this.setActivity(key.slice("terminal-notice/".length),"notice",event);
             }
             const workspace=kind==="terminal-notice"?key.split("/")[1]??"":String(v.workspaceId??"");
             const state=kind==="agent"?(v.suspended?"suspended":"active"):String(v.state??v.phase??"");
@@ -173,9 +190,36 @@ export class RegistryIndex {
   }
   due(kind:Kind,now:number):string[]{this.sync();return this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind=? AND due IS NOT NULL AND due<? ORDER BY due LIMIT 128",kind,now).map(r=>r.key);}
   nextDue():number|undefined {this.sync();const times=(["approval","grant","permit","terminal-notice","idempotency"] as const).map(kind=>this.db.query<{due:number}>("SELECT due FROM registry_entity_v1 WHERE kind=? AND due IS NOT NULL ORDER BY due LIMIT 1",kind)[0]?.due).filter((n):n is number=>n!==undefined);return times.length?Math.min(...times):undefined;}
-  count(kind:Kind):number {this.sync();return this.db.query<{count:number}>("SELECT count FROM registry_counts_v1 WHERE kind=?",kind)[0]?.count??0;}
+  count(kind:Kind):number {
+    this.sync();
+    if(COUNTED_KINDS.has(kind))
+      return this.db.query<{count:number}>("SELECT count FROM registry_counts_v1 WHERE kind=?",kind)[0]?.count??0;
+    // This non-hot path retains exact counts on both fresh and legacy schemas
+    // even if a previous binary tracked additional kinds in the side table.
+    return this.db.query<{count:number}>("SELECT count(*) AS count FROM registry_entity_v1 WHERE kind=?",kind)[0]?.count??0;
+  }
+  activeGrantCount(now:number):number {this.sync();return this.db.query<{count:number}>("SELECT count(*) AS count FROM registry_entity_v1 WHERE kind='grant' AND state='active' AND (expires IS NULL OR expires>?)",now)[0]?.count??0;}
   approvalFull(now:number):boolean {this.sync();return this.db.query("SELECT key FROM registry_entity_v1 WHERE kind='approval' AND expires>? ORDER BY expires LIMIT 1 OFFSET 99",now).length>0;}
-  page(kind:Kind,offset:number,now:number):string[]{this.sync();return (kind==="approval"?this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind=? AND expires>? ORDER BY key LIMIT 100 OFFSET ?",kind,now,offset):this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind=? ORDER BY key LIMIT 100 OFFSET ?",kind,offset)).map(r=>r.key);}
+  page(kind:Kind,offset:number,now:number):string[]{
+    this.sync();
+    // Legacy Library is one canonical singleton, not a prefix namespace.
+    if(kind==="library"){
+      const singleton=this.db.query<{key:string;kind:string}>(
+        "SELECT key,kind FROM registry_entity_v1 WHERE key='library' LIMIT 1");
+      if(singleton.some(row=>row.kind!=="library"))throw new Error("SQLITE_RECORD_CORRUPT");
+      return offset===0?singleton.map(row=>row.key):[];
+    }
+    const prefix=kind+"/";
+    const rows=kind==="approval"?
+      this.db.query<{key:string;kind:string}>("SELECT key,kind FROM registry_entity_v1 WHERE key>=? AND key<? AND expires>? ORDER BY key LIMIT 100 OFFSET ?",
+        prefix,prefix+"\uffff",now,offset):
+      this.db.query<{key:string;kind:string}>("SELECT key,kind FROM registry_entity_v1 WHERE key>=? AND key<? ORDER BY key LIMIT 100 OFFSET ?",
+        prefix,prefix+"\uffff",offset);
+    // Dirty legacy writes still produce the same derived Kind as canonical
+    // key prefix. A corrupted projection never becomes a result list.
+    if(rows.some(row=>row.kind!==kind))throw new Error("SQLITE_RECORD_CORRUPT");
+    return rows.map(row=>row.key);
+  }
   grants(workspace:string):string[]{this.sync();return this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind='grant' AND workspace=? AND state='active'",workspace).map(r=>r.key);}
   bindingBlocked(workspace:string):boolean {this.sync();return !!(this.db.query("SELECT key FROM registry_entity_v1 WHERE kind='permit' AND workspace=? AND state='consumed' LIMIT 1",workspace).length||this.db.query("SELECT key FROM registry_entity_v1 WHERE kind='terminal-notice' AND workspace=? AND hold=1 LIMIT 1",workspace).length);}
   libraryRevision():number {this.sync(false,true);return this.db.query<{revision:number|null}>("SELECT revision FROM registry_entity_v1 WHERE key='library'")[0]?.revision??0;}

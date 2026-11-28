@@ -1,14 +1,78 @@
 import { nextGeneration } from '../../../packages/contracts/src/target.js';
-import { NativeAdapter } from './adapter.js';
-import { BoundObjectStore, resolveBindingStorage, type BindingStorageIdentity, type BindingStorageScope } from './binding-storage.js';
+import { NativeAdapter, NativeEffectNotInvoked } from './adapter.js';
+import { BoundObjectStore, readBoundCheckpoint, resolveBindingStorage, type BindingStorageIdentity, type BindingStorageScope } from './binding-storage.js';
+import { unresolvedHistoricalStages } from './historical-recovery.js';
 import { ChunkStore } from './storage.js';
-import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, digest, equalIdentity, isUint8Array, snapshotRevision, utf8, type FileWrite, type KeyValueStore, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
+import { BrowserError, base64ToBytes, bytesToBase64, canonicalPath, digest, equalBytes, equalIdentity, isUint8Array, snapshotRevision, utf8, type FileWrite, type KeyValueStore, type MutationResult, type NativeIdentity, type NativeSnapshot } from './native-types.js';
 export interface WorkspaceSnapshot extends NativeSnapshot { nativeRevision: string; generation: number }
 interface StoredSource { version: 1; identity: NativeIdentity; files: Record<string, string>; revision: string; createdAt: number; label: string; pinned: boolean }
+export interface CheckpointSummary {
+  id: string; revision: string; createdAt: number; label: string; pinned: boolean; bytes: number;
+  sha256?: string; fileCount?: number; sourceBytes?: number; epoch?: number;
+}
 interface LocalState { version: 1; files: Record<string, string>; lastHash: string; generation: number }
+type AssertOperationCurrent = () => void | Promise<void>;
 interface Journal { id: string; state: 'INTENT' | 'DISPATCHED' | 'SUCCEEDED' | 'PARTIAL' | 'UNKNOWN' | 'REJECTED'; paths: string[]; baseRevision: string; checkpointId?: string; kind?: 'SOURCE'|'IMPORT'|'SAVE'; createdAt: number; resolvedByOperator?: boolean; inspectedRevision?: string; resolvedAt?: number; operatorEvidence?: string;
   gatewayOperationId?: string; plannedHash?: string; plannedPaths?: Record<string,string|null>; identity?: NativeIdentity;
+  committed?: string[]; uncertainPaths?: string[]; verifiedNativeRevision?: string;
   resolvedByReadback?: boolean; resolutionMode?: 'VERIFIED_INTENDED_BYTES'|'ADOPTED_CURRENT_SAVED_SOURCE'|'ADOPTED_CURRENT_DRAFT'|'ADOPTED_CURRENT_IMPORT_CACHE'|'SUPERSEDED_BINDING';
+}
+function verifyCheckpointMetadata(value: unknown, id: string, epoch?: number): CheckpointSummary {
+  const row = value as CheckpointSummary | undefined;
+  if (!row || row.id !== id || !/^[a-f0-9-]{36}$/.test(id) || typeof row.revision !== 'string' ||
+      !Number.isSafeInteger(row.createdAt) || typeof row.label !== 'string' ||
+      typeof row.pinned !== 'boolean' || !Number.isSafeInteger(row.bytes) || row.bytes < 0 ||
+      (row.sha256 !== undefined && !/^[a-f0-9]{64}$/.test(row.sha256)))
+    throw new BrowserError('STORAGE_CORRUPT', 'Checkpoint metadata is malformed and was preserved.');
+  return {...row, ...(epoch !== undefined ? {epoch} : {})};
+}
+
+export async function listCheckpointMetadata(store: KeyValueStore, prefix: string, epoch?: number,
+    keys?: string[]): Promise<CheckpointSummary[]> {
+  const marker = prefix + ':checkpoint:';
+  const exact = (keys ?? await store.list()).filter(key => key.startsWith(marker));
+  if (exact.length > 4096) throw new BrowserError('LIMIT_EXCEEDED', 'Checkpoint metadata exceeds its retained scope budget.');
+  const result: CheckpointSummary[] = [];
+  for (const key of exact) {
+    const id = key.slice(marker.length);
+    result.push(verifyCheckpointMetadata(await store.get(key), id, epoch));
+  }
+  return result.sort((a,b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+}
+
+export async function pinCheckpointMetadata(store: KeyValueStore, prefix: string, id: string, pinned: boolean): Promise<void> {
+  if (!/^[a-f0-9-]{36}$/.test(id) || typeof pinned !== 'boolean')
+    throw new BrowserError('INVALID_INPUT', 'Choose an exact checkpoint and pin state.');
+  const key = prefix + ':checkpoint:' + id;
+  const row = verifyCheckpointMetadata(await store.get(key), id);
+  if (row.pinned === pinned) return;
+  await store.set(key, {...row, pinned});
+  const observed = verifyCheckpointMetadata(await store.get(key), id);
+  if (observed.pinned !== pinned || observed.sha256 !== row.sha256)
+    throw new BrowserError('EFFECT_UNKNOWN', 'Checkpoint pin change could not be verified.');
+}
+
+async function readCheckpointData(store: KeyValueStore, prefix: string, id: string,
+  raw: Uint8Array | undefined): Promise<StoredSource> {
+  if (!/^[a-f0-9-]{36}$/.test(id)) throw new BrowserError('INVALID_INPUT', 'Invalid Checkpoint ID.');
+  if (!raw) throw new BrowserError('FILE_NOT_FOUND', 'Checkpoint missing.');
+  const metadata = verifyCheckpointMetadata(await store.get(`${prefix}:checkpoint:${id}`), id);
+  if ((metadata.sha256 && await digest(raw) !== metadata.sha256) || raw.length !== metadata.bytes)
+    throw new BrowserError('STORAGE_CORRUPT', 'Checkpoint bytes differ from the persisted receipt.');
+  try {
+    const saved = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(raw)) as StoredSource;
+    if (!saved || saved.version !== 1 || !saved.identity || !saved.files ||
+        typeof saved.files !== 'object' || Array.isArray(saved.files) ||
+        saved.revision !== metadata.revision || !/^\d+:[a-f0-9]{64}$/.test(saved.revision))
+      throw new Error('invalid-checkpoint');
+    return saved;
+  } catch {
+    throw new BrowserError('STORAGE_CORRUPT', 'Checkpoint contents are malformed and were preserved.');
+  }
+}
+
+export async function readHistoricalCheckpoint(store: KeyValueStore, prefix: string, id: string): Promise<StoredSource> {
+  return readCheckpointData(store, prefix, id, await readBoundCheckpoint(store, prefix, id));
 }
 /** Serialized per active lease. Durable generation pointer stores scratch without page-origin storage. */
 export class VirtualFileSystem {
@@ -31,30 +95,32 @@ export class VirtualFileSystem {
     await current.assertPublication();
     const keys = (await store.list()).filter(key => key.startsWith(scope.bindingPrefix + ':epoch:'));
     if (keys.length > 4096) throw new BrowserError('QUOTA_EXCEEDED', 'Binding retention has reached its record limit.');
-    const epochs = new Set<number>();
+    const epochs = new Map<number, string[]>();
     for (const key of keys) {
-      const epoch = Number(key.slice(scope.bindingPrefix.length + 7).split(':', 1)[0]);
-      if (!Number.isSafeInteger(epoch) || epoch < 1 || epoch > scope.epoch)
+      const segment = key.slice(scope.bindingPrefix.length + 7).split(':', 1)[0];
+      const epoch = Number(segment);
+      if (!Number.isSafeInteger(epoch) || epoch < 1 || epoch > scope.epoch || segment !== String(epoch))
         throw new BrowserError('STALE_EPOCH', 'A newer Binding storage writer already exists.');
-      if (epoch < scope.epoch) epochs.add(epoch);
+      if (epoch < scope.epoch) {
+        const epochKeys = epochs.get(epoch);
+        if (epochKeys) epochKeys.push(key);
+        else epochs.set(epoch, [key]);
+      }
     }
-    const priorEpochs = [...epochs].sort((a, b) => b - a);
+    const priorEpochs = [...epochs.keys()].sort((a, b) => b - a);
     for (const epoch of priorEpochs) {
       const priorScope = await resolveBindingStorage({...identity, epoch}, options.assertCurrent, true);
       const prior = new VirtualFileSystem(adapter, store, scope.workspaceId, options.maxBytes, priorScope);
-      if (keys.some(key => key.startsWith(prior.prefix + ':stage:')) || (await prior.unresolved()).length)
+      const epochKeys = epochs.get(epoch)!;
+      if ((await unresolvedHistoricalStages(store, prior.prefix, epochKeys)).length || (await prior.unresolved(epochKeys)).length)
         throw new BrowserError('EFFECT_UNKNOWN', 'Earlier Epoch has unresolved local evidence. Reconcile that exact Epoch before adoption.');
     }
-    if (await current.chunks.get('local') === undefined) {
+    if (current.chunks instanceof BoundObjectStore && await current.chunks.get('local') === undefined) {
       for (const epoch of priorEpochs) {
+        if (!epochs.get(epoch)!.includes(`${scope.bindingPrefix}:epoch:${epoch}:root:local`)) continue;
         const priorScope = await resolveBindingStorage({...identity, epoch}, options.assertCurrent, true);
         const prior = new BoundObjectStore(store, priorScope, current.maxBytes);
-        const data = await prior.get('local');
-        if (data) {
-          await current.assertPublication();
-          await current.chunks.put('local', data);
-          break;
-        }
+        if (await current.chunks.adoptLocal(prior)) break;
       }
     }
     return current;
@@ -92,11 +158,12 @@ export class VirtualFileSystem {
   getSnapshot(): Promise<WorkspaceSnapshot> { return this.snapshot(); }
   async list(path = ''): Promise<string[]> { if (path && !['src', 'scratch', 'imports'].includes(path)) canonicalPath(path); const files = Object.keys((await this.snapshot()).files).sort(); return path ? files.filter(name => name === path || name.startsWith(`${path.replace(/\/$/, '')}/`)) : files; }
   async read(path: string): Promise<Uint8Array> { canonicalPath(path); const bytes = (await this.snapshot()).files[path]; if (!bytes) throw new BrowserError('FILE_NOT_FOUND', 'File does not exist in assigned Workspace.'); return bytes.slice(); }
-  async writeLocalBatch(writes: FileWrite[], expectedLocalRevision: string, gatewayOperationId?: string) {
-    return this.writePrivateFiles(writes, expectedLocalRevision, gatewayOperationId, 'SOURCE');
+  async writeLocalBatch(writes: FileWrite[], expectedLocalRevision: string, gatewayOperationId?: string,
+      assertOperationCurrent?: AssertOperationCurrent) {
+    return this.writePrivateFiles(writes, expectedLocalRevision, gatewayOperationId, 'SOURCE', assertOperationCurrent);
   }
   async publishImportedFiles(slugs: readonly string[], files: Record<string,Uint8Array>, expectedLocalRevision: string,
-      gatewayOperationId: string) {
+      gatewayOperationId: string, assertOperationCurrent?: AssertOperationCurrent) {
     const prefixes = slugs.map(slug => {
       if (!/^[a-z0-9][a-z0-9-]{0,119}$/.test(slug)) throw new BrowserError('INVALID_INPUT', 'Invalid import Slug.');
       return 'imports/' + slug + '/';
@@ -104,20 +171,36 @@ export class VirtualFileSystem {
     const old = await this.localView();
     if (old.revision.value !== expectedLocalRevision)
       throw new BrowserError('STALE_REVISION', 'Local import manifest changed before publication.');
-    const writes: FileWrite[] = old.files.filter(file => prefixes.some(prefix => file.path.startsWith(prefix)) &&
+    const archives=prefixes.map(prefix=>prefix+'perch-revisions/');
+    const existing=new Map(old.files.map(file=>[file.path,file]));
+    // Retain revision-addressed verified source: changing the current Slug
+    // pointer must never destroy a prior immutable snapshot. Conflicting bytes
+    // at a previously published revision address fail *before* any effect.
+    const writes: FileWrite[] = old.files.filter(file=>
+      prefixes.some(prefix=>file.path.startsWith(prefix)) &&
+      !archives.some(prefix=>file.path.startsWith(prefix)) &&
       !Object.hasOwn(files,file.path)).map(file=>({path:file.path,bytes:null}));
     for (const [path,bytes] of Object.entries(files)) {
-      if (!prefixes.some(prefix=>path.startsWith(prefix))) throw new BrowserError('PATH_DENIED', 'Import outside the requested public namespace.');
+      if (!prefixes.some(prefix=>path.startsWith(prefix)))
+        throw new BrowserError('PATH_DENIED', 'Import outside the requested public namespace.');
+      if (archives.some(prefix=>path.startsWith(prefix)) && existing.has(path)) {
+        const previous=existing.get(path)!;
+        if (previous.bytes !== bytes.length || previous.sha256 !== await digest(bytes) ||
+            !equalBytes(await old.read(path),bytes))
+          throw new BrowserError('STORAGE_CORRUPT', 'Immutable public source revision differs; original archived bytes preserved.');
+        continue;
+      }
       writes.push({path,bytes});
     }
-    return this.writePrivateFiles(writes, expectedLocalRevision, gatewayOperationId, 'IMPORT');
+    return this.writePrivateFiles(writes, expectedLocalRevision, gatewayOperationId, 'IMPORT', assertOperationCurrent);
   }
   private writePrivateFiles(writes: FileWrite[], expectedLocalRevision: string, gatewayOperationId: string | undefined,
-      kind: 'SOURCE' | 'IMPORT') {
+      kind: 'SOURCE' | 'IMPORT', assertOperationCurrent?: AssertOperationCurrent) {
     return this.serial(async () => {
       await this.assertPublication();
       const scope = this.scope;
-      if (!scope) throw new BrowserError('INCOMPATIBLE_VERSION', 'Binding-local write requires a scoped store.');
+      if (!scope || !(this.chunks instanceof BoundObjectStore))
+        throw new BrowserError('INCOMPATIBLE_VERSION', 'Binding-local write requires a scoped store.');
       const old = await this.localView();
       if (old.revision.value !== expectedLocalRevision)
         throw new BrowserError('STALE_REVISION', 'Private files changed before publication.');
@@ -146,29 +229,41 @@ export class VirtualFileSystem {
       await this.store.set(key, journal);
       let started = false;
       try {
-        await this.assertPublication();
-        started = true;
-        await this.chunks.put('local', utf8.encode(JSON.stringify(local)));
+        await this.chunks.put('local', utf8.encode(JSON.stringify(local)), async () => {
+          await assertOperationCurrent?.();
+          started = true;
+        });
         const updated = await this.localView();
         for (const write of writes) {
           const file = updated.files.find(file => file.path === write.path);
           if (write.bytes === null ? file !== undefined : file?.sha256 !== await digest(write.bytes))
             throw new BrowserError('EFFECT_UNKNOWN', 'Binding local readback differs from planned bytes.');
         }
-        await this.store.set(key, {...journal, state: 'SUCCEEDED'});
+        const terminal: Journal = {...journal, state: 'SUCCEEDED', inspectedRevision: updated.revision.value};
+        try { await this.store.set(key, terminal); }
+        catch (error) {
+          const actual = await this.store.get<Journal>(key);
+          if (actual?.state !== 'SUCCEEDED' || actual.id !== terminal.id ||
+              actual.inspectedRevision !== terminal.inspectedRevision) throw error;
+        }
         void this.serial(() => this.trim()).catch(() => undefined);
         return updated.revision;
       } catch (error) {
-        const known = !started || error instanceof BrowserError && error.code === 'QUOTA_EXCEEDED';
-        await this.store.set(key, {...journal, state: known ? 'REJECTED' : 'UNKNOWN'}).catch(() => undefined);
-        if (known) throw error;
+        const known = !started;
+        const persisted = await this.store.set(key, {...journal, state: known ? 'REJECTED' : 'UNKNOWN'})
+          .then(() => true, () => false);
+        if (known && persisted) throw error;
         throw new BrowserError('EFFECT_UNKNOWN', 'Private file publication requires reconciliation.');
       }
     });
   }
-  async writeBatch(writes: FileWrite[], expectedRevision?: string, gatewayOperationId?: string): Promise<MutationResult> { return this.serial(async () => this.commit(writes, expectedRevision, gatewayOperationId)); }
+  async writeBatch(writes: FileWrite[], expectedRevision?: string, gatewayOperationId?: string,
+      assertOperationCurrent?: AssertOperationCurrent): Promise<MutationResult> {
+    return this.serial(() => this.commit(writes, expectedRevision, gatewayOperationId, assertOperationCurrent));
+  }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const next = this.tail.then(fn, fn); this.tail = next.catch(() => undefined); return next; }
-  private async commit(writes: FileWrite[], expectedRevision?: string, gatewayOperationId?: string): Promise<MutationResult> {
+  private async commit(writes: FileWrite[], expectedRevision?: string, gatewayOperationId?: string,
+      assertOperationCurrent?: AssertOperationCurrent): Promise<MutationResult> {
     await this.assertPublication();
     await this.reconcileRetainedUnlocked();
     // An old uncertain operation is *not* a Workspace-wide lock. The current
@@ -210,17 +305,28 @@ export class VirtualFileSystem {
     const nativeWrites = writes.filter(w => !w.path.startsWith('scratch/'));
     let nativeResult: MutationResult = { status: 'SUCCEEDED', revision: before.nativeRevision, committed: [] };
     let dispatched = false;
+    const assertNativeEffect = this.scope || assertOperationCurrent ? async () => {
+      await this.assertPublication();
+      await assertOperationCurrent?.();
+    } : undefined;
     try {
       if (nativeWrites.length) nativeResult = await this.adapter.applyFiles(nativeWrites, before.nativeRevision, async () => {
         // A failed durable dispatch marker prevents *all* native effects.
+        await assertNativeEffect?.();
         await this.store.set(key,{...journal,state:'DISPATCHED'});
         journal.state='DISPATCHED'; dispatched = true;
-      }, this.scope ? () => this.assertPublication() : undefined);
+      }, assertNativeEffect);
     } catch (error) {
-      journal.state = dispatched ? 'UNKNOWN' : 'REJECTED';
-      await this.store.set(key,journal);
-      if (!dispatched) throw error;
+      const noNativeEffect = error instanceof NativeEffectNotInvoked || !dispatched;
+      journal.state = noNativeEffect ? 'REJECTED' : 'UNKNOWN';
+      try { await this.store.set(key,journal); }
+      catch {
+        if (!dispatched) throw error;
+        throw new BrowserError('EFFECT_UNKNOWN','Native dispatch journal could not be verified after failed publication.');
+      }
+      if (noNativeEffect) throw error instanceof NativeEffectNotInvoked ? error.cause : error;
       nativeResult = {status:'UNKNOWN',revision:before.nativeRevision,committed:[],
+        uncertainPaths: nativeWrites.map(write => write.path),
         error:{code:'EFFECT_UNKNOWN',message:'Native effect was dispatched; inspect current bytes before retrying.',
           recovery:'No automatic repeat. Readback will reconcile exact intended bytes.'}};
     }
@@ -234,6 +340,7 @@ export class VirtualFileSystem {
             journal.state='SUCCEEDED'; journal.resolvedByReadback=true;
             journal.resolutionMode='VERIFIED_INTENDED_BYTES'; journal.resolvedAt=Date.now();
             journal.inspectedRevision=actual.revision;
+            journal.verifiedNativeRevision=actual.nativeRevision;
             await this.store.set(key,journal);
             void this.serial(() => this.trim()).catch(()=>undefined); // Cleanup must not falsify success.
             return {status:'SUCCEEDED',revision:actual.revision,committed:writes.map(w=>w.path),
@@ -242,11 +349,16 @@ export class VirtualFileSystem {
         } catch { /* Retain the original UNKNOWN/PARTIAL without losing the journal. */ }
       }
       journal.state=nativeResult.status;
-      await this.store.set(key,journal);
+      journal.committed = nativeResult.committed;
+      journal.uncertainPaths = nativeResult.uncertainPaths;
+      await this.store.set(key,journal).catch(() => undefined);
       let currentRevision=before.revision;
       try { currentRevision=(await this.snapshot()).revision; } catch { /* Readback unavailable. */ }
       return {...nativeResult,revision:currentRevision};
     }
+    const privatePaths = writes.filter(write => write.path.startsWith('scratch/')).map(write => write.path);
+    let privatePublicationAttempted = false;
+    let privatePublicationVerified = false;
     try {
       const afterNative = await this.adapter.snapshot();
       const expectedNative = { ...before.files };
@@ -259,13 +371,24 @@ export class VirtualFileSystem {
         for (const w of writes.filter(w => w.path.startsWith('scratch/')))
           if (w.bytes === null) delete local.files[w.path]; else local.files[w.path] = bytesToBase64(w.bytes);
         if (this.scope) local.generation = nextGeneration(local.generation);
-        await this.chunks.put('local', utf8.encode(JSON.stringify(local)));
+        const expectedLocal = utf8.encode(JSON.stringify(local));
+        if (this.chunks instanceof BoundObjectStore) {
+          await this.chunks.put('local', expectedLocal, async () => {
+            await assertOperationCurrent?.();
+            privatePublicationAttempted = true;
+          });
+        } else {
+          privatePublicationAttempted = true;
+          await this.chunks.put('local', expectedLocal);
+        }
       }
       const after = await this.snapshot();
       if (after.revision.split(':')[1] !== plannedHash || !(await this.matchesPlannedPaths(after,journal)))
         throw new BrowserError('STALE_REVISION', 'Workspace readback differs from planned complete source.');
+      privatePublicationVerified = true;
       journal.state = 'SUCCEEDED'; journal.resolvedByReadback=true;
       journal.resolutionMode='VERIFIED_INTENDED_BYTES'; journal.inspectedRevision=after.revision;
+      journal.verifiedNativeRevision=after.nativeRevision;
       journal.resolvedAt=Date.now();
       await this.store.set(key, journal);
       void this.serial(() => this.trim()).catch(()=>undefined); // Housekeeping never turns a verified write UNKNOWN.
@@ -273,8 +396,12 @@ export class VirtualFileSystem {
         ...(this.scope?{nativeRevision:after.nativeRevision}:{}) };
     } catch (error) {
       journal.state = nativeWrites.length ? 'PARTIAL' : 'UNKNOWN';
-      await this.store.set(key,journal);
-      return { status: journal.state, revision: before.revision, committed: nativeResult.committed,
+      journal.committed = privatePublicationVerified ? [...nativeResult.committed, ...privatePaths] : nativeResult.committed;
+      journal.uncertainPaths = privatePublicationAttempted && !privatePublicationVerified ? privatePaths : undefined;
+      await this.store.set(key,journal).catch(() => undefined);
+      return { status: journal.state, revision: before.revision,
+        committed: privatePublicationVerified ? [...nativeResult.committed, ...privatePaths] : nativeResult.committed,
+        ...(privatePublicationAttempted && !privatePublicationVerified ? {uncertainPaths: privatePaths} : {}),
         error: { code: 'PARTIAL_EFFECT', message: 'Native bytes or durable terminal record could not be verified.',
           recovery: 'The journal retains planned byte hashes. Read-only reconciliation can settle an exact match.' } };
     }
@@ -284,6 +411,34 @@ export class VirtualFileSystem {
     id: string; revision: string; sha256: string; bytes: number;
     identity: NativeIdentity; pinned: boolean; fileCount: number; sourceBytes: number;
   }> { return this.serial(() => this.createCheckpoint(label, pinned)); }
+
+  prepareSaveCheckpoint(intent: Omit<Journal, 'checkpointId'>): Promise<Journal> {
+    return this.serial(async () => {
+      if (intent.kind !== 'SAVE' || intent.state !== 'INTENT' || intent.gatewayOperationId !== intent.id ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(intent.id))
+        throw new BrowserError('INVALID_INPUT', 'Save checkpoint needs an exact operation intent.');
+      const key = `${this.prefix}:journal:${intent.id}`;
+      if (await this.store.get(key) !== undefined)
+        throw new BrowserError('EFFECT_UNKNOWN', 'This exact Save has retained local evidence.');
+      const checkpoint = await this.createCheckpoint('Before native Save', false);
+      const row = {...intent, checkpointId: checkpoint.id};
+      await this.persistSaveJournal(row);
+      return row;
+    });
+  }
+
+  async persistSaveJournal(row: Journal): Promise<void> {
+    const key = `${this.prefix}:journal:${row.id}`;
+    const expected = JSON.stringify(row);
+    try { await this.store.set(key, row); }
+    catch { /* Read back the exact intent after a lost acknowledgment. */ }
+    if (JSON.stringify(await this.store.get(key)) !== expected)
+      throw new BrowserError('EFFECT_UNKNOWN', 'The Save journal could not be verified.');
+  }
+
+  settleCheckpointRetention(): Promise<void> {
+    return this.serial(() => this.trim());
+  }
 
   private async createCheckpoint(label: string, pinned: boolean, snapshot?: WorkspaceSnapshot): Promise<{
     id: string; revision: string; sha256: string; bytes: number;
@@ -320,43 +475,30 @@ export class VirtualFileSystem {
       identity:structuredClone(source.identity),pinned,fileCount:entries.length,sourceBytes};
   }
 
-  async checkpointList(): Promise<{
-    id: string; revision: string; createdAt: number; label: string; pinned: boolean;
-    bytes: number; sha256?: string; fileCount?: number; sourceBytes?: number;
-  }[]> {
-    const result=[];
-    for(const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:checkpoint:`))){
-      const row=await this.store.get<{
-        id:string;revision:string;createdAt:number;label:string;
-        pinned:boolean;bytes:number;sha256?:string;fileCount?:number;sourceBytes?:number;
-      }>(key);
-      if(row)result.push(row);
+  async checkpointList(): Promise<CheckpointSummary[]> {
+    if (!this.scope) return listCheckpointMetadata(this.store, this.prefix);
+    const marker = this.scope.bindingPrefix + ':epoch:';
+    const keys = (await this.store.list()).filter(key => key.startsWith(marker) &&
+      /^\d+:checkpoint:[a-f0-9-]{36}$/.test(key.slice(marker.length)));
+    if (keys.length > 4096) throw new BrowserError('LIMIT_EXCEEDED', 'Binding checkpoint retention is too large.');
+    const rows: CheckpointSummary[] = [];
+    for (const key of keys) {
+      const match = /^(\d+):checkpoint:([a-f0-9-]{36})$/.exec(key.slice(marker.length))!;
+      const epoch = Number(match[1]);
+      if (!Number.isSafeInteger(epoch) || epoch < 1)
+        throw new BrowserError('STORAGE_CORRUPT', 'Checkpoint Epoch metadata is malformed.');
+      rows.push(verifyCheckpointMetadata(await this.store.get(key), match[2]!, epoch));
     }
-    return result.sort((a,b) => b.createdAt-a.createdAt);
+    return rows.sort((a,b) => b.createdAt-a.createdAt || a.id.localeCompare(b.id));
   }
 
   async restore(id: string, expectedRevision: string, gatewayOperationId?: string): Promise<MutationResult> {
     if (!/^[a-f0-9-]{36}$/.test(id)) throw new BrowserError('INVALID_INPUT','Invalid Checkpoint ID.');
-    const raw=await this.chunks.get(`checkpoint:${id}`);
-    if (!raw) throw new BrowserError('FILE_NOT_FOUND','Checkpoint missing.');
-    const metadata=await this.store.get<{sha256?:string;bytes?:number}>(`${this.prefix}:checkpoint:${id}`);
-    if (metadata?.sha256 && await digest(raw)!==metadata.sha256)
-      throw new BrowserError('STORAGE_CORRUPT',
-        'Checkpoint checksum differs from the persisted receipt; source unchanged.');
-    if (metadata?.bytes!==undefined && raw.length!==metadata.bytes)
-      throw new BrowserError('STORAGE_CORRUPT',
-        'Checkpoint byte count differs from the persisted receipt; source unchanged.');
-    let saved:StoredSource;
-    try {
-      saved=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw)) as StoredSource;
-      if (!saved || saved.version!==1 || !saved.identity ||
-          !saved.files || typeof saved.files!=='object' || Array.isArray(saved.files) ||
-          typeof saved.revision!=='string' || !/^\d+:[a-f0-9]{64}$/.test(saved.revision))
-        throw new Error('invalid-checkpoint');
-    } catch {
-      throw new BrowserError('STORAGE_CORRUPT',
-        'Checkpoint metadata is malformed; source unchanged.');
-    }
+    const checkpoints = (await this.checkpointList()).filter(row => row.id === id);
+    if (checkpoints.length !== 1) throw new BrowserError('FILE_NOT_FOUND', 'An exact retained checkpoint is required.');
+    const saved = this.scope
+      ? await readHistoricalCheckpoint(this.store, `${this.scope.bindingPrefix}:epoch:${checkpoints[0]!.epoch}`, id)
+      : await readCheckpointData(this.store, this.prefix, id, await this.chunks.get(`checkpoint:${id}`));
     const before=await this.snapshot();
     if (!equalIdentity(saved.identity,before.identity))
       throw new BrowserError('BINDING_MISMATCH','Checkpoint belongs to another generator or draft.');
@@ -517,7 +659,7 @@ export class VirtualFileSystem {
         resolutionMode:mode,inspectedRevision:second.revision,resolvedAt:Date.now()};
       // Historical UNKNOWN is deliberately retained when current source is
       // adopted, because the original command's result remains unknowable.
-      if (intended) terminal.state='SUCCEEDED';
+      if (intended) { terminal.state='SUCCEEDED'; terminal.verifiedNativeRevision=second.nativeRevision; }
       await this.store.set(key,terminal);
       result.push({id:journal.id,mode,revision:second.revision});
     }
@@ -533,9 +675,9 @@ export class VirtualFileSystem {
     }
     return items.sort((a,b)=>b.at-a.at).slice(0,8);
   }
-  async unresolved(): Promise<Journal[]> {
+  async unresolved(keys?: readonly string[]): Promise<Journal[]> {
     const result: Journal[] = [];
-    for (const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:journal:`))) {
+    for (const key of (keys ?? await this.store.list()).filter(k => k.startsWith(`${this.prefix}:journal:`))) {
       const row = await this.store.get<Journal>(key);
       if (!row || typeof row !== 'object' || Array.isArray(row) ||
           typeof row.id !== 'string' || key !== `${this.prefix}:journal:${row.id}` ||
@@ -548,12 +690,78 @@ export class VirtualFileSystem {
     }
     return result;
   }
+  /** Read a terminal transfer proof only in the original Binding and Epoch. */
+  async transferPublicationReceipt(operationId: string, path: string, epochPrefix = this.prefix) {
+    const scope = this.scope;
+    if (!scope || !/^[A-Za-z0-9_-]{1,128}$/.test(operationId) || canonicalPath(path) !== path ||
+        !epochPrefix.startsWith(scope.bindingPrefix + ':epoch:') ||
+        !/^[1-9][0-9]{0,15}$/.test(epochPrefix.slice(scope.bindingPrefix.length + ':epoch:'.length)) ||
+        Number(epochPrefix.slice(scope.bindingPrefix.length + ':epoch:'.length)) > scope.epoch)
+      throw new BrowserError('BINDING_MISMATCH', 'Transfer journal requires the exact Binding and Epoch.');
+    const prefix = epochPrefix + ':journal:';
+    const keys = (await this.store.list()).filter(key => key.startsWith(prefix));
+    if (keys.length > 4096) throw new BrowserError('LIMIT_EXCEEDED', 'Transfer journal scope exceeds its record limit.');
+    let matched: Journal | undefined;
+    for (const key of keys) {
+      const row = await this.store.get<Journal>(key);
+      if (row?.gatewayOperationId !== operationId || row.kind !== 'SOURCE' || row.paths?.length !== 1 || row.paths[0] !== path) continue;
+      if (matched || key !== prefix + row.id || !['INTENT', 'DISPATCHED', 'SUCCEEDED', 'REJECTED', 'PARTIAL', 'UNKNOWN'].includes(row.state))
+        throw new BrowserError('STORAGE_CORRUPT', 'Exact transfer publication journal is ambiguous.');
+      matched = row;
+    }
+    if (!matched) return undefined;
+    const state = ['INTENT', 'DISPATCHED'].includes(matched.state) ? 'UNKNOWN' : matched.state;
+    return {state, revision: matched.inspectedRevision, nativeRevision: matched.verifiedNativeRevision,
+      committed: matched.committed ?? [], uncertainPaths: matched.uncertainPaths ?? [],
+      settled: matched.resolvedByReadback === true || matched.resolvedByOperator === true};
+  }
   /** Operator-only acknowledgement: never exposed as an agent tool or automatic retry. */
   async acknowledgeReconciliation(id: string, inspectedRevision: string, operatorEvidence?: string): Promise<void> { if ((await this.snapshot()).revision !== inspectedRevision) throw new BrowserError('STALE_REVISION', 'Source changed during reconciliation.'); const key = `${this.prefix}:journal:${id}`; const row = await this.store.get<Journal>(key); if (!row) throw new BrowserError('FILE_NOT_FOUND', 'Journal entry missing.'); if(operatorEvidence!==undefined){if(!operatorEvidence.trim()||operatorEvidence.length>512)throw new BrowserError('INVALID_INPUT','Bounded operator evidence is required.'); row.operatorEvidence=operatorEvidence.trim();} row.resolvedByOperator = true; row.inspectedRevision = inspectedRevision; row.resolvedAt = Date.now(); await this.store.set(key, row); }
   async exportBackup(): Promise<{ version: 1; identity: NativeIdentity; files: Record<string, string>; revision: string; sha256: string }> { const source = await this.snapshot(); const files = Object.fromEntries(Object.entries(source.files).map(([path, bytes]) => [path, bytesToBase64(bytes)])); return { version: 1, identity: source.identity, files, revision: source.revision, sha256: await digest(JSON.stringify(files)) }; }
+
+  pinCheckpoint(prefix: string, id: string, pinned: boolean): Promise<void> {
+    return this.serial(async () => {
+      await this.assertPublication();
+      if (this.scope && !(prefix === this.prefix || prefix.startsWith(this.scope.bindingPrefix + ':epoch:')))
+        throw new BrowserError('BINDING_MISMATCH', 'Checkpoint pin changes require the current exact Binding.');
+      await pinCheckpointMetadata(this.store, prefix, id, pinned);
+    });
+  }
+
   private async trim(): Promise<void> {
     await this.assertPublication();
-    const pinnedByHold = new Set((await this.unresolved()).map(journal => journal.checkpointId));
+    const keys = await this.store.list();
+    const unresolved = await this.unresolved(keys);
     const list = await this.checkpointList();
-    for (const item of list.filter(c => !c.pinned && !pinnedByHold.has(c.id)).slice(5, this.scope ? 13 : undefined)) { await this.chunks.delete(`checkpoint:${item.id}`); await this.store.delete(`${this.prefix}:checkpoint:${item.id}`); } const journals: {key: string; row: Journal}[] = []; for (const key of (await this.store.list()).filter(k => k.startsWith(`${this.prefix}:journal:`))) { const row = await this.store.get<Journal>(key); if (row) journals.push({key,row}); } for (const {key} of journals.filter(x => (['SUCCEEDED','REJECTED'].includes(x.row.state) || x.row.resolvedByOperator === true)).sort((a,b) => b.row.createdAt-a.row.createdAt).slice(1000)) await this.store.delete(key); await this.chunks.collectOrphans(); }
+    if (this.scope) {
+      const scope = this.scope;
+      const epochs = new Set(list.map(item => item.epoch).filter(epoch => epoch !== undefined && epoch < scope.epoch));
+      for (const epoch of epochs) {
+        const priorScope = await resolveBindingStorage({...scope, epoch: epoch!}, () => undefined, true);
+        const prior = new VirtualFileSystem(this.adapter, this.store, this.workspaceId, this.maxBytes, priorScope);
+        unresolved.push(...await prior.unresolved(keys));
+      }
+    }
+    const pinnedByHold = new Set(unresolved.map(journal => journal.checkpointId));
+    for (const item of list.filter(row => !row.pinned && !pinnedByHold.has(row.id)).slice(5, this.scope ? 13 : undefined)) {
+      const prefix = this.scope ? `${this.scope.bindingPrefix}:epoch:${item.epoch}` : this.prefix;
+      const key = `${prefix}:checkpoint:${item.id}`;
+      const metadata = verifyCheckpointMetadata(await this.store.get(key), item.id);
+      if (metadata.pinned) continue;
+      await this.assertPublication();
+      if (this.chunks instanceof BoundObjectStore && item.epoch !== undefined)
+        await this.chunks.retireCheckpoint(item.id, item.epoch);
+      else await this.chunks.delete(`checkpoint:${item.id}`);
+      await this.store.delete(key);
+    }
+    const journals: {key: string; row: Journal}[] = [];
+    for (const key of keys.filter(k => k.startsWith(`${this.prefix}:journal:`))) {
+      const row = await this.store.get<Journal>(key);
+      if (row) journals.push({key,row});
+    }
+    const settled = journals.filter(x => ['SUCCEEDED','REJECTED'].includes(x.row.state) || x.row.resolvedByOperator === true);
+    for (const {key} of settled.sort((a,b) => b.row.createdAt-a.row.createdAt).slice(1000))
+      await this.store.delete(key);
+    await this.chunks.collectOrphans();
+  }
 }

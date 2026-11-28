@@ -100,6 +100,27 @@ export function errorResponse(error: unknown, traceId = crypto.randomUUID()): Re
     e.status,
   );
 }
+
+/** Result delivery can fail independently of the operation's durable outcome. */
+export function omitDevelopmentResult(
+  receipt: Record<string, unknown>,
+  availability: "TOO_LARGE" | "EXPIRED" | "UNAVAILABLE",
+): Record<string, unknown> {
+  const {data: _data, result: _result, resolution: _resolution,
+    lateObservation: _observation, ...metadata} = receipt;
+  return {
+    ...metadata,
+    result: null,
+    resultAvailability: availability,
+    error: {
+      code: "RESULT_" + availability,
+      message: "The requested result bytes cannot be delivered.",
+      retryable: false,
+      recovery: "Inspect the retained operation receipt. Do not replay this intent to recover its result.",
+    },
+  };
+}
+
 export async function parseBody(
   request: Request,
   max = MAX_BODY,
@@ -120,7 +141,10 @@ export async function parseBody(
       if (done) break;
       count += value.byteLength;
       if (count > max) {
-        await reader.cancel();
+        // Cancellation of one branch of a cloned Request stream can await
+        // consumption of its sibling indefinitely. Initiate cancellation,
+        // but do not delay the bounded 413 rejection on tee coordination.
+        void reader.cancel().catch(() => undefined);
         throw new ApiError(
           "LIMIT_EXCEEDED",
           "Request body exceeds transport limit.",
@@ -283,6 +307,8 @@ export interface Env {
   ADMISSION_BUDGET_CAPS_JSON?: string;
   ADMISSION_BUDGET_BASELINE_JSON?: string;
   SQL_TELEMETRY_ENABLED?: string;
+  /** Opt-in fingerprint-only query-cost profiling; never record SQL arguments. */
+  SQL_TELEMETRY_DETAIL_ENABLED?: string;
   REGISTRY: DurableObjectNamespace;
   WORKSPACES: DurableObjectNamespace;
   OAUTH_KV: KVNamespace;
@@ -299,6 +325,8 @@ export interface Env {
   DEVELOPMENT_CONTRACT_V2_ENABLED?: string;
   DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED?: string;
   REGISTRY_GRANT_BUDGET?: string;
+  /** Explicit bounded v2 access-token TTL override; consent itself never expires. */
+  OAUTH_ACCESS_TOKEN_TTL_SECONDS?: string;
   OAUTH_REGISTRATIONS_PER_HOUR?: string;
 }
 export async function rpc<T = Record<string, unknown>>(

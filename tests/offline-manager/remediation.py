@@ -1,0 +1,213 @@
+"""Exercise the bundled manager against synthetic data, with all network denied."""
+import argparse
+import json
+import re
+from pathlib import Path
+
+from playwright.sync_api import sync_playwright
+
+FIXTURE = Path(__file__).with_name("fixture.js")
+STARTUP = re.compile(r'  if \(document\.readyState === "loading"\)\n    document\.addEventListener\(')
+CONTEXT = """<!doctype html><html lang="en"><title>Offline native editor</title>
+<main><h1>Synthetic native editor</h1><textarea>Untouched draft</textarea></main>"""
+
+
+def run(browser, bundle, output, verify_races, verify_local_recovery):
+    report = {}
+    external = []
+
+    def mount(mode, local_recovery=False):
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.route("**/*", lambda route: (external.append(route.request.url), route.abort()))
+        page.set_content(CONTEXT)
+        page.evaluate("""mode => {
+          window.__fixtureMode = mode;
+          if (!crypto.randomUUID) crypto.randomUUID = () =>
+            '10000000-1000-4000-8000-100000000000'.replace(/[018]/g,
+              c => (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16));
+        }""", mode)
+        page.evaluate("enabled => window.__fixtureLocalRecovery = enabled", local_recovery)
+        page.add_script_tag(content=bundle)
+        page.add_script_tag(path=FIXTURE)
+        page.get_by_role("dialog").wait_for()
+        if mode not in ("outage", "unpaired"):
+            page.get_by_role("row").filter(has_text="Story generator").first.wait_for()
+        return page
+
+    def snapshot(page, name):
+        value = page.evaluate("""() => {
+          const root = document.querySelector('[data-perch-mcp-manager]').shadowRoot;
+          const panel = root.querySelector('.body');
+          return {
+            selected: root.querySelector('[role=tab][aria-selected=true]')?.innerText,
+            tabNames: [...root.querySelectorAll('[role=tab]:not([hidden])')].map(x => x.innerText),
+            panel: panel.innerText.slice(0, 600),
+            enabled: [...panel.querySelectorAll('button:not(:disabled)')].slice(0, 20).map(x => x.innerText),
+            requests: fixture.requests.map(x => ({method:x.method, path:x.path})),
+          };
+        }""")
+        report[name] = value
+        page.screenshot(path=output / (name + ".png"))
+
+    for mode in ("v1", "v2", "outage", "unpaired"):
+        page = mount(mode)
+        snapshot(page, mode)
+        page.close()
+
+    page = mount("v2")
+    page.evaluate("fixture.mode='outage'")
+    page.get_by_role("tab", name="Connectors", exact=True).click()
+    snapshot(page, "warm-outage-connectors")
+    page.get_by_role("tab", name="Recovery", exact=True).click()
+    snapshot(page, "warm-outage-recovery")
+    page.close()
+
+    page = mount("v2")
+    for name in ("Story generator", "Usage analytics"):
+        row = page.get_by_role("row").filter(has_text=name).first
+        action = row.get_by_role("button", name="Reassign to this tab", exact=True)
+        if action.is_enabled():
+            action.click()
+    confirmations = page.get_by_role("button", name="Confirm", exact=True)
+    report["confirmationCount"] = confirmations.count()
+    page.screenshot(path=output / "confirmation.png")
+    if confirmations.count():
+        confirmations.first.click()
+        page.wait_for_function("fixture.requests.some(x => x.method !== 'GET')", timeout=2000)
+    report["confirmationWrites"] = page.evaluate(
+        "fixture.requests.filter(x => x.method !== 'GET').map(x => ({method:x.method, path:x.path}))")
+    page.close()
+
+    page = mount("v2")
+    page.get_by_role("tab", name="Connectors", exact=True).click()
+    approval = page.get_by_role("row").filter(has_text="fixture-client-new")
+    approval.wait_for()
+    report["approvalText"] = approval.inner_text()
+    page.screenshot(path=output / "approval.png")
+    page.close()
+
+    if verify_races:
+        page = mount("v2")
+        row = page.get_by_role("row").filter(has_text="Story generator").first
+        row.get_by_role("button", name="Reassign to this tab", exact=True).click()
+        page.evaluate("""() => {
+          const root = document.querySelector('[data-perch-mcp-manager]').shadowRoot;
+          window.obsoleteConfirm = [...root.querySelectorAll('button')].find(b => b.innerText === 'Confirm');
+          fixture.delay = 180;
+        }""")
+        page.get_by_role("tab", name="Connectors", exact=True).click()
+        assert page.get_by_role("tabpanel", name="Connectors", exact=True).is_visible()
+        assert page.get_by_role("button", name="Reassign to this tab", exact=True).count() == 0
+        page.get_by_role("tab", name="Recovery", exact=True).click()
+        page.evaluate("obsoleteConfirm.dispatchEvent(new MouseEvent('click'))")
+        page.get_by_role("heading", name="Connection recovery").wait_for()
+        assert page.get_by_role("tabpanel", name="Recovery", exact=True).is_visible()
+        assert page.get_by_role("button", name="Reassign to this tab", exact=True).count() == 0
+        assert page.evaluate("fixture.requests.every(x => x.method === 'GET')")
+        report["obsoleteConfirmationWrites"] = 0
+        page.close()
+
+        page = mount("v2")
+        page.evaluate("fixture.approvals[0].audience = 'https://fixture.invalid/mcp/c-2'")
+        page.get_by_role("tab", name="Connectors", exact=True).click()
+        approve = page.get_by_role("button", name="Approve exact request", exact=True)
+        approve.wait_for()
+        assert approve.is_disabled()
+        assert page.evaluate("fixture.requests.every(x => x.method === 'GET')")
+        report["mismatchedApprovalDisabled"] = True
+        page.close()
+
+        page = mount("v2")
+        page.evaluate("fixture.loseRebindResponse = true; fixture.failReceiptRead = true")
+        row = page.get_by_role("row").filter(has_text="Image studio").first
+        row.get_by_role("button", name="Reassign to this tab", exact=True).click()
+        page.get_by_text("Transition outcome is unknown. Inspect the original Workspace receipt.").wait_for()
+        page.evaluate("auditManager.destroy(); fixture.failReceiptRead = false; void fixture.mount()")
+        row.get_by_role("button", name="Inspect original transition", exact=True).click()
+        page.get_by_text("Updated.", exact=True).wait_for()
+        writes = page.evaluate("fixture.requests.filter(x => x.method !== 'GET')")
+        assert len(writes) == 1
+        assert page.evaluate("""key => fixture.requests.some(
+          x => x.method === 'GET' && x.path.endsWith('/receipts/' + key))""", writes[0]["key"])
+        assert page.evaluate("fixture.attached.length") == 0
+        report["lostTransitionWritesAcrossRemount"] = len(writes)
+        page.close()
+
+    if verify_local_recovery:
+        page = mount("outage", local_recovery=True)
+        page.get_by_role("tab", name="Recovery", exact=True).click()
+        page.get_by_role("combobox", name="Retained Binding and Epoch").wait_for()
+        page.get_by_text("Retained before reconnect", exact=True).wait_for()
+        observed_reads = page.evaluate("fixture.requests.length")
+        page.get_by_role("button", name="Export selected local evidence").click()
+        page.get_by_role("button", name="Confirm", exact=True).click()
+        page.wait_for_function("fixture.downloads.length === 1")
+        page.get_by_role("button", name="Export checkpoint").click()
+        page.wait_for_function("fixture.downloads.length === 2")
+        assert page.get_by_role("button", name="Inspect checkpoint restore").is_disabled()
+        assert page.evaluate("fixture.requests.length") == observed_reads
+        assert page.evaluate("""fixture.downloads.every(row =>
+          JSON.parse(row.data).scope === 'fixture-historical-scope')""")
+        report["localRecoveryExportGatewayRequests"] = 0
+        page.screenshot(path=output / "offline-local-recovery.png")
+        page.get_by_role("tab", name="Settings", exact=True).click()
+        page.get_by_label("Private file", exact=True).set_input_files({
+            "name": "staged.txt", "mimeType": "text/plain", "buffer": b"synthetic source",
+        })
+        page.get_by_role("button", name="Stage private file", exact=True).click()
+        page.get_by_text("scratch/staged.txt · 16 bytes · QUARANTINED", exact=True).wait_for()
+        report["offlinePrivateFileStaged"] = True
+        page.screenshot(path=output / "offline-private-stage.png")
+        page.close()
+    assert external == [], external
+    report["externalRequests"] = len(external)
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bundle", type=Path, default=Path("dist/perch-mcp.user.js"))
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--chromium", default="/usr/bin/chromium")
+    parser.add_argument("--expect-baseline", action="store_true")
+    parser.add_argument("--check-local-recovery", action="store_true")
+    parser.add_argument("--finding", action="append", choices=("F17", "F21", "F25", "F26", "F27"))
+    args = parser.parse_args()
+    source = args.bundle.read_text()
+    matches = list(STARTUP.finditer(source))
+    assert matches, "Cannot isolate bundled startup"
+    mounted = source[:matches[-1].start()] + "  window.__auditMountManager = mountManager;\n})();\n"
+    args.output.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=args.chromium, args=[
+            "--no-sandbox", "--disable-background-networking", "--disable-dev-shm-usage",
+        ])
+        report = run(browser, mounted, args.output, not args.expect_baseline, args.check_local_recovery)
+        browser.close()
+    (args.output / "manager-report.json").write_text(json.dumps(report, indent=2) + "\n")
+    stale_views = [report[name] for name in ("warm-outage-connectors", "warm-outage-recovery")]
+    results = {
+        "F17": report["confirmationCount"] > 1
+        or any("/w-2/" not in row["path"] for row in report["confirmationWrites"]),
+        "F21": any(field not in report["approvalText"]
+                   for field in ("ChatGPT 01", "https://fixture.invalid/mcp/c-1", "READ_SOURCE")),
+        "F25": any("Library" in report[mode]["tabNames"] for mode in ("v1", "v2", "outage", "unpaired")),
+        # Cold outages cannot invent remote Workspace rows. Verify functional local
+        # navigation, native identity, recovery/export and stop without the Gateway.
+        "F26": not (
+            report["outage"]["tabNames"] == ["Workspaces", "Connectors", "Activity", "Recovery", "Settings"]
+            and "Current editor:" in report["outage"]["panel"]
+            and "Export local diagnostics" in report["outage"]["enabled"]
+            and "Stop this document immediately" in report["outage"]["enabled"]
+            and report.get("localRecoveryExportGatewayRequests") == 0
+            and report.get("offlinePrivateFileStaged") is True
+        ),
+        "F27": any("Reassign to this tab" in view["enabled"] for view in stale_views),
+    }
+    print(json.dumps({"reproduced": results, "externalRequests": report["externalRequests"]}))
+    selected = args.finding or list(results)
+    assert all(results[item] is args.expect_baseline for item in selected), results
+
+
+if __name__ == "__main__":
+    main()

@@ -1,14 +1,25 @@
 import { z } from 'zod/v4';
-import { filesystemV2Schemas, filesystemInlineWriteSchema, filesystemV2Permissions, type FilesystemToolV2 } from './filesystem-v2.js';
+import { base64Length, filesystemV2Schemas, filesystemInlineWriteSchema, filesystemV2Permissions, preflightBatchMutation, type FilesystemToolV2 } from './filesystem-v2.js';
 import { cancelOperationV2Schema, deliveryFields, operationKeySchema, operationStatusV2Schema, targetV2Schema } from './operations-v2.js';
-import { canonicalPath } from './paths.js';
+import { assertNoFilePathConflicts, assertNoPathCollisions, canonicalPath } from './paths.js';
+import { LIMITS } from './envelopes.js';
+import { parsePublicFetchDestination } from './public-fetch.js';
 import { ToolError } from './errors.js';
+import { moduleSpecifierPattern } from './compute.js';
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
+const computeModule = z.strictObject({
+  specifier: z.string().max(200).regex(moduleSpecifierPattern),
+  path: z.string().min(1).max(512).refine((path) => {
+    try { return canonicalPath(path) === path; } catch { return false; }
+  }),
+  sha256: hash,
+});
 const file = z.string().min(1).max(512).refine((path) => {
   try { canonicalPath(path); return true; } catch { return false; }
 });
 const scratch = file.refine(path => path.startsWith('scratch/'));
+const effectDestination = file.refine(path => path.startsWith('scratch/') || path.startsWith('src/'));
 const script = z.string().min(1).max(131_072);
 const ms = z.number().int().min(1).max(3_600_000).optional();
 const browserMs = z.number().int().min(1).max(120_000).optional();
@@ -30,7 +41,7 @@ const postRequest = z.strictObject({method: z.literal('POST'), url: z.string().m
 export const browserToolSchemas = {
   ...filesystemV2Schemas,
   page_eval: z.strictObject({js: script.optional(), path: file.optional(), timeoutMs: browserMs,
-    requireFresh: z.boolean().optional(), resultPath: scratch.optional()})
+    requireFresh: z.boolean().optional(), resultPath: effectDestination.optional()})
     .refine(value => (value.js !== undefined) !== (value.path !== undefined)),
   page_refresh: z.strictObject({preambleJs: script.optional(), intendedSourceRevision: hash.optional(), timeoutMs: browserMs}),
   preview_diagnostics: z.strictObject({cursor: z.strictObject({previewEpoch: positive, lastSequence: z.number().int().min(0)}).optional(),
@@ -44,10 +55,13 @@ export const browserToolSchemas = {
     read: z.array(boundedPath).max(64).optional(), write: z.array(boundedPath).max(64).optional(),
     maxReads: z.number().int().min(0).max(256).optional(), maxWrites: z.number().int().min(0).max(64).optional(),
     maxBytes: z.number().int().min(1).max(16 * 1024 * 1024).optional(),
-  }), modules: z.array(z.strictObject({
-    specifier: z.string().regex(/^[A-Za-z0-9_-][A-Za-z0-9_.-]*@[0-9]+(?:\.[0-9]+){0,2}$/).max(128),
-    path: file, sha256: hash
-  })).max(16).optional()}),
+  }), modules: z.array(computeModule).max(16).optional()})
+    .refine(({access, modules = []}) => {
+      const uniqueSpecifiers = new Set(modules.map(module => module.specifier)).size === modules.length;
+      const uniquePaths = new Set(modules.map(module => module.path.toLowerCase())).size === modules.length;
+      return uniqueSpecifiers && uniquePaths && modules.length <= (access.maxReads ?? 256)
+        && !access.write?.some(path => path.startsWith('imports/'));
+    }),
   fetch_url: z.strictObject({requests: z.union([z.array(getRequest).min(1).max(8), z.tuple([postRequest])]), timeoutMs: ms}),
   fetch_generator: z.strictObject({generators: z.array(z.strictObject({
     slug, paths: z.array(file).min(1).max(64).optional(),
@@ -104,7 +118,9 @@ export function requiredPermissionsV2(name: keyof typeof developmentToolArgs, ar
   switch (name) {
     case 'batch':
       return [...new Set((args.actions as BatchArgumentsV2['actions']).flatMap(step => requiredPermissionsV2(step.tool, step.args)))];
-    case 'page_eval': return ['PREVIEW_EXECUTE', ...(args.path ? ['READ_SOURCE'] : []), ...(args.resultPath ? ['WRITE_SOURCE'] : [])];
+    case 'page_eval': return ['PREVIEW_EXECUTE',
+      ...(args.path || typeof args.resultPath === 'string' && args.resultPath.startsWith('src/') ? ['READ_SOURCE'] : []),
+      ...(args.resultPath ? ['WRITE_SOURCE'] : [])];
     case 'page_refresh': return ['PREVIEW_CONTROL', ...(args.preambleJs ? ['PREVIEW_EXECUTE'] : [])];
     case 'preview_diagnostics': case 'set_viewport_size': return ['PREVIEW_CONTROL'];
     case 'capture_page_image': return ['PREVIEW_CONTROL','CAPTURE_PREVIEW'];
@@ -128,12 +144,151 @@ export function hasEffectV2(name: keyof typeof developmentToolArgs, args: Record
   return !['read','list_files','preview_diagnostics','generator_info','capture_page_image'].includes(name);
 }
 
+const utf8 = new TextEncoder();
+const batchEnvelopeReserve = 4096;
+export const batchResultBudget = 192 * 1024;
+const batchLedgerBaseBytes = 16 * 1024;
+
+/** Reject non-scalar Unicode before an MCP request can admit or authorize an
+ * effect. TextEncoder otherwise silently replaces isolated UTF-16 surrogates.
+ * Keep valid supplementary code points (including emoji) intact. */
+function stringifyWellFormed(value: unknown): string {
+  return JSON.stringify(value, (_key, field: unknown) => {
+    if (typeof field === 'string' && /[\uD800-\uDFFF]/u.test(field))
+      throw new ToolError('INVALID_INPUT', 'Development input contains unpaired Unicode surrogates.');
+    return field;
+  });
+}
+
+/** Bound object traversal *before* Zod parsing or Registry/Workspace effects.
+ * Network MCP input is JSON, so repeated object references are non-canonical. */
+const maxInputDepth = 16;
+const maxInputNodes = 16_384;
+function assertBoundedInputTree(root: unknown): void {
+  const stack: {value: unknown; depth: number}[] = [{value:root,depth:0}];
+  const visited = new WeakSet<object>();
+  let nodes = 0;
+  while (stack.length) {
+    const {value,depth} = stack.pop()!;
+    if (++nodes > maxInputNodes || depth > maxInputDepth)
+      throw new ToolError('LIMIT_EXCEEDED','Development input exceeds structural depth or node limits.');
+    if (!value || typeof value !== 'object') continue;
+    if (visited.has(value))
+      throw new ToolError('INVALID_INPUT','Development input contains repeated object references.');
+    visited.add(value);
+    const children = Array.isArray(value) ? value : Object.values(value);
+    for (const child of children) stack.push({value:child,depth:depth+1});
+  }
+}
+
+function receiptPaths(step: BatchArgumentsV2['actions'][number]): string[] {
+  switch (step.tool) {
+    case 'read': case 'write': return step.args.files.map(file => file.path);
+    case 'delete': return step.args.paths.map(item => item.path);
+    case 'rename': return step.args.moves.flatMap(move => [move.from, move.to]);
+    default: return [];
+  }
+}
+
+/** Reserve space for path outcomes and digest-pinned read continuations. */
+export function batchEvidenceReserve(batch: BatchArgumentsV2): number {
+  return batch.actions.reduce((size, step) => size + receiptPaths(step).reduce(
+    (bytes, path) => bytes + utf8.encode(JSON.stringify(path)).byteLength + (step.tool === 'read' ? 400 : 96), 0),
+  batchLedgerBaseBytes);
+}
+
+/**
+ * Pure checks for an already decoded batch. Callers supply approved hosts only
+ * at the trusted browser boundary, where the Operator's policy is stored.
+ */
+export function preflightDevelopmentBatch(batch: BatchArgumentsV2, approvedHosts?: readonly string[]): void {
+  const serialized = stringifyWellFormed(batch);
+  if (utf8.encode(serialized).byteLength > LIMITS.transportBytes - batchEnvelopeReserve) {
+    throw new ToolError('LIMIT_EXCEEDED', 'Batch exceeds the serialized browser envelope budget.');
+  }
+  if (batchEvidenceReserve(batch) > batchResultBudget) {
+    throw new ToolError('LIMIT_EXCEEDED', 'Batch cannot retain bounded step and file continuation evidence.');
+  }
+  let decodedWriteBytes = 0;
+  // Only adjacent mutations stage against one known file set. Other actions
+  // can publish independently, so their content must be checked at runtime.
+  const declaredFiles = new Set<string>();
+  const declaredMissing = new Set<string>();
+  const requireStagedState = (path: string, shouldExist: boolean) => {
+    if (shouldExist ? declaredMissing.has(path) : declaredFiles.has(path)) {
+      throw new ToolError('INVALID_INPUT', 'A mutation contradicts an earlier path outcome in the same publication segment.');
+    }
+  };
+  const stagePath = (path: string, exists: boolean) => {
+    if (exists) {
+      declaredFiles.add(path);
+      declaredMissing.delete(path);
+    } else {
+      declaredMissing.add(path);
+      declaredFiles.delete(path);
+    }
+  };
+  for (const step of batch.actions) {
+    if (step.tool === 'write' || step.tool === 'delete' || step.tool === 'rename') {
+      decodedWriteBytes += preflightBatchMutation(step);
+      if (step.tool === 'write') {
+        for (const file of step.args.files) {
+          requireStagedState(file.path, !file.ifAbsent);
+          stagePath(file.path, true);
+        }
+      } else if (step.tool === 'delete') {
+        for (const item of step.args.paths) {
+          requireStagedState(item.path, true);
+          stagePath(item.path, false);
+        }
+      } else {
+        for (const move of step.args.moves) {
+          requireStagedState(move.from, true);
+          requireStagedState(move.to, false);
+          stagePath(move.from, false);
+          stagePath(move.to, true);
+        }
+      }
+      assertNoFilePathConflicts([...declaredFiles]);
+      continue;
+    }
+    declaredFiles.clear();
+    declaredMissing.clear();
+    switch (step.tool) {
+      case 'read':
+        assertNoPathCollisions(step.args.files.map(file => file.path));
+        break;
+      case 'fetch_url':
+        assertNoFilePathConflicts(step.args.requests.map(request => request.path));
+        for (const request of step.args.requests) parsePublicFetchDestination(request.url, approvedHosts);
+        break;
+      case 'fetch_generator':
+        if (new Set(step.args.generators.map(generator => generator.slug)).size !== step.args.generators.length) {
+          throw new ToolError('INVALID_INPUT', 'Duplicate public generator.');
+        }
+        for (const generator of step.args.generators) {
+          if (!generator.paths) continue;
+          assertNoFilePathConflicts(generator.paths);
+          if (generator.paths.some(path => path.startsWith('scratch/') || path.startsWith('imports/'))) {
+            throw new ToolError('PATH_DENIED', 'Public generators contain only native source files.');
+          }
+        }
+        break;
+    }
+  }
+  if (decodedWriteBytes > LIMITS.transportBytes - batchEnvelopeReserve) {
+    throw new ToolError('LIMIT_EXCEEDED', 'Batch inline writes exceed the decoded byte budget.');
+  }
+}
+
 export function parseDevelopmentCall(name: string, raw: unknown) {
   if (!developmentToolNames.includes(name as DevelopmentTool))
     throw new ToolError('INVALID_INPUT', 'Unknown development tool.');
+  assertBoundedInputTree(raw);
   if (Object.hasOwn(special, name)) {
     const parsed = special[name as keyof typeof special].safeParse(raw);
     if (!parsed.success) throw new ToolError('INVALID_INPUT', 'Invalid operation scope or status arguments.');
+    stringifyWellFormed(parsed.data);
     return {name: name as DevelopmentTool, args: parsed.data as Record<string, unknown>};
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw))
@@ -144,6 +299,24 @@ export function parseDevelopmentCall(name: string, raw: unknown) {
   const tool = name as keyof typeof developmentToolArgs;
   const parsed = developmentToolArgs[tool].safeParse(args);
   if (!parsed.success) throw new ToolError('INVALID_INPUT', 'Invalid development tool arguments.');
+  if (tool === 'batch') preflightDevelopmentBatch(parsed.data as BatchArgumentsV2);
+  else {
+    const serialized = stringifyWellFormed(parsed.data);
+    if (utf8.encode(serialized).byteLength > LIMITS.transportBytes - batchEnvelopeReserve)
+      throw new ToolError('LIMIT_EXCEEDED','Development input exceeds serialized envelope byte budget.');
+    // Public admission rejects invalid bytes, conflicting paths and missing
+    // mutation preconditions before the operation is durably recorded.
+    // Browser execution independently revalidates current file state.
+    if (tool === 'write') {
+      const args = parsed.data as z.infer<typeof filesystemV2Schemas.write>;
+      if ('files' in args) preflightBatchMutation({tool:'write',args});
+      else if (args.mode === 'chunk') base64Length(args.data);
+    } else if (tool === 'delete') {
+      preflightBatchMutation({tool:'delete',args:parsed.data as z.infer<typeof filesystemV2Schemas.delete>});
+    } else if (tool === 'rename') {
+      preflightBatchMutation({tool:'rename',args:parsed.data as z.infer<typeof filesystemV2Schemas.rename>});
+    }
+  }
   if (hasEffectV2(tool, parsed.data as Record<string, unknown>) && operationKey === undefined)
     throw new ToolError('INVALID_INPUT', 'This tool requires an operationKey.');
   return {name: name as DevelopmentTool, args: parsed.data as Record<string, unknown>, delivery: delivery.data};

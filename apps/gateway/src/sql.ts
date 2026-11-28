@@ -9,7 +9,7 @@ export class SqlRecords {
   private usage: SqlUsage = { reads: 0, writes: 0, statements: 0, unmetered: 0 };
   constructor(private storage: DurableObjectStorage) {
     this.query(
-      "CREATE TABLE IF NOT EXISTS records (key TEXT NOT NULL, part INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(key, part))",
+      "CREATE TABLE IF NOT EXISTS records (key TEXT NOT NULL, part INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(key, part)) WITHOUT ROWID",
     );
   }
   /** All statements consume their cursor before reading Cloudflare's counters. */
@@ -17,20 +17,24 @@ export class SqlRecords {
     this.usage.statements++;
     let cursor;
     try {cursor = this.storage.sql.exec<T>(sql,...args);}
-    catch(error){this.usage.unmetered++;trackSql(sql,{reads:0,writes:0,statements:1,unmetered:1});throw error;}
+    catch(error){this.usage.unmetered++;trackSql(sql,{reads:0,writes:0,statements:1,unmetered:1},args);throw error;}
     try { return cursor.toArray(); }
     finally {
       const metered=typeof cursor.rowsRead==="number"&&typeof cursor.rowsWritten==="number";
       const sample={reads:metered?cursor.rowsRead:0,writes:metered?cursor.rowsWritten:0,statements:1,unmetered:metered?0:1};
       this.usage.reads+=sample.reads;this.usage.writes+=sample.writes;this.usage.unmetered+=sample.unmetered;
-      trackSql(sql,sample);
+      trackSql(sql,sample,args);
     }
   }
   snapshotUsage(): SqlUsage { return { ...this.usage }; }
   get<T>(key: string, fallback?: T): T {
-    const rows = this.query<{ value: string }>("SELECT value FROM records WHERE key=? ORDER BY part", key);
+    const rows = this.query<{ part: number; value: string }>("SELECT part,value FROM records WHERE key=? ORDER BY part", key);
     if (!rows.length) return fallback as T;
     try {
+      // A syntactically valid JSON body does not establish record integrity.
+      // Refuse gaps, orphaned first parts and noncanonical part numbers.
+      if (rows.some((r, i) => r.part !== i || typeof r.value !== "string" || r.value.length > 32000))
+        throw new Error("Invalid record parts");
       return JSON.parse(rows.map((r) => r.value).join("")) as T;
     } catch {
       // Never silently default corrupted identity, Grant, or operation state.

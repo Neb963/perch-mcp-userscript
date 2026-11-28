@@ -8,7 +8,9 @@
     "test": "node --import tsx --test --test-concurrency=4 tests/unit/*.test.ts tests/integration/*.test.ts",
     "build": "node --import tsx scripts/build.ts",
     "check": "npm run typecheck && npm test && npm run build && npm run verify:artifacts",
-    "verify:artifacts": "node --import tsx scripts/verify-artifacts.ts"
+    "verify:artifacts": "node --import tsx scripts/verify-artifacts.ts",
+    "audit:requirements": "node scripts/audit-requirements.mjs",
+    "audit:requirements:strict": "node scripts/audit-requirements.mjs --strict"
   },
   "engines": {
     "node": ">=22"
