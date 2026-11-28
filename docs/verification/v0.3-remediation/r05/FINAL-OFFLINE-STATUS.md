@@ -1,5 +1,11 @@
 # R05 — Offline takeover exit, exact-head evidence and unresolved gates
 
+## 2026-11-28 R06 documentation-only qualification (current register, supersedes numeric totals below)
+
+**Current independently tested code:** [d78a023](https://github.com/Neb963/perch-mcp-userscript/commit/d78a023ad0f2171cbf0732d24fdb0b73b9ea85dc); [offline CI 46149708275](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46149708275) **716 passed / 0 failed / 1 historical skip**. No runtime SQL change remains after zero-benefit cache experiment was reversed. Native five-stage lifecycle **187 reads / 44 writes**, legacy **251/74**; SQL target **≤120/40 FAILED**. The actual unsaved preview pixel capture remains unsupported. Eight documented-authority **T0-only** S00 clauses are now independently qualified by the passing exact-code tests; [direct proof](../r06/S00-DOC-QUALIFICATION.md).
+
+**Current strict inventory:** **1,317** clauses: **101 PASS**, **4 FAIL**, **1,173 NOT_STARTED**, **24 DEFERRED_OWNER**, **1 BLOCKED_FEASIBILITY**, **14 SUPERSEDED_BY_OWNER_AMENDMENT**, **0 IMPLEMENTED_UNVERIFIED**. This is not a v0.3 release qualification; no live provider, browser, screenshot, production API, deployment or merge occurred. Earlier reports below are historical checkpoints.
+
 ## 2026-11-28 continuation update (supersedes earlier numeric status below)
 
 **Verified implementation source:** `0c4a44e9c1006f329f2efe3cf9813a712c1c4425`; tree `6346f68e81e0f2fa1e4d8d96b03f5ff372984943`. [CI 46147393916](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46147393916): **708 passed, 0 failed, 1 historical skip**; all workflow steps success including exact artifact build/hash checks and nondeployment Wrangler dry-run. All eight downloaded checksums independently matched. Installer TXT/JS byte-identical, SHA-256 `93685686ff9990058fbed4014955cd67d2c3018e1d7186b114ca873f61e4e70e`; candidate ZIP `294d1ed10491908a005424c76657847dd7acd790b82c376cb865f3ed4a158bba`. Installer runtime bytes are unchanged from the previous synthetic UI evidence, which remains historical and not native acceptance.
