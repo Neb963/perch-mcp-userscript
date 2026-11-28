@@ -1,6 +1,6 @@
 # Implementation ledger
 
-## R08 — canonical finishing state and direct S02-009 boundary test (in progress)
+## R08 — finishing state, direct Target/discovery and pre-admission qualifications (offline verified)
 
 - Baseline: source/docs `d9906633467e72d3ecb1364fb60139b5110a3698`, [successful offline CI 46150920907](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46150920907), 727 PASS / 0 FAIL / 1 historical SKIP; 1,317 clauses = 112 PASS / 4 FAIL / 1,162 NOT_STARTED / 24 OWNER / 1 feasibility BLOCKED / 14 superseded.
 - [`FINISHING-STATE.md`](docs/verification/v0.3-remediation/FINISHING-STATE.md) created at `bf60957c05c86d2afe87d10a363d147b5178bf74`. This is the cross-agent restart index, not a second requirements database. Includes roadmap, decision register, exact blocker/evidence totals, local reproduction constraints, and next-agent action.
