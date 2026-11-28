@@ -495,6 +495,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
   const mutationPending = new Set<string>();
   let authority: { generation: number; installation: string } | undefined;
   let remoteAction: { generation: number; installation: string } | undefined;
+  const isDocumentHidden=()=>doc.visibilityState==='hidden';
   let approvalRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   function stopApprovalRefresh() {
     if (approvalRefreshTimer !== undefined) clearTimeout(approvalRefreshTimer);
@@ -1843,7 +1844,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       }
       // Check generation after the await: a closed or superseded manager must
       // never restart the timer. Only one automatic request is in flight.
-      if (own !== generation || destroyed || !opened || tab !== "Agents" || doc.visibilityState==="hidden") return;
+      if (own !== generation || destroyed || !opened || tab !== "Agents" || isDocumentHidden()) return;
       const delay = Math.max(quotaDelay,approvalFailures
         ? Math.min(60000,4000*2**Math.min(approvalFailures,4))
         : pendingApprovalCount || Date.now()-approvalWatchStarted < 30000 ? 4000 : 15000);

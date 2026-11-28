@@ -106,9 +106,11 @@ export function admissionBudgetPolicy(env: BudgetEnvironment): BudgetPolicy {
   // Unknown earlier-day traffic is not silently initialized to zero. This
   // configurable margin is a local allocation assumption, never account proof.
   const defaultBaseline=Object.fromEntries(BUDGET_DIMENSIONS.map(key => [key,Math.ceil(caps[key]*0.2)])) as BudgetVector;
-  // One measured continuously active client rotates 96 times/day at 2 KV puts
-  // per rotation. Reserve 256 to include issuance and retry margin. Additional
-  // clients require an explicit Operator baseline; this is not a KV limiter.
+  // Legacy v1 uses 900-second tokens and may rotate 96 times/day at two
+  // KV puts per refresh. V2 qualifies a much longer finite access TTL but
+  // cannot infer account-wide OAuth issuance, independent clients or retries.
+  // Retain conservative 256 baseline until the operator measures account use.
+  // This Workspace-local estimate is not an account-wide KV limiter.
   defaultBaseline.kvWrites=Math.max(defaultBaseline.kvWrites,256);
   const baseline=configuredVector(env.ADMISSION_BUDGET_BASELINE_JSON,defaultBaseline,true);
   if (BUDGET_DIMENSIONS.some(key => baseline[key] > caps[key]))
