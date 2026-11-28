@@ -40,8 +40,9 @@ test('R04 native v2 RUNNING acknowledgment avoids unrelated maintenance yet expi
     const before=await fixtureSnapshot(h,f);
     await h.browser(f,'reply',{operationId:normal.operationId,phase:'RUNNING'});
     const cost=metricDelta(before,await fixtureSnapshot(h,f));
+    assert.ok(cost.workspace,'A native Workspace metric sample is required');
     assert.equal(cost.workspace.requests,1);
-    assert.ok(cost.workspace.sqlReads<20,
+    assert.ok((cost.workspace.sqlReads??Infinity)<20,
       'RUNNING acknowledgement should not enumerate global expiry and maintenance indexes');
     await h.browser(f,'reply',{operationId:normal.operationId,phase:'SUCCEEDED',result:{
       operationId:normal.operationId,status:'SUCCEEDED',effectState:'NONE',data:{fixture:true},
