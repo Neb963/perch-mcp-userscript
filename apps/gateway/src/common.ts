@@ -141,7 +141,10 @@ export async function parseBody(
       if (done) break;
       count += value.byteLength;
       if (count > max) {
-        await reader.cancel();
+        // Cancellation of one branch of a cloned Request stream can await
+        // consumption of its sibling indefinitely. Initiate cancellation,
+        // but do not delay the bounded 413 rejection on tee coordination.
+        void reader.cancel().catch(() => undefined);
         throw new ApiError(
           "LIMIT_EXCEEDED",
           "Request body exceeds transport limit.",

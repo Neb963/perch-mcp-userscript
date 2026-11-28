@@ -48,6 +48,10 @@ F10 status semantics: stale heartbeat is not verified source. Registry detail mu
 - Remaining: F06 conservative historical storage reclamation, actual preview pixels feasibility, all remaining A01–A34 matrix entries, full R04 performance and R05 final exact-head qualification. No unfinished row is PASS.
 R05 first exact-head CI qualification at `42ab329` [run 46097599704](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46097599704) succeeded: 686 tests passed, zero failed, one skipped, both offline cost paths, inventory generation, release build/hash check and Wrangler dry-run. Inventory has 1,317 distinct clauses: 54 PASS, 1,196 NOT_STARTED, 28 FAIL, 24 DEFERRED_OWNER, 1 BLOCKED_FEASIBILITY and 14 SUPERSEDED; the strict release gate fails by design. The artifact initially stamped synthetic PR merge `GITHUB_SHA`; next checkpoint corrects provenance to the checked-out source SHA and tree, enforcing expected PR head in CI.
 
+### R04 cloned-body oversize rejection (2026-11-28)
+
+- CI on f30ca88 showed a bounded JSON classifier unit hanging with an oversized cloned Request body. Root cause: parseBody awaits reader.cancel() on a clone tee whose sibling body is not consumed. Implement nonblocking cancellation on the >512 KiB error branch, preserving immediate 413 behavior and never treating oversized input as a valid scoped tool call.
+- Add a bounded wall-clock regression test for invalid/oversized request shapes so a hung reader cannot cancel the whole test subprocess silently. Existing F05 late-revocation image test passed in the same run; do not change its post-hydration Grant recheck.
 ### R04 48027bd fault-injection correction
 
 - CI 46103447198 found a test packaging error: the pure unit classifier imported the Cloudflare Worker entrypoint under Node. Move the same bounded classifier to pure `mcp-scope.ts` and retain it as an index.ts dependency. No runtime authority changes.

@@ -29,5 +29,18 @@ test('R04 malformed, non-tool and oversized MCP requests retain outer Grant auth
     new Request(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
       jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'workspace_status',arguments:{pad:'x'.repeat(512*1024)}},
     })}),
-  ])assert.equal(await isScopedDevelopmentCall(request),false,'Unexpected optimization of unsafe MCP input');
+  ]) {
+    let timeout:ReturnType<typeof setTimeout>|undefined;
+    try {
+      const result=await Promise.race([
+        isScopedDevelopmentCall(request),
+        new Promise<never>((_resolve,reject)=>{
+          timeout=setTimeout(()=>reject(new Error('Cloned request oversized-body parser deadlocked.')),2_000);
+        }),
+      ]);
+      assert.equal(result,false,'Unexpected optimization of unsafe MCP input');
+    } finally {
+      if(timeout)clearTimeout(timeout);
+    }
+  }
 });
