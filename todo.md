@@ -1,10 +1,10 @@
 # Implementation ledger
 
-## W4 — exact development catalog and batching input qualification (CI PENDING)
+## W4 — exact development catalog and batching input qualification (OFFLINE VERIFIED)
 
 - Candidate atomic clauses: S03-011/012/014 (19-tool Workerd catalog, unavailable capture metadata, conservative read-only annotations); S03-015/021/022/023 (closed nested batch, effect operationKey, optional pure-read key and nested delivery field rejection).
 - Added direct true SDK tools/list assertions in `tests/integration/result-scope-v2.test.ts`; added positive/negative real production parser tests in `tests/unit/development-v2.test.ts`.
-- **Do not mark PASS until new exact-head CI succeeds and observes each assertion.** This adds no new permissions or production effects.
+- The source [`5451c65`](https://github.com/Neb963/perch-mcp-userscript/commit/5451c65b80cc0a0b25ac9905f03c15ddd7ccdfea) passed [exact-head offline CI 46159246081](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46159246081): **733 PASS/0 FAIL/1 historical SKIP**. Direct observation allowed exactly seven atomic row promotions in `SPEC-00-05.md` (S03-011/012/014/015/021/022/023); [R12 evidence](docs/verification/v0.3-remediation/r12/DIRECT-QUALIFICATION.md). No live provider testing, permissions or production effects.
 
 ## W2 — scoped result authorization SQL experiment (VERIFIED partial improvement)
 
