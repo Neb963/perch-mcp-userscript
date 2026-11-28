@@ -229,8 +229,7 @@ test('S03-028/029 selected local read bounds, ranges, consistency and READ_SOURC
   const hash='a'.repeat(64);
   const accepted=parseDevelopmentCall('read',{target,files:selected,expectedLocalRevision:correctRevision});
   assert.equal((accepted.args.files as unknown[]).length,64);
-  const result=(await executeDevelopment({...f.context,envelope:{...f.context.envelope,args:accepted.args}}))
-    as {files:{path:string;content?:string;error?:unknown}[]};
+  const result=await executeDevelopment({...f.context,envelope:{...f.context.envelope,args:accepted.args}}) as {files:{path:string;content?:string;error?:unknown}[]};
   assert.equal(result.files.length,64);
   assert.deepEqual(result.files.map(row=>row.path),selected.map(row=>row.path));
   assert.equal(result.files[0]?.content,'A');
