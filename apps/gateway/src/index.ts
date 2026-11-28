@@ -513,16 +513,21 @@ function mcpDevelopment(request: Request, env: Env, props: AuthProps, agentId: s
           const requested = parseTarget(target);
           const name = call.name as keyof typeof developmentToolArgs;
           const verifiedStatus = call.name === 'workspace_status';
-          const needed = resultOp ? [] : verifiedStatus ? ['READ_SOURCE'] : requiredPermissionsV2(name,call.args);
-          const auth = await rpc<{ workspace: WorkspaceRecord; grant: {permissions:string[]}; policyRevision:number }>(
-            registry(env), '/internal/authorize', {...inputScope,permissions:needed,resultAccess:true});
           const stub = workspace(env,requested.workspaceId);
           if (resultOp) {
+            // There is no new admission to authorize. The Workspace resolves
+            // the *original* Operation first, then freshly checks its exact
+            // Connector/Grant/Target against Registry before any cancellation
+            // or release of results. An earlier generic Registry call here
+            // duplicated reads and did not authorize that original scope.
             data = await rpc(stub, call.name === 'operation_status' ? '/internal/status' : '/internal/cancel', {
-              ...inputScope,workspaceId:requested.workspaceId,bindingRevision:auth.workspace.bindingRevision,
+              ...inputScope,workspaceId:requested.workspaceId,
               operationId:call.args.operationId,operationKey:call.args.operationKey,
             });
           } else {
+            const needed = verifiedStatus ? ['READ_SOURCE'] : requiredPermissionsV2(name,call.args);
+            const auth = await rpc<{ workspace: WorkspaceRecord; grant: {permissions:string[]}; policyRevision:number }>(
+              registry(env), '/internal/authorize', {...inputScope,permissions:needed,resultAccess:true});
             operationKey ??= 'k2.'+Date.now()+'.'+crypto.randomUUID();
             submitted = true;
             data = await rpc(stub,'/internal/admit',{

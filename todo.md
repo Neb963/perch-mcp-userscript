@@ -1,11 +1,18 @@
 # Implementation ledger
 
-## R10 — browser effect-boundary preflight and checkpoint reconciliation (CI PENDING)
+## W2 — scoped result authorization SQL experiment (MEASUREMENT PENDING)
+
+- Hypothesis: Worker repeats a generic Registry authorization for result/status or cancel before Workspace performs the necessary *original Operation scope* authorization. Removing the former avoids redundant per-operation Registry SQL while the latter retains fresh revocation, Grant, Target, permission and bindingRevision checks.
+- Changed `apps/gateway/src/index.ts#mcpDevelopment` to route result/cancel by authenticated opaque scope directly to Workspace. In `workspace.ts#authorizeScopedResult`, use that same authoritative Registry result to enforce the former bindingRevision fence without an earlier Worker request.
+- Added Workerd integration coverage for original Grant read/cancel, unrelated Grant denial, altered Target denial and no unauthorized cancellation. This is **not** a completed SQL-budget fix. Compare identical native fixture with 187/44, and revert if there is no measured improvement.
+- Next: one exact-head offline CI/SQL measurement; record actual stage and total counters separately from legacy; no requirement promotion for SQL until ≤120/40.
+
+## R10 — browser effect-boundary preflight and checkpoint reconciliation (OFFLINE VERIFIED)
 
 - Verified entry branch HEAD: `8d979e6c97e499bf8d43c5bc3cf4feef2b743738`; exact-head [CI 46156655650](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46156655650) passed 730/0/1. Updated stale FINISHING-STATE.md commit/CI/artifact fields.
 - Recheck standalone development tool arguments through canonical admission preflight before browser execution; reject reserved transport/delivery fields, malformed bytes, duplicate paths, and invalid mutation preconditions even after upstream admission. Preserve permission ceilings and batch host policy checks.
-- Added direct `S03-009` negative tests and one valid write in `tests/unit/development-v2.test.ts`. **Awaiting exact-head offline verification; do not promote S03-009 or claim a PASS.**
-- Next: examine exact-head CI, fix any test/type failures, qualify only with direct evidence. Continue SQL-cost structural experiments independently. No live tests, deployments, owner data modifications or merge.
+- Added direct `S03-009` negative tests and one valid write in `tests/unit/development-v2.test.ts`; [CI 46158172940](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46158172940) verified 731 PASS/0 FAIL/1 historical SKIP at `cbef2a2`. Marked only S03-009 PASS after direct evidence.
+- Next: measure W2 auth read duplication against the same 187/44 native lifecycle, validate original Grant and binding revision fencing, then verify exact-head CI. No live tests, deployments, owner data modifications or merge.
 
 
 ## R09 — bounded v2 input admission (offline verified)

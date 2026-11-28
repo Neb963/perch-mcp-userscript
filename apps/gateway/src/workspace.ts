@@ -535,9 +535,14 @@ export class Workspace {
     if (!op.target || op.props.contractVersion !== 2 || props?.contractVersion !== 2 ||
         op.target !== b.target || op.props.grantId !== props.grantId || op.agentId !== b.agentId)
       throw new ApiError('NOT_FOUND', 'Operation not found in this scope.', 404);
-    await rpc(registry(this.env), '/internal/authorize', {
+    const authority = await rpc<{workspace:{bindingRevision:number}}>(registry(this.env), '/internal/authorize', {
       props, agentId: op.agentId, target: op.target, permissions: op.requiredPermissions, resultAccess: true,
     });
+    // Preserve the previous Worker-side bindingRevision fence without its
+    // separate Registry request. Target generations and original Grant are
+    // checked above; this additionally rejects revision drift.
+    if (authority.workspace.bindingRevision !== op.bindingRevision)
+      throw new ApiError('NOT_FOUND', 'Operation not found in this scope.', 404);
   }
   private successfulEffect(op: Operation): 'NONE' | 'KNOWN' {
     const retained = op.result as {effectState?: unknown} | undefined;

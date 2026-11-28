@@ -9,18 +9,18 @@ This is an *operational index*, not a second requirement database. Normative aut
 | Field | Exact observed value |
 | --- | --- |
 | Default branch | `main`, `298f3b9619335364c668a69b6f04570ae530fcab` |
-| Remediation branch checkpoint before this document | `8d979e6c97e499bf8d43c5bc3cf4feef2b743738`, tree `a9679467a8317647a58a4fb0f876b19c75268c84` (verified entry checkpoint; inspect current HEAD for later changes) |
-| Last independently offline-verified source/docs commit | `8d979e6c97e499bf8d43c5bc3cf4feef2b743738` |
-| Verified offline CI | [46156655650](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46156655650), successful at the verified entry SHA: 730 PASS, 0 FAIL, 1 historical SKIP |
+| Remediation branch checkpoint before this document | `cbef2a233a1e3fdb21da2c315aa0d1eec80853c6`, tree `77f69188cc56e30518bc5a387526e864b88b3859` (R10 verified code checkpoint; inspect current HEAD for later changes) |
+| Last independently offline-verified source/docs commit | `cbef2a233a1e3fdb21da2c315aa0d1eec80853c6` |
+| Verified offline CI | [46158172940](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46158172940), successful at the R10 code SHA: 731 PASS, 0 FAIL, 1 historical SKIP |
 | PR | [#25](https://github.com/Neb963/perch-mcp-userscript/pull/25): open, draft, unmerged |
 | Release | **NOT ELIGIBLE**; neither complete offline qualification nor production acceptance |
 | Native five-stage SQL lifecycle | **187 rows read, 44 written**; required **≤120/40**; native deficit 67 reads and 4 writes |
 | Measured stages (read/write) | admission 44/10; poll/dispatch 50/8; RUNNING 14/1; terminal/outbox 56/25; scoped status 23/0 |
 | Legacy equivalent | **251 rows read, 74 written**; separately measured, not counted toward native target |
-| Atomic requirement register | 1,317 total = **124 PASS + 4 FAIL + 1,150 NOT_STARTED + 24 DEFERRED_OWNER + 1 BLOCKED_FEASIBILITY + 14 SUPERSEDED** |
+| Atomic requirement register | 1,317 total = **125 PASS + 4 FAIL + 1,149 NOT_STARTED + 24 DEFERRED_OWNER + 1 BLOCKED_FEASIBILITY + 14 SUPERSEDED** |
 | Active FAIL requirement IDs | `S07-023` (actual unsaved-preview pixels); `S08-058`, `F13.01`, `F13.02` (native SQL budget) |
 | Feasibility blocker | Actual authorized preview pixels lack a verified Firefox/Violentmonkey-only capture implementation |
-| Package evidence | GitHub Actions artifact `perch-mcp-userscript-tested` for 46156655650; candidate ZIP SHA-256 `6a7b59365324a7f44f8afe63165b5d01cd7573dc28dab532fcf6a2b1006a312c`; userscript `.txt`/`.js` SHA-256 `752a9ab6e4f4ac073181c593c170e13f462275df64884735ba0737d7e5d5be6b` |
+| Package evidence | GitHub Actions artifact `perch-mcp-userscript-tested` for 46158172940; candidate ZIP SHA-256 `fccbc91d2f9face04d65c2196eecc8fcba38dcb71b2a9deb411c4325e7f4093e`; userscript TXT/JS exact mirror verified by CI; check its `dist/SHA256SUMS.txt` for individual hash |
 
 **Evidence limitations:** Historical passing tests cannot auto-qualify `NOT_STARTED` rows. The local Miniflare/Workerd operation benchmark is synthetic execution over actual Worker/Registry/Workspace and pinned SDK, not provider production. Source package recovered from the exact CI artifact agrees with the tested commit. In the present executor, the dependency registry is unreachable and `npm ci --offline` fails with `ENOTCACHED` for `zod@3.25.76`; installed Node is 22.16.0, while Babel 8 declares 22.18+ (or 24.11+). The existing CI is the last reproducible full offline verification until an environment with lockfile dependencies is available. Do not claim local test success from an attempted installation.
 
@@ -32,7 +32,7 @@ This is an *operational index*, not a second requirement database. Normative aut
 | W1 — Correctness/recovery | IN_PROGRESS | R01/R02/R03/R05 findings and 727-test CI; direct assertions exist for selected F01–F27 | Prioritize unqualified P0 authorization, uncertainty and recovery paths; reproduce and test production-path assertions | Unproven clauses must not be marked PASS |
 | W2 — Native database budget | READY | [R04 measurements](r04/PERFORMANCE-RESULTS.md), exact 187/44 lifecycle and rejected zero-saving cache trial | Profile actual hot SQL shapes by stage, propose falsifiable structural reduction; rerun same denominator and negatives | 67-read / 4-write deficit |
 | W3 — Preview pixels | BLOCKED_FEASIBILITY | [Feasibility analysis](r05/FINAL-OFFLINE-STATUS.md) | Prepare minimal owner-authorized design or prove Firefox userscript-only surface identity/capture; never substitute DOM rasterization | Operator capture permission/component choice if required |
-| W4 — Requirement verification | IN_PROGRESS | [Four registers](REQUIREMENT-TRACEABILITY.md); 124 directly qualified clauses | Qualify high-risk groups with direct runtime assertions and update existing register incrementally | 1,150 individually unqualified |
+| W4 — Requirement verification | IN_PROGRESS | [Four registers](REQUIREMENT-TRACEABILITY.md); 125 directly qualified clauses | Qualify high-risk groups with direct runtime assertions and update existing register incrementally | 1,149 individually unqualified |
 | W5 — Integration/compatibility | IN_PROGRESS | Legacy/native preservation and scoped manager evidence in R05; original A01 only partly qualified | Test exact v2 catalog, revocation, Target isolation, historical readers, failure/restart paths | Real browser/provider tests reserved |
 | W6 — Candidate/handoff | BLOCKED_OWNER | Exact 8d979e6 artifact hashes, build, Wrangler *dry-run* and CI already passed | Rebuild exact final source after engineering gates, preserve owners' acceptance checklist | W1/W2/W3/W4/W5; OWNER-01–04 |
 
@@ -40,12 +40,14 @@ This is an *operational index*, not a second requirement database. Normative aut
 
 ## C. Active work and immediately executable queue
 
-**R10 active, exact-head CI pending:** Reapply canonical development-call admission preflight at the actual browser execution boundary, rejecting reserved delivery-field injection, malformed bytes and conflicting paths before any side effects. New direct `S03-009` positive/negative test is awaiting CI. **No PASS promotion until evidence exists**; the native 187/44 SQL failure remains unchanged. Prior 8d979e6 artifacts remain historical evidence. Next independent workstream: W2 structural SQL reduction.
+**R10 completed direct qualification:** `S03-009` passed at [`cbef2a2`](https://github.com/Neb963/perch-mcp-userscript/commit/cbef2a233a1e3fdb21da2c315aa0d1eec80853c6) on [CI 46158172940](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46158172940), 731 PASS/0 FAIL/1 historical SKIP. Browser executor rejects malformed, altered and unauthorized standalone mutations before publication; positive write remains valid. See [R10 evidence](r10/DIRECT-QUALIFICATION.md). No SQL, screenshot or owner gate is waived.
+
+**W2 structural experiment (pending measurement):** Remove only the duplicate first Registry authorization for `operation_status` / `cancel_operation` in the Worker; Workspace retains fresh original-Operation Grant/Target/permission authorization and additionally checks the original binding revision against Registry's current Workspace. Test original-Grant success, replacement-Grant denial, cancellation and result access; compare unchanged native five-stage lifecycle against 187/44. If benchmark counters do not improve, revert. No assumed reduction before exact measurement.
 
 **R09 direct qualification:** `2e2f5221baddf0bf404accfe66ea8c3be230c46f`, [CI 46156403985](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46156403985) — 730 PASS, 0 FAIL, 1 SKIP. Explicit depth/node and serialized UTF-8 envelope limits reject malformed requests **before Registry or Workspace effects**; bounded positive inputs remain valid. S03-007 and S03-008 are independently qualified; [R09 evidence](r09/DIRECT-QUALIFICATION.md). The remaining 4 known failures and owner-only gates are unchanged.
 
 
-**R08 verified checkpoint:** `e3b47a9d6ab69b65d71db1607bf496967b5a2b69`, CI [46155702456](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46155702456) (729 PASS/0 FAIL/1 SKIP). Exact Workerd Target/discovery and pre-admission validation tests directly qualified S02-009/012/020/023/024 and S03-002/003/004/005/006. See [R08 evidence](r08/DIRECT-QUALIFICATION.md). 10 PASS promotions are limited to actual assertions. No Cloudflare production, real Firefox or provider effects. The next technical task is a *measured* structural SQL experiment, not another unverified status promotion. [SQL triage](r08/SQL-COST-TRIAGE.md); [capture decision](r08/PREVIEW-CAPTURE-DECISION.md).
+**R08 verified checkpoint:** `e3b47a9d6ab69b65d71db1607bf496967b5a2b69`, CI [46155702456](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46155702456) (729 PASS/0 FAIL/1 SKIP). Exact Workerd Target/discovery and pre-admission validation tests directly qualified S02-009/012/020/023/024 and S03-002/003/004/005/006. See [R08 evidence](r08/DIRECT-QUALIFICATION.md). 10 PASS promotions are limited to actual assertions. No Cloudflare production, real Firefox or provider effects. The next technical task is to measure the W2 status authorization experiment against the unchanged five-stage SQL denominator. [SQL triage](r08/SQL-COST-TRIAGE.md); [capture decision](r08/PREVIEW-CAPTURE-DECISION.md).
 
 
 - **Working scope:** nondeploying remediation PR #25. At R10 entry GitHub HEAD was 8d979e6 and PR #25 remained draft; check actual branch HEAD before future changes.
