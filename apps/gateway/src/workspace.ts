@@ -832,21 +832,20 @@ export class Workspace {
         const all = this.journal.activeStats();
         if (this.db.get(operatorRestoreKey))
           throw new ApiError('TRANSITION_BLOCKED', 'An Operator restore owns the Workspace writer reservation.', 409);
-        if (this.journal.pendingFull())
+        const admissionCaps=this.journal.admissionCaps();
+        if (admissionCaps.pendingFull)
           throw new ApiError(
             "QUOTA_EXCEEDED",
             "Terminal notice outbox is full; restore Registry communication before new work.",
             429,
           );
-        if (
-          this.journal.holdsFull()
-        )
+        if (admissionCaps.holdsFull)
           throw new ApiError(
             "QUOTA_EXCEEDED",
             "Unresolved-operation metadata budget reached; reconcile held operations.",
             429,
           );
-        if (op.mutating && this.journal.holds()) {
+        if (op.mutating && admissionCaps.holds) {
           if (op.target && op.tool === 'write' && (args.mode === 'commit' || args.mode === 'abort'))
             op.transferRecoveryOnly = true;
           else throw new ApiError('EFFECT_UNKNOWN', 'Workspace holds an unresolved effect.', 409);

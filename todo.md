@@ -48,6 +48,11 @@ F10 status semantics: stale heartbeat is not verified source. Registry detail mu
 - Remaining: F06 conservative historical storage reclamation, actual preview pixels feasibility, all remaining A01–A34 matrix entries, full R04 performance and R05 final exact-head qualification. No unfinished row is PASS.
 R05 first exact-head CI qualification at `42ab329` [run 46097599704](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46097599704) succeeded: 686 tests passed, zero failed, one skipped, both offline cost paths, inventory generation, release build/hash check and Wrangler dry-run. Inventory has 1,317 distinct clauses: 54 PASS, 1,196 NOT_STARTED, 28 FAIL, 24 DEFERRED_OWNER, 1 BLOCKED_FEASIBILITY and 14 SUPERSEDED; the strict release gate fails by design. The artifact initially stamped synthetic PR merge `GITHUB_SHA`; next checkpoint corrects provenance to the checked-out source SHA and tree, enforcing expected PR head in CI.
 
+### R04 native atomic admission caps snapshot
+
+- `dfdbc6c` native full read lifecycle measured **194 SQL reads / 57 writes**; exact v2 terminal reply removed five global-expiry read rows and retained late-observation UNKNOWN outcome. Native and legacy tests passed.
+- OperationStore native admission checks `pendingFull`, `holdsFull` and (mutating only) `holds` from the same canonical SQLite statistics row with separate point SELECTs. Replace with one validated `admissionCaps()` snapshot inside the *same synchronous* admission transaction, before any operation mutation. For legacy storage call original index methods. Preserve limits (128 pending, 128 unresolved), rollback behavior and fail-closed corruption errors.
+- Native and legacy exact-head cost benchmark and capacity tests must pass; preserve expiry, UNKNOWN holds, pending outbox and writer transitions. Do not treat the snapshot as cached authority across awaits.
 ### R04 v2 exact terminal expiry reconciliation
 
 - `ab790965` succeeded exact-head offline tests. Same-denominator native **199 SQL reads / 57 writes**, legacy 253/85; all receipt and Activity tests pass.

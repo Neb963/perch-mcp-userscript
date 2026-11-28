@@ -362,6 +362,20 @@ export class OperationStore<T extends StoredOperation> {
   pendingFull():boolean{return this.native?this.count('pendingCount')>=128:this.legacy().pendingFull();}
   holds():boolean{return this.native?this.count('holdCount')>0:this.legacy().holds();}
   holdsFull():boolean{return this.native?this.count('holdCount')>=128:this.legacy().holdsFull();}
+  /** One canonical capacity snapshot for synchronous admission. Native counts
+   * share one durable SQLite row; there is no await between the capacity check
+   * and the atomic admission commit. Legacy keeps its original index methods. */
+  admissionCaps():{pendingFull:boolean;holdsFull:boolean;holds:boolean} {
+    if(!this.native) {
+      const old=this.legacy();
+      return {pendingFull:old.pendingFull(),holdsFull:old.holdsFull(),holds:old.holds()};
+    }
+    const row=this.db.query<{pendingCount:number;holdCount:number}>(
+      'SELECT pendingCount,holdCount FROM operation_native_stats_v2 WHERE id=1')[0];
+    if(!row || !Number.isSafeInteger(row.pendingCount) || row.pendingCount<0 ||
+        !Number.isSafeInteger(row.holdCount) || row.holdCount<0)corrupt();
+    return {pendingFull:row.pendingCount>=128,holdsFull:row.holdCount>=128,holds:row.holdCount>0};
+  }
   leaseBlocked():boolean{return this.native?this.count('leaseCount')>0:this.legacy().leaseBlocked();}
   leaseBlockers():T[]{return this.native?this.load(this.keys(`SELECT key FROM ${TABLE} WHERE ${RECOVERY} AND leaseBlock=1 ORDER BY created LIMIT 128`)):this.legacy().leaseBlockers();}
   due(now:number):T[]{return this.native?this.load(this.keys(`SELECT key FROM ${TABLE} WHERE active=1 AND due<=? ORDER BY sequence LIMIT 9`,now)).concat(this.load(this.keys(`SELECT key FROM ${TABLE} WHERE active=0 AND due IS NOT NULL AND due<=? ORDER BY due LIMIT 128`,now))):this.legacy().due(now);}
