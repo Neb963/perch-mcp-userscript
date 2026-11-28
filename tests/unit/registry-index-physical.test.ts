@@ -29,7 +29,9 @@ test('R04 fresh Registry index avoids redundant kind/key B-tree while keyset pag
     .map(x=>x.name);
   assert.ok(!indexes.includes('registry_kind_v1'));
   assert.ok(indexes.includes('registry_due_v1'));
-  assert.ok(indexes.includes('registry_workspace_v1'));
+  assert.ok(!indexes.includes('registry_workspace_v1'));
+  for (const name of ['registry_workspace_grant_v1','registry_workspace_permit_v1','registry_workspace_hold_v1'])
+    assert.ok(indexes.includes(name),name);
   const query=f.sqlite.prepare(
     'EXPLAIN QUERY PLAN SELECT key,kind FROM registry_entity_v1 WHERE key>=? AND key<? ORDER BY key LIMIT 100 OFFSET ?')
       .all('grant/','grant/\uffff',0);
@@ -97,4 +99,50 @@ test('R04 derived count triggers write only hot count kinds, all non-hot counts 
     assert.equal(reopened.count('workspace'),1);
     assert.equal(reopened.count('terminal-notice'),0);
   }finally{f.close();}
+});
+
+
+test('R04 partial workspace indexes preserve grant and Hold predicates with terminal history',()=>{
+  const f=fixture();
+  try {
+    const now=Date.now();
+    const queries=[
+      ["SELECT key FROM registry_entity_v1 WHERE kind='grant' AND workspace=? AND state='active'",'registry_workspace_grant_v1'],
+      ["SELECT key FROM registry_entity_v1 WHERE kind='permit' AND workspace=? AND state='consumed' LIMIT 1",'registry_workspace_permit_v1'],
+      ["SELECT key FROM registry_entity_v1 WHERE kind='terminal-notice' AND workspace=? AND hold=1 LIMIT 1",'registry_workspace_hold_v1'],
+    ] as const;
+    for(const [sql,index] of queries){
+      const plan=f.sqlite.prepare('EXPLAIN QUERY PLAN '+sql).all('w1');
+      assert.ok(plan.some(row=>String(row.detail).includes(index)),JSON.stringify(plan));
+    }
+    for(let i=0;i<1000;i++){
+      f.db.put('permit/old-'+i,{workspaceId:'w1',state:'terminal',createdAt:now});
+      f.db.put('terminal-notice/w1/old-'+i,{phase:'SUCCEEDED',expires:now+60000,
+        event:{workspaceId:'w1',operationId:'old-'+i,tool:'read',phase:'SUCCEEDED',timestamp:now}});
+    }
+    f.db.put('grant/active',{workspaceId:'w1',state:'active',expiresAt:null});
+    f.db.put('grant/revoked',{workspaceId:'w1',state:'revoked',revokedAt:now,expiresAt:null});
+    f.db.put('grant/foreign',{workspaceId:'w2',state:'active',expiresAt:null});
+    assert.deepEqual(f.index.grants('w1'),['grant/active']);
+    assert.equal(f.index.bindingBlocked('w1'),false);
+    f.db.put('permit/live',{workspaceId:'w1',state:'consumed',createdAt:now});
+    assert.equal(f.index.bindingBlocked('w1'),true);
+    f.db.put('permit/live',{workspaceId:'w1',state:'terminal',createdAt:now});
+    const held={phase:'UNKNOWN',expires:now+60000,
+      event:{workspaceId:'w1',operationId:'live',tool:'write',phase:'UNKNOWN',timestamp:now}};
+    f.db.put('terminal-notice/w1/live',held);
+    assert.equal(f.index.bindingBlocked('w1'),true);
+    assert.equal(f.index.bindingBlocked('w2'),false);
+    f.db.put('terminal-notice/w1/live',{...held,event:{...held.event,resolution:{timestamp:now+1}}});
+    assert.equal(f.index.bindingBlocked('w1'),false);
+    // Exact legacy physical layout remains usable after restart. No schema migration.
+    for(const [,index] of queries)f.sqlite.exec('DROP INDEX '+index);
+    f.sqlite.exec('CREATE INDEX registry_workspace_v1 ON registry_entity_v1(kind,workspace,state,hold)');
+    const reopened=new RegistryIndex(f.db);
+    assert.deepEqual(reopened.grants('w1'),['grant/active']);
+    assert.equal(reopened.bindingBlocked('w1'),false);
+    f.db.put('permit/restarted',{workspaceId:'w1',state:'consumed',createdAt:now});
+    assert.equal(reopened.bindingBlocked('w1'),true);
+    assert.equal(reopened.bindingBlocked('w2'),false);
+  } finally {f.close();}
 });

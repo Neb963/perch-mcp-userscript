@@ -3,6 +3,14 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### R04 fresh Registry partial workspace indexes (2026-11-28)
+
+- Resume from verified `7260a9b` (offline CI 46143736524). Existing native benchmark 187/46 vs ≤120/40; strict inventory 88 PASS, 4 FAIL, 1186 NOT_STARTED, 24 OWNER, 1 capture blocker, 14 superseded.
+- Fresh-only replacement of the broad workspace index with three partial indexes matching the actual active Grant, consumed permit and unresolved Hold lookup predicates. Canonical records, due indexes, terminal retention and rollback compatibility remain unchanged. Existing physical layouts retain the original index.
+- Local focused production-module SQLite tests 4/4 passed (TypeScript transpile with locally available compiler; not pinned full-suite qualification). EXPLAIN confirms all three indexed query plans; 1000 successful terminal notices/permits do not obstruct live Grant and Hold lookups, unresolved and resolved outcomes retain exact predicates, and historical full index still works after reopen.
+- Locked local install unavailable (uncached dependency). Use existing nondeploying offline CI to measure the same five-stage native/legacy workload; retain only if measured net benefit without safety regression. No new PASS claim or production action. Continue unresolved requirements independently.
+
+
 ### 2026-11-28 complete takeover offline verification exit
 
 - `a736513`, [CI 46143344849](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46143344849) **705 pass/0 fail/1 skip**; exact checked-out tree, full builds/hashes/dry-run passed; no live operations. UI exact-bundle: 30 screenshots, 10/8/2 complete rows, zero outbound requests; local filter/approval/reassign/recovery/UNKNOWN revision details all pass.

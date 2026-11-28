@@ -34,7 +34,13 @@ export class RegistryIndex {
       // UPSERT. Already initialized databases retain their old index until a
       // separately authorized compatible migration; this is additive-safe.
       db.query("CREATE INDEX registry_due_v1 ON registry_entity_v1(kind,due) WHERE due IS NOT NULL");
-      db.query("CREATE INDEX registry_workspace_v1 ON registry_entity_v1(kind,workspace,state,hold)");
+      // Only three authoritative queries use a workspace index. Completed
+      // permits and known terminal notices cannot satisfy any of them. Fresh
+      // schemas therefore index only live grants, consumed permits and holds.
+      // Existing initialized databases retain their original covering index.
+      db.query("CREATE INDEX registry_workspace_grant_v1 ON registry_entity_v1(workspace,key) WHERE kind='grant' AND state='active'");
+      db.query("CREATE INDEX registry_workspace_permit_v1 ON registry_entity_v1(workspace,key) WHERE kind='permit' AND state='consumed'");
+      db.query("CREATE INDEX registry_workspace_hold_v1 ON registry_entity_v1(workspace,key) WHERE kind='terminal-notice' AND hold=1");
       db.query("CREATE INDEX registry_approval_v1 ON registry_entity_v1(kind,expires,key) WHERE kind='approval'");
       db.query("CREATE TABLE registry_dirty_v1 (key TEXT PRIMARY KEY) WITHOUT ROWID");
       db.query("CREATE TABLE registry_counts_v1 (kind TEXT PRIMARY KEY, count INTEGER NOT NULL) WITHOUT ROWID");
