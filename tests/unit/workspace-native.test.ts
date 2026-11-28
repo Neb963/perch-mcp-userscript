@@ -83,6 +83,9 @@ test('R04 partial terminal index excludes active rows, preserves terminal orderi
     store.put('operation/partial-index',current);
     assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM operation_native_v2 WHERE terminal IS NOT NULL").get()!.n,0);
     assert.equal(f.sqlite.prepare('SELECT activeCount FROM operation_native_stats_v2 WHERE id=1').get()!.activeCount,1);
+    const dispatched=store.get('operation/partial-index')!;
+    dispatched.phase='DISPATCHED';
+    store.put('operation/partial-index',dispatched);
     const running=store.get('operation/partial-index')!;
     running.phase='RUNNING';
     store.put('operation/partial-index',running);
