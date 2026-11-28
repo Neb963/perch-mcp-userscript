@@ -63,7 +63,7 @@ test('F09 directory-scoped compute lists metadata and hydrates only requested na
   const files = new Map(Array.from({length:100},(_,i) => ['src/file-'+i+'.txt', new Uint8Array([65+i%26])] as const));
   const f = await fixture('execute_js', {
     js: 'const paths=await fs.list("src"); let count=0; for(let i=0;i<100;i++) if(await fs.readTextFile("src/file-0.txt")==="A") count++; return {listed:paths.length,count};',
-    access:{read:['src/'],maxReads:101,maxBytes:1024},
+    access:{read:['src/'],maxReads:101},
   });
   const reads:string[][]=[];
   const adapter=f.vfs.adapter as unknown as Record<string,unknown>;
@@ -86,7 +86,7 @@ test('F09 directory-scoped compute lists metadata and hydrates only requested na
 test('F09 lazy native read invalidates the view after a same-size edit to a previously selected file', async () => {
   const f=await fixture('execute_js',{
     js:'await fs.readTextFile("src/a.txt"); await fs.readTextFile("src/b.txt"); return "unexpected";',
-    access:{read:['src/'],maxReads:3,maxBytes:1024},
+    access:{read:['src/'],maxReads:3},
   });
   const files=new Map([['src/a.txt',new Uint8Array([65])],['src/b.txt',new Uint8Array([66])]]);
   const adapter=f.vfs.adapter as unknown as Record<string,unknown>;

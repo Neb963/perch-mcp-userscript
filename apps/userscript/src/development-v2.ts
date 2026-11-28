@@ -46,6 +46,11 @@ async function scopedCompute(args: BrowserToolArgs<'execute_js'>, context: Devel
     : [{path:'main.pjs'}, {path:'index.html'}];
   const nativePaths = nativeManifest.map(row => row.path)
     .filter(path => pathMatchesRules(path, nativeRules)).sort();
+  // The declared native view is bounded before the guest starts. Request an
+  // exact path/subdirectory rather than an unbounded src/ grant when the
+  // generator has more entries than the operation's read budget.
+  if (nativePaths.length > maxReads)
+    throw new ExecutionError('LIMIT_EXCEEDED', 'Native source view exceeds its selected file limit.');
   const nativePathSet = new Set(nativePaths);
   const nativeView = new Map<string, Uint8Array | null>();
   const readablePaths = nativePaths.filter(path => pathMatchesRules(path, readRules))
@@ -116,16 +121,22 @@ async function scopedCompute(args: BrowserToolArgs<'execute_js'>, context: Devel
   // Write declarations require a native before-image even when the guest never
   // reads the path. Otherwise an operator edit made while the guest runs could
   // be silently incorporated into the publication precondition.
-  const writableNativePaths = nativePaths.filter(path => pathMatchesRules(path, writeRules));
-  if (writableNativePaths.length) {
+  // An explicitly tightened byte budget is a request for a pre-execution
+  // size proof. Native manifests may omit file sizes, so load only this
+  // declared bounded view before starting the guest; without an explicit
+  // smaller budget, read-only file bytes remain lazy.
+  const preflightNativePaths = nativePaths.filter(path =>
+    pathMatchesRules(path, writeRules) ||
+    args.access.maxBytes !== undefined && pathMatchesRules(path, readRules));
+  if (preflightNativePaths.length) {
     const baseline = await context.vfs.adapter.readSourceView(
-      writableNativePaths, [], writableNativePaths.length, maxBytes);
-    for (const path of writableNativePaths) {
+      preflightNativePaths, [], preflightNativePaths.length, maxBytes);
+    for (const path of preflightNativePaths) {
       const bytes = baseline.get(path);
-      if (!bytes) throw new ExecutionError('STALE_REVISION', 'Declared native write source disappeared.');
+      if (!bytes) throw new ExecutionError('STALE_REVISION', 'Declared native source disappeared.');
       loadedBytes += bytes.length;
       if (loadedBytes > maxBytes)
-        throw new ExecutionError('LIMIT_EXCEEDED', 'Declared native write baseline exceeds its byte budget.');
+        throw new ExecutionError('LIMIT_EXCEEDED', 'Selected source exceeded its byte limit.');
       nativeView.set(path, bytes.slice());
     }
     await assertNativeManifestUnchanged();
