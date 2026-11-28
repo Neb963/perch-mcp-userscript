@@ -146,3 +146,26 @@ test('R04 partial workspace indexes preserve grant and Hold predicates with term
     assert.equal(reopened.bindingBlocked('w2'),false);
   } finally {f.close();}
 });
+
+// A gap can leave valid JSON, so parsing alone cannot authorize a record.
+test('Canonical record integrity refuses missing, noncanonical and oversized parts without mutation',()=>{
+  const f=fixture();
+  try {
+    for (const [key,parts] of [
+      ['orphan',[[1,'{"active":true}']]],
+      ['gap',[[0,'{"active":'],[2,'true}']]],
+      ['negative',[[-1,'{"active":true}']]],
+      ['fractional',[[0,'{"active":'],[0.5,'true}']]],
+      ['oversized',[[0,JSON.stringify({body:'x'.repeat(32000)})]]],
+    ] as const) {
+      for (const [part,value] of parts) f.db.query('INSERT INTO records(key,part,value) VALUES(?,?,?)',key,part,value);
+      const before=f.db.query('SELECT part,value FROM records WHERE key=? ORDER BY part',key);
+      assert.throws(()=>f.db.get(key,{active:false}),/SQLITE_RECORD_CORRUPT/,key);
+      assert.deepEqual(f.db.query('SELECT part,value FROM records WHERE key=? ORDER BY part',key),before);
+    }
+    assert.deepEqual(f.db.get('missing',{active:false}),{active:false});
+    const value={body:'x'.repeat(31995)+'😀'.repeat(20000)};
+    f.db.put('healthy',value);
+    assert.deepEqual(f.db.get('healthy'),value);
+  } finally {f.close();}
+});

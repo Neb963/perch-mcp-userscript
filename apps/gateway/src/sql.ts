@@ -28,9 +28,13 @@ export class SqlRecords {
   }
   snapshotUsage(): SqlUsage { return { ...this.usage }; }
   get<T>(key: string, fallback?: T): T {
-    const rows = this.query<{ value: string }>("SELECT value FROM records WHERE key=? ORDER BY part", key);
+    const rows = this.query<{ part: number; value: string }>("SELECT part,value FROM records WHERE key=? ORDER BY part", key);
     if (!rows.length) return fallback as T;
     try {
+      // A syntactically valid JSON body does not establish record integrity.
+      // Refuse gaps, orphaned first parts and noncanonical part numbers.
+      if (rows.some((r, i) => r.part !== i || typeof r.value !== "string" || r.value.length > 32000))
+        throw new Error("Invalid record parts");
       return JSON.parse(rows.map((r) => r.value).join("")) as T;
     } catch {
       // Never silently default corrupted identity, Grant, or operation state.

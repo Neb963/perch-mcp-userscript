@@ -17,8 +17,8 @@ function fixture() {
     sql: { exec(query: string, ...args: (string | number | null)[]) {
       if (fault?.(query)) throw new Error("synthetic SQL write unavailable");
       sql.push(query);
-      if (query === "SELECT value FROM records WHERE key=? ORDER BY part" && args[0] === "activity") counts.activityWholeReads++;
-      if (query === "SELECT value FROM records WHERE key=? ORDER BY part" && args[0] === "library") counts.libraryWholeReads++;
+      if (query === "SELECT part,value FROM records WHERE key=? ORDER BY part" && args[0] === "activity") counts.activityWholeReads++;
+      if (query === "SELECT part,value FROM records WHERE key=? ORDER BY part" && args[0] === "library") counts.libraryWholeReads++;
       const statement = sqlite.prepare(query);
       const rows = /^(SELECT|EXPLAIN)/.test(query) ? statement.all(...args) : (statement.run(...args), []);
       return { toArray: () => rows, rowsRead: rows.length, rowsWritten: 0 };

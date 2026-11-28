@@ -3,6 +3,13 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### Fresh Registry index benchmark; canonical integrity and A01 evidence
+
+- `ec4b9fd` [offline CI 46147027731](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46147027731) passes all steps. Native five-stage workerd measurement is **187 reads / 44 writes** versus 187/46 baseline (terminal 56/25 rather than 56/27). Legacy is 251/74 versus 249/76; the fresh-only layout trades two additional legacy reads for two fewer writes. Existing databases retain their original index; no migration. Native objective remains unmet.
+- Canonical `SqlRecords.get` now validates actual part positions and per-part bounds before interpreting JSON. Focused SQLite tests 5/5 pass, including valid-JSON gaps, missing initial parts, negative/fractional positions, oversized parts, nonmutation on failure and valid multi-part Unicode round-trip. The existing activity scan counter follows the updated projection.
+- Added A01 production Registry route acceptance test for exact owned bound targets, empty Connector, all 50 owned Workspaces in bounded pages, stale cursor after unassignment, zero foreign record reads and zero Workspace namespace lookups. Explicitly requested synthetic-only trace records every SQL statement and namespace lookup in request-local context; it cannot silently truncate and is not included in deployed Worker.
+- Await exact-head locked CI before promoting A01 rows or recording final measured costs. No live operations or deployment.
+
 ### R04 fresh Registry partial workspace indexes (2026-11-28)
 
 - Resume from verified `7260a9b` (offline CI 46143736524). Existing native benchmark 187/46 vs ≤120/40; strict inventory 88 PASS, 4 FAIL, 1186 NOT_STARTED, 24 OWNER, 1 capture blocker, 14 superseded.

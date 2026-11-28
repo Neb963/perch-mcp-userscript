@@ -1,4 +1,5 @@
 // Test-only entrypoint. Never included in release or deployed Worker.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import worker, { Registry as BaseRegistry, Workspace as BaseWorkspace } from '../../apps/gateway/src/index.js';
 import type { DurableObjectState, DurableObjectStorage, ExecutionContext, WebSocket as DurableSocket } from '@cloudflare/workers-types';
 import type { Env } from '../../apps/gateway/src/common.js';
@@ -10,11 +11,34 @@ function metrics() {
     wallMs: 0, coldStarts: 1, wsAccepted: 0, wsIncoming: 0, wsIncomingBytes: 0, wsCloseEvents: 0 };
 }
 type Metrics = ReturnType<typeof metrics>;
+// Explicitly requested, request-local synthetic authority trace; never deployed.
+// Refuse to truncate evidence: the test must see every statement and lookup.
+interface DiscoveryTrace { statements: Array<{sql:string;key:string|null}>; workspaceLookups:number; }
+const discoveryTrace = new AsyncLocalStorage<DiscoveryTrace>();
+function discoveryEnv(env:Env):Env {
+  const ns=env.WORKSPACES;
+  const workspaces=new Proxy(ns,{get(target,key) {
+    const value=Reflect.get(target,key,target);
+    if(typeof value!=='function')return value;
+    return (...args:unknown[])=>{
+      const trace=discoveryTrace.getStore();
+      if(trace && (key==='get'||key==='getByName'))trace.workspaceLookups++;
+      return value.apply(target,args);
+    };
+  }});
+  return {...env,WORKSPACES:workspaces};
+}
 function wrappedStorage(storage: DurableObjectStorage, m: Metrics): DurableObjectStorage {
   const sql = new Proxy(storage.sql, { get(target, key) {
     if (key !== 'exec') return Reflect.get(target, key, target);
     return (...args: Parameters<typeof storage.sql.exec>) => {
       m.sqlStatements++;
+      const trace=discoveryTrace.getStore();
+      if(trace) {
+        if(trace.statements.length>=128)throw new Error('FIXTURE_DISCOVERY_TRACE_OVERFLOW');
+        const [sql,key]=args;
+        trace.statements.push({sql,key:typeof key==='string'?key:null});
+      }
       let cursor: ReturnType<typeof storage.sql.exec>;
       try { cursor = target.exec(...args); } catch (error) { m.sqlFailures++; throw error; }
       return new Proxy(cursor, { get(c, property) {
@@ -54,14 +78,21 @@ const workerMetrics = metrics();
 export class Registry extends BaseRegistry {
   private fixtureMetrics: Metrics;
   constructor(state: DurableObjectState, env: Env) {
-    const m=metrics(); super(wrappedState(state,m),env); this.fixtureMetrics=m;
+    const m=metrics(); super(wrappedState(state,m),discoveryEnv(env)); this.fixtureMetrics=m;
   }
   async fetch(request: Request): Promise<Response> {
     if (new URL(request.url).pathname === '/__fixture_metrics') return Response.json(this.fixtureMetrics);
     this.fixtureMetrics.requests++;
     const at=performance.now();
-    try { return await super.fetch(request); }
-    finally {this.fixtureMetrics.wallMs+=performance.now()-at;}
+    try {
+      if(new URL(request.url).pathname==='/internal/v2/discover'&&request.headers.get('X-Fixture-Discovery-Trace')==='1') {
+        const trace:DiscoveryTrace={statements:[],workspaceLookups:0};
+        const response=await discoveryTrace.run(trace,()=>super.fetch(request));
+        const result=await response.json() as Record<string,unknown>;
+        return Response.json({...result,fixtureTrace:trace},{status:response.status});
+      }
+      return await super.fetch(request);
+    } finally {this.fixtureMetrics.wallMs+=performance.now()-at;}
   }
   async alarm(): Promise<void> {this.fixtureMetrics.alarmInvocations++; return super.alarm();}
 }
