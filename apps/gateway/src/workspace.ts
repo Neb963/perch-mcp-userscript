@@ -585,19 +585,20 @@ export class Workspace {
   /** Read-only shortcut; never reconcile, authorize or dispatch from a derived snapshot.
    * Dirty records, active work, outbox, expired deadlines, missing alarm or
    * retention backlog fall through to the normal bounded maintenance path. */
-  private async idlePollState(): Promise<{ lastActivityAt: number } | undefined> {
-    const row = this.db.query<{ operationDue: number | null; maintenanceDue: number | null; lastActivity: number | null }>(
+  private async idlePollState(): Promise<{ lastActivityAt: number; activeCount: number } | undefined> {
+    const row = this.db.query<{ operationDue: number | null; maintenanceDue: number | null; lastActivity: number | null; activeCount: number }>(
       this.operations.native ? `SELECT
         (SELECT due FROM operation_native_v2 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS operationDue,
         (SELECT due FROM workspace_maintenance_v2 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS maintenanceDue,
-        lastTerminal AS lastActivity FROM operation_native_stats_v2 WHERE id=1 AND eligible<=1000
-        AND activeCount=0 AND pendingCount=0
+        lastTerminal AS lastActivity,activeCount FROM operation_native_stats_v2 WHERE id=1 AND eligible<=1000
+        AND pendingCount=0
         AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_dirty_v2 LIMIT 1)
         AND NOT EXISTS(SELECT 1 FROM records WHERE key>='outbox-' AND key<'outbox-\uffff' LIMIT 1)
         AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_prepare_v2 WHERE complete=0 LIMIT 1)` :
       `SELECT (SELECT due FROM operation_index_v1 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS operationDue,
         (SELECT due FROM workspace_maintenance_v2 WHERE due IS NOT NULL ORDER BY due LIMIT 1) AS maintenanceDue,
-        (SELECT terminal FROM operation_index_v1 ORDER BY terminal DESC LIMIT 1) AS lastActivity
+        (SELECT terminal FROM operation_index_v1 ORDER BY terminal DESC LIMIT 1) AS lastActivity,
+        0 AS activeCount
        FROM operation_index_state_v1 WHERE id=1 AND eligible<=1000
         AND NOT EXISTS(SELECT 1 FROM operation_dirty_v1 LIMIT 1)
         AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_dirty_v2 LIMIT 1)
@@ -607,6 +608,9 @@ export class Workspace {
         AND NOT EXISTS(SELECT 1 FROM workspace_maintenance_prepare_v2 WHERE complete=0 LIMIT 1)`
     )[0];
     if(!row)return undefined;
+    if (!Number.isSafeInteger(row.activeCount) || row.activeCount<0 ||
+        (this.operations.native && row.activeCount>0 && row.operationDue===null))
+      return undefined; // Invalid/missing deadlines cannot bypass maintenance.
     const due=Math.min(row.operationDue??Infinity,row.maintenanceDue??Infinity);
     if(due<=Date.now())return undefined;
     if(Number.isFinite(due)){
@@ -615,7 +619,7 @@ export class Workspace {
       // A missing/late alarm is repaired by ordinary maintenance instead.
       if(alarm===null||alarm<=Date.now()||alarm>due+1000||due<=Date.now())return undefined;
     }
-    return {lastActivityAt:row.lastActivity??0};
+    return {lastActivityAt:row.lastActivity??0,activeCount:row.activeCount};
   }
   private requestMediaPreparation():void {
     this.mediaPreparing=true;
@@ -1208,14 +1212,19 @@ export class Workspace {
         this.db.put("lease", refreshed);
       }
       const idle=await this.idlePollState();
-      if(idle){
+      if(idle?.activeCount===0){
         // No work was eligible at the snapshot. A concurrent admission is
         // independently persisted and observed by the next ordinary poll.
         maintenance.settled=true;
         const idleFor=Date.now()-Math.max(refreshed.claimedAt??Date.now(),idle.lastActivityAt);
         return json({operations:[],expiresAt:l.expiresAt,idleWaitMs:idleFor>=120000?15000:5000});
       }
-      this.expire();
+      // Native active fast path is allowed only when every due operation and
+      // maintenance deadline is in the future, the durable alarm covers the
+      // earliest deadline, no pending terminal/outbox/dirty work exists, and
+      // retention is within its bound. All dispatch/lease/Target checks still
+      // run after the awaited alarm probe. Misses use full expiration below.
+      if (!idle) this.expire();
       if(this.journal.running())return json({operations:[],expiresAt:l.expiresAt,idleWaitMs:5000});
       const op=this.journal.nextAdmitted();
       if(!op){

@@ -38,40 +38,6 @@ export class SqlRecords {
       throw new Error('SQLITE_RECORD_CORRUPT');
     }
   }
-  /** Exact bounded bulk read of canonical records from the same SQLite
-   * snapshot. No positive authorization cache: callers must re-read on each
-   * request and validate the parsed authority before using it.
-   * Missing keys are absent from the Map; malformed parts fail closed. */
-  getMany<T>(keys: readonly string[]): Map<string,T> {
-    if (!Array.isArray(keys)||keys.length<1||keys.length>8||
-        new Set(keys).size!==keys.length||
-        keys.some(k=>typeof k!=="string"||k.length<1||k.length>256))
-      throw new Error("SQLITE_RECORD_BATCH_INVALID");
-    const rows=this.query<{key:string;part:number;value:string}>(
-      "SELECT key,part,value FROM records WHERE key IN ("+keys.map(()=>"?").join(",")+") ORDER BY key,part",
-      ...keys);
-    const output=new Map<string,T>();
-    let current:string|undefined;
-    let chunks:string[]=[];
-    let expected=0;
-    const finish=()=>{
-      if(current===undefined)return;
-      try{output.set(current,JSON.parse(chunks.join("")) as T);}
-      catch{throw new Error("SQLITE_RECORD_CORRUPT");}
-    };
-    const allowed=new Set(keys);
-    for(const row of rows){
-      if(!allowed.has(row.key) || !Number.isSafeInteger(row.part) || row.part<0 ||
-         typeof row.value!=="string")throw new Error("SQLITE_RECORD_CORRUPT");
-      if(row.key!==current){
-        finish();current=row.key;chunks=[];expected=0;
-      }
-      if(row.part!==expected++)throw new Error("SQLITE_RECORD_CORRUPT");
-      chunks.push(row.value);
-    }
-    finish();
-    return output;
-  }
   put(key: string, value: unknown): void {
     // A chunked logical record is atomic even when its caller has no transaction.
     this.transaction(() => this.write(key, value));

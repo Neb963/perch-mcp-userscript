@@ -30,6 +30,11 @@ The 3fac671 manager release passed strict typecheck and 667/670 tests in offline
 
 F10 status semantics: stale heartbeat is not verified source. Registry detail must explicitly report unverified SourceRevision/LocalRevision/PreviewRevision/SavedRevision, effective tool permissions, unsupported pixel capture and scoped blockers without reading source. Native generator_info must return reasoned revision objects without implicit verification. A focused local-workerd test exercises a READ_SOURCE-only Connector, unbound discovery, bound Target detail, unauthorized write capability and explicit unavailable verified-source path. Verification pending exact-head CI.
 
+### R04 measured rollback and bounded active polling (2026-11-28)
+
+- CI 46109244898 at fbe2132 passed offline typecheck/tests/build, but SQL IN-plan increased five-stage native reads 193→203 and legacy 246→256, with unchanged writes. Revert and remove test; a measured regression cannot remain.
+- Reuse exact idle-probe SQL plus durable alarm verification on positive native activeCount. Skip expiry scans only if all operation/maintenance deadlines are future and pending/dirty/outbox/preparation are absent and retention <=1000. Keep every dispatch/Target/lease/phase fence.
+- Native Miniflare regression covers successful dispatch, missing-alarm fallback and expired-op rejection. Legacy behavior is unchanged. R04 numeric objective remains unverified until equal-denominator CI benchmarks.
 ### R04 canonical multi-key authorization read (2026-11-28)
 
 - Exact-head benchmark 34657b7 / run 46105833686 still measures 193 SQL rows read and 57 written per native five-stage operation, target strive <=120/40. Do not silently alter numerator/denominator.
