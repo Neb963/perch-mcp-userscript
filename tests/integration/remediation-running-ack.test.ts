@@ -62,5 +62,21 @@ test('R04 native v2 RUNNING acknowledgment avoids unrelated maintenance yet expi
     const status=await syntheticMcp(h,f,token,'operation_status',{target,operationKey:expired.operationKey});
     assert.equal(status.phase,'UNKNOWN');
     assert.equal(status.effectState,'UNKNOWN');
+    const late=await invoke();
+    const second=h.wns.get(h.wns.idFromName(f.workspaceId));
+    const forcedTerminal=await second.fetch('https://internal/__fixture_expire_operation',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({operationId:late.operationId}),
+    });
+    assert.equal(forcedTerminal.status,200);
+    assert.equal((await forcedTerminal.json() as {changed:number}).changed,1);
+    const observation={operationId:late.operationId,status:'SUCCEEDED',effectState:'NONE',
+      data:{fixture:'confirmed-after-deadline'}};
+    await h.browser(f,'reply',{operationId:late.operationId,phase:'SUCCEEDED',result:observation});
+    const lateStatus=await syntheticMcp(h,f,token,'operation_status',{target,operationKey:late.operationKey});
+    assert.equal(lateStatus.phase,'UNKNOWN');
+    assert.equal(lateStatus.effectState,'UNKNOWN');
+    assert.deepEqual(lateStatus.lateObservation,observation,
+      'Terminal acknowledgment after deadline is retained as an observation, not promoted to verified success.');
   }finally{await h.close();}
 });

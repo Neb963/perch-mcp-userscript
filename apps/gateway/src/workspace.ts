@@ -1129,14 +1129,14 @@ export class Workspace {
       path === "/api/v1/tab/reply" && b.phase !== "RUNNING",
     );
     if(path==="/api/v1/tab/ticket"){maintenance.settled=true;return json(await this.push.issue(l));}
-    // A v2 RUNNING acknowledgement confirms the browser's durable local
-    // intent; it does not perform an effect. Global expiration/GC is covered
-    // by the scheduled alarm and the normal poll, heartbeat and terminal paths.
-    // Avoid scanning unrelated operation and media indexes on this one bounded
-    // acknowledgment, but explicitly expire the *exact* acknowledged operation
-    // inside its canonical transaction below.
-    const directRunningAck=path==="/api/v1/tab/reply" && b.phase==="RUNNING" && l.contractVersion===2;
-    if (path !== "/api/v1/tab/poll" && !directRunningAck) this.expire();
+    // V2 browser receipts are bound to exactly one operation. Global
+    // expiration/GC is handled by the durable alarm, polling and heartbeat.
+    // For both RUNNING and terminal replies, expire the *exact* operation
+    // synchronously under its canonical transaction below. This prevents
+    // unrelated index scans without changing a late/expired effect's state.
+    // Legacy receipts retain the original maintenance path.
+    const directV2Reply=path==="/api/v1/tab/reply" && l.contractVersion===2;
+    if (path !== "/api/v1/tab/poll" && !directV2Reply) this.expire();
     if (path === '/api/v1/tab/operator-restore')
       return this.operatorRestore(b, l);
     if (path === "/api/v1/tab/image")
@@ -1468,7 +1468,7 @@ export class Workspace {
             "Terminal result must match operation and phase.",
           );
       }
-      let refusedLateRunningAck=false;
+      let refusedLateRunningAck=false, refusedExpiredTerminalReply=false;
       this.db.transaction(() => {
         const op = this.operations.get("operation/" + operationId);
         if (!op || op.epoch !== l.epoch || op.tabInstanceId !== l.tabInstanceId)
@@ -1481,10 +1481,14 @@ export class Workspace {
         // *inside* transactionSync after expireOperation has changed state:
         // that would roll back the durable UNKNOWN/REJECTED receipt. Instead
         // commit the outcome and reject the stale RUNNING ack afterwards.
-        if (directRunningAck) {
+        if (directV2Reply) {
           const removed=this.expireOperation(op,Date.now());
-          if(removed || op.terminalAt) {
+          if (phase==="RUNNING" && (removed || op.terminalAt)) {
             refusedLateRunningAck=true;
+            return;
+          }
+          if (removed) {
+            refusedExpiredTerminalReply=true;
             return;
           }
         }
@@ -1541,6 +1545,9 @@ export class Workspace {
       if(refusedLateRunningAck)
         throw new ApiError("CONFLICT","Operation expired or finished before RUNNING acknowledgement.",409,
           "Inspect the exact retained operation status; never replay a possibly dispatched effect.");
+      if(refusedExpiredTerminalReply)
+        throw new ApiError("NOT_FOUND","Retained operation expired.",404,
+          "The original retained receipt exceeded its retention window.");
       return json({ ok: true });
     }
     throw new ApiError("NOT_FOUND", "Route not found.", 404);

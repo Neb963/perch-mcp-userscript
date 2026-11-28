@@ -48,6 +48,11 @@ F10 status semantics: stale heartbeat is not verified source. Registry detail mu
 - Remaining: F06 conservative historical storage reclamation, actual preview pixels feasibility, all remaining A01–A34 matrix entries, full R04 performance and R05 final exact-head qualification. No unfinished row is PASS.
 R05 first exact-head CI qualification at `42ab329` [run 46097599704](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46097599704) succeeded: 686 tests passed, zero failed, one skipped, both offline cost paths, inventory generation, release build/hash check and Wrangler dry-run. Inventory has 1,317 distinct clauses: 54 PASS, 1,196 NOT_STARTED, 28 FAIL, 24 DEFERRED_OWNER, 1 BLOCKED_FEASIBILITY and 14 SUPERSEDED; the strict release gate fails by design. The artifact initially stamped synthetic PR merge `GITHUB_SHA`; next checkpoint corrects provenance to the checked-out source SHA and tree, enforcing expected PR head in CI.
 
+### R04 v2 exact terminal expiry reconciliation
+
+- `ab790965` succeeded exact-head offline tests. Same-denominator native **199 SQL reads / 57 writes**, legacy 253/85; all receipt and Activity tests pass.
+- V2 terminal browser reply need not scan unrelated operation/maintenance indexes before acknowledging one exact operation. As with v2 RUNNING, use the canonical exact-operation expireOperation in the same synchronous transaction, with a durable UNKNOWN state and lateObservation if the deadline passed. Throw stale/retired errors *after* the transaction, never roll back reconciliation. Legacy/other routes preserve global expiry/alarms.
+- Added distinct expired terminal reply test: time-shift one DISPATCHED operation into the past in offline-only fixture, deliver a late SUCCEEDED observation, verify phase remains UNKNOWN/effect UNKNOWN and lateObservation equals original bytes. Preserve old late RUNNING and F05 image revocation tests.
 ### R04 ordinary terminal Activity null-overlay optimization
 
 - Exact-head 5469b81 passed offline CI; native lifecycle **201 SQL reads / 57 writes**. Direct v2 RUNNING acknowledgment reduced its Workspace stage from 20 reads to 15 while preserving late-dispatch UNKNOWN records.
