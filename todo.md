@@ -1,5 +1,14 @@
 # Implementation ledger
 
+## R08 — canonical finishing state and direct S02-009 boundary test (in progress)
+
+- Baseline: source/docs `d9906633467e72d3ecb1364fb60139b5110a3698`, [successful offline CI 46150920907](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46150920907), 727 PASS / 0 FAIL / 1 historical SKIP; 1,317 clauses = 112 PASS / 4 FAIL / 1,162 NOT_STARTED / 24 OWNER / 1 feasibility BLOCKED / 14 superseded.
+- [`FINISHING-STATE.md`](docs/verification/v0.3-remediation/FINISHING-STATE.md) created at `bf60957c05c86d2afe87d10a363d147b5178bf74`. This is the cross-agent restart index, not a second requirements database. Includes roadmap, decision register, exact blocker/evidence totals, local reproduction constraints, and next-agent action.
+- Added direct `S02-009` boundary test at `542e9ec496f4ed71bf108b070b7402e9509406f0` to `tests/integration/assignment-contract.test.ts`. It asserts canonical Target zero/MAX_SAFE_INTEGER, all four extreme generation combinations, rejected negative/fractional/unsafe/nonfinite inputs, invalid textual variants, and exact increment overflow. Source behavior unchanged. Do not promote requirement to PASS until exact-head CI observes the named test passing.
+- Same preserved native lifecycle: 187/44 vs required <=120/40; legacy 251/74. No SQL target claim. Previous read-cache trial saved zero SQL rows and is not being repeated.
+- **Next:** inspect exact CI outcome for `542e9ec`; if green, record its named test and exact SHA as direct `S02-009` proof and update existing register. Continue P0 connector authorization/recovery cases, then safe structural SQL reductions measured on original five-stage denominator.
+- Runtime limitation in this executor: pinned `npm ci --offline` cannot install uncached `zod@3.25.76`; use exact-head offline GitHub CI for meaningful verification, never claim local test execution. No live provider, Cloudflare preview/deploy, real Firefox, OAuth or merge.
+
 ## R07 — eleven directly qualified T0 document contracts (CI SUCCESS)
 
 - Baseline exact code d78a023 and verified R06 register commit 3956255, no live calls/deploy/merge.
