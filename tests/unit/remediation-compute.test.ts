@@ -69,11 +69,11 @@ test('F09 exact scoped pinned module loads through immutable view without granti
   await assert.rejects(executeDevelopment(f.context,{execute:executeCompute}),/permission ceiling/);
 });
 
-test('F09 read prefix expansion checks selected content twice and yields sorted permitted metadata', async () => {
+test('F09 directory listing reads only metadata and preserves sorted permitted native paths', async () => {
   const f = await fixture({js:'return await fs.list();',access:{read:['src/lib/','src/lib/module.js','main.pjs']}});
   const response = await executeDevelopment(f.context,{execute:executeCompute}) as {result:unknown};
   assert.deepEqual(response.result,['main.pjs','src/lib/module.js']);
-  assert.deepEqual(f.readAssets,['lib/module.js','lib/module.js']);
+  assert.deepEqual(f.readAssets,[], 'Metadata-only listing must not hydrate source bytes.');
 });
 
 test('F09 same-size selected native edit between view and publication discards staged bytes', async () => {
@@ -96,21 +96,22 @@ test('F09 guest rejects unauthorized staged writes before exposing stage or invo
 });
 
 
-test('F09 oversized declared prefix rejects before any native content read or guest start', async () => {
-  const f = await fixture({js:'return await fs.list();',access:{read:['src/']}});
+test('F09 oversized read declaration is metadata-only; execution enforces read count before excess access', async () => {
+  const f = await fixture({js:`await fs.list("src"); await fs.readTextFile("src/unrelated-0");
+    await fs.readTextFile("src/unrelated-1");`,access:{read:['src/'],maxReads:2}});
   for (let i=0;i<200;i++) f.native.set('more-' + i,utf8.encode('fixture'));
-  await assert.rejects(executeDevelopment(f.context,{execute:async()=>{
-    assert.fail('Guest started after an oversized view');
-  }}),/selected file limit/);
-  assert.deepEqual(f.readAssets,[]);
+  await assert.rejects(executeDevelopment(f.context,{execute:executeCompute}),
+    (e:unknown)=>e instanceof ExecutionError && e.code==='LIMIT_EXCEEDED' && e.effectState==='NONE');
+  assert.deepEqual(f.readAssets,['unrelated-0','unrelated-0'],
+    'Never hydrate the rest of a 301-file permission set.');
   assert.deepEqual(f.permits,['read-view']);
 });
 
-test('F09 total selected bytes over budget reject before guest start or publication', async () => {
-  const f = await fixture({js:'return await fs.list();',access:{read:['src/lib/'],maxBytes:5}});
-  await assert.rejects(executeDevelopment(f.context,{execute:async()=>{
-    assert.fail('Guest started after a view capacity refusal');
-  }}),/Selected source exceeded its byte limit/);
+test('F09 byte-budget overflow on requested native read prevents staged publication', async () => {
+  const f = await fixture({js:'return await fs.readTextFile("src/lib/module.js");',
+    access:{read:['src/lib/'],maxBytes:5}});
+  await assert.rejects(executeDevelopment(f.context,{execute:executeCompute}),
+    (e:unknown)=>e instanceof ExecutionError && e.code==='LIMIT_EXCEEDED' && e.effectState==='NONE');
   assert.deepEqual(f.readAssets,['lib/module.js']);
   assert.deepEqual(f.permits,['read-view']);
 });

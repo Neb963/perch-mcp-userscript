@@ -113,6 +113,24 @@ async function scopedCompute(args: BrowserToolArgs<'execute_js'>, context: Devel
     localCache.set(path, bytes);
     return bytes.slice();
   };
+  // Write declarations require a native before-image even when the guest never
+  // reads the path. Otherwise an operator edit made while the guest runs could
+  // be silently incorporated into the publication precondition.
+  const writableNativePaths = nativePaths.filter(path => pathMatchesRules(path, writeRules));
+  if (writableNativePaths.length) {
+    const baseline = await context.vfs.adapter.readSourceView(
+      writableNativePaths, [], writableNativePaths.length, maxBytes);
+    for (const path of writableNativePaths) {
+      const bytes = baseline.get(path);
+      if (!bytes) throw new ExecutionError('STALE_REVISION', 'Declared native write source disappeared.');
+      loadedBytes += bytes.length;
+      if (loadedBytes > maxBytes)
+        throw new ExecutionError('LIMIT_EXCEEDED', 'Declared native write baseline exceeds its byte budget.');
+      nativeView.set(path, bytes.slice());
+    }
+    await assertNativeManifestUnchanged();
+    await context.assertCurrent();
+  }
   // This token is an operation-local *selected view* identity, not a complete
   // verified native SourceRevision. Publication independently verifies native
   // state and the exact staged write set after the compute guest completes.
