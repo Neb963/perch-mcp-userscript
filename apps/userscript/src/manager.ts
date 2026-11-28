@@ -405,6 +405,10 @@ export async function buildDiagnosticReport(
             pushNotificationsEnabled:r.pushNotificationsEnabled===true,
             binaryPayloadsEnabled:r.binaryPayloadsEnabled===true,
             admissionBudgetEnabled:r.admissionBudgetEnabled===true,
+            oauthGrantPersistence:r.oauthGrantPersistence==='UNTIL_REVOKED'?'UNTIL_REVOKED':'UNKNOWN',
+            oauthAccessTokenTtlSeconds:Number.isSafeInteger(r.oauthAccessTokenTtlSeconds)?r.oauthAccessTokenTtlSeconds:null,
+            oauthAccessTokenQualification:['DEFAULT_BROWSER_TIMER_SAFE','EXPLICIT_TIMER_SAFE','EXPERIMENTAL_EXTERNAL_CLIENT_REQUIRED'].includes(str(r.oauthAccessTokenQualification))?
+              r.oauthAccessTokenQualification:'UNKNOWN',
           };
         })(),
       }),
@@ -2504,6 +2508,12 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     p("Push: "+boolStatus(rollout.pushNotificationsEnabled)+
       " · binary payloads: "+boolStatus(rollout.binaryPayloadsEnabled)+
       " · admission estimates: "+boolStatus(rollout.admissionBudgetEnabled),activation,"muted");
+    p("OAuth authorization: "+(connected && rollout.oauthGrantPersistence==='UNTIL_REVOKED'?
+      'Until explicitly revoked':'unverified/legacy'),activation);
+    const ttl=num(rollout.oauthAccessTokenTtlSeconds);
+    p("OAuth access token: "+(connected&&ttl>=60?
+      ttl>=86400?`${(ttl/86400).toFixed(1).replace(/\.0$/,'')} days`:`${Math.floor(ttl/60)} minutes`:'unverified')+
+      " · "+(connected?str(rollout.oauthAccessTokenQualification,'UNKNOWN'):'UNKNOWN'),activation,"muted");
     p("Preview pixels: UNSUPPORTED_INTERFACE until an authorized actual-pixel provider is accepted. Production provider effects require OWNER acceptance. Account quota remains unknown.",activation,"muted");
     body.append(activation);
     const instructions = el("details");

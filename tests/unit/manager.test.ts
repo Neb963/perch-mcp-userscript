@@ -526,7 +526,9 @@ test('F23 rollout Settings identifies disabled v2 execution and marks Gateway tr
     if(path.endsWith('/state'))return {revision:3,policyRevision:2,version:'0.3.0',schemaVersion:1,
       assignmentContractVersion:2,rollout:{developmentContractV2Enabled:true,
         developmentContractV2ExecutionEnabled:false,canonicalStorageMode:'native',
-        pushNotificationsEnabled:false,binaryPayloadsEnabled:true,admissionBudgetEnabled:false}};
+        pushNotificationsEnabled:false,binaryPayloadsEnabled:true,admissionBudgetEnabled:false,
+        oauthGrantPersistence:'UNTIL_REVOKED',oauthAccessTokenTtlSeconds:24*86400,
+        oauthAccessTokenQualification:'DEFAULT_BROWSER_TIMER_SAFE'}};
     if(path.endsWith('/connectors'))return {items:[],revision:3};
     return original(method,path,body,options);
   };
@@ -535,6 +537,8 @@ test('F23 rollout Settings identifies disabled v2 execution and marks Gateway tr
   assert.match(f.root.textContent??'',/Assignment contract: v2/);
   assert.match(f.root.textContent??'',/19-tool v2 execution: Disabled/);
   assert.match(f.root.textContent??'',/Canonical storage: native/);
+  assert.match(f.root.textContent??'',/OAuth authorization: Until explicitly revoked/);
+  assert.match(f.root.textContent??'',/OAuth access token: 24 days/);
   f.handle.setStatus({connection:'degraded',reason:'Quota exhausted'});
   assert.match(f.root.textContent??'',/Authoritative Gateway status: UNVERIFIED\/OFFLINE/);
   assert.match(f.root.textContent??'',/19-tool v2 execution: unknown/);

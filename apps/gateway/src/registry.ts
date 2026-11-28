@@ -1,4 +1,4 @@
-import { grantCleanupDue, grantIsActive } from './oauth-lifetime.js';
+import { DEFAULT_ACCESS_TOKEN_TTL_SECONDS, grantCleanupDue, grantIsActive, persistentAccessTokenTTL } from './oauth-lifetime.js';
 import { withSqlUsage } from "./sql-meter.js";
 import { validateRegistryCore, type RegistryCore } from "./registry-core.js";
 import { appendOAuthDiagnostic, readOAuthDiagnostics } from "./oauth-diagnostics.js";
@@ -1674,6 +1674,13 @@ export class Registry {
           admissionBudgetEnabled: this.env.ADMISSION_BUDGET_ENABLED === 'true',
           actualPixelCapture: 'UNSUPPORTED_INTERFACE',
           accountQuotaKnown: false,
+          oauthGrantPersistence: c.assignmentContractVersion===2?'UNTIL_REVOKED':'LEGACY_FINITE',
+          oauthAccessTokenTtlSeconds: c.assignmentContractVersion===2 || this.env.DEVELOPMENT_CONTRACT_V2_ENABLED==='true' ?
+            persistentAccessTokenTTL(this.env.OAUTH_ACCESS_TOKEN_TTL_SECONDS) : 900,
+          oauthAccessTokenQualification: this.env.OAUTH_ACCESS_TOKEN_TTL_SECONDS===undefined?
+            'DEFAULT_BROWSER_TIMER_SAFE' :
+            persistentAccessTokenTTL(this.env.OAUTH_ACCESS_TOKEN_TTL_SECONDS)>DEFAULT_ACCESS_TOKEN_TTL_SECONDS?
+            'EXPERIMENTAL_EXTERNAL_CLIENT_REQUIRED':'EXPLICIT_TIMER_SAFE',
         },
         paused: c.paused,
         paired: c.paired,
