@@ -119,7 +119,8 @@ test('R04 native small read selectors share canonical row, while large and mutat
     const raw=f.sqlite.prepare("SELECT hasArgs,context FROM operation_native_v2 WHERE key='operation/small-read'").get() as {hasArgs:number;context:string};
     assert.equal(raw.hasArgs,0);
     assert.deepEqual(JSON.parse(raw.context).args,small.args);
-    assert.deepEqual(store.get('operation/small-read'),small);
+    assert.deepEqual(store.get('operation/small-read'),JSON.parse(JSON.stringify(small)),
+      'JSON-native storage preserves every explicit value but omits JS-only undefined properties');
     assert.deepEqual(store.budgetObligations().find(x=>x.tool==='read')?.args,small.args);
     const large={...op('large-read'),phase:'ADMITTED',terminalAt:undefined,
       terminalNotified:undefined,result:undefined,args:{files:[{path:'x'.repeat(2048)}]}};
