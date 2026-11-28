@@ -320,6 +320,8 @@ export interface Env {
   DEVELOPMENT_CONTRACT_V2_ENABLED?: string;
   DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED?: string;
   REGISTRY_GRANT_BUDGET?: string;
+  /** Explicit bounded v2 access-token TTL override; consent itself never expires. */
+  OAUTH_ACCESS_TOKEN_TTL_SECONDS?: string;
   OAUTH_REGISTRATIONS_PER_HOUR?: string;
 }
 export async function rpc<T = Record<string, unknown>>(

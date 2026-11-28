@@ -88,7 +88,7 @@ test('v2 Connector consent, legacy scope and indexed discovery in local workerd'
     const approvals = await h.get(admin + '/approvals');
     assert.ok((approvals.items as Record<string, unknown>[]).every((row) => !Object.hasOwn(row, 'completionRedirect')));
     await h.update(admin + '/connectors/' + a.id, { expectedRevision: a.revision, suspended: true });
-    await assert.rejects(discover(a, pa), /REVOKED/);
+    await assert.rejects(discover(a, pa), /PAUSED/);
     await h.internal(h.registry, '/internal/authorize', { props: legacy.props, agentId: legacy.agentId });
   } finally {
     await h.close();

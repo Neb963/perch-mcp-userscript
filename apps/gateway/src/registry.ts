@@ -1,3 +1,4 @@
+import { grantCleanupDue, grantIsActive } from './oauth-lifetime.js';
 import { withSqlUsage } from "./sql-meter.js";
 import { validateRegistryCore, type RegistryCore } from "./registry-core.js";
 import { appendOAuthDiagnostic, readOAuthDiagnostics } from "./oauth-diagnostics.js";
@@ -87,7 +88,8 @@ export interface GrantRecord {
   permissions: string[];
   state: "active" | "revoked";
   clientId: string;
-  expiresAt: number;
+  expiresAt: number | null;
+  revokedAt?: number;
   revision: number;
 }
 interface Approval {
@@ -174,9 +176,10 @@ export class Registry {
     for (const key of this.catalog.due("approval",now))
       if (this.db.get<{ expiresAt: number }>(key).expiresAt < now)
         this.db.delete(key);
-    for (const key of this.catalog.due("grant",now))
-      if (this.db.get<{ expiresAt: number }>(key).expiresAt < now)
-        this.db.delete(key);
+    for (const key of this.catalog.due("grant",now)) {
+      const grant = this.db.get<GrantRecord>(key);
+      if (grant && grantCleanupDue(grant, now)) this.db.delete(key);
+    }
     for (const key of this.catalog.due("permit",now)) {
       const row = this.db.get<{ state: string; createdAt?: number }>(key);
       if (
@@ -270,6 +273,7 @@ export class Registry {
       const g = this.db.get<GrantRecord>(key);
       if (g.workspaceId === workspaceId && g.state === "active") {
         g.state = "revoked";
+        g.revokedAt = Date.now();
         g.revision++;
         this.db.put(key, g);
       }
@@ -390,7 +394,7 @@ export class Registry {
         paired: c.paired,
         resources: keys
           .map((k) => this.db.get<AgentRecord|undefined>(k))
-          .filter((a):a is AgentRecord => !!a && !a.suspended)
+          .filter((a):a is AgentRecord => !!a && (!a.suspended || a.contractVersion === 2))
           .map((a) => a.endpoint),
         version: VERSION,
         schemaVersion: 1,
@@ -627,7 +631,7 @@ export class Registry {
             if (a.completionRedirect) {
               const grant = a.completionGrantId
                 ? this.db.get<GrantRecord>("grant/" + a.completionGrantId) : null;
-              return grant?.state === "active" && grant.expiresAt > Date.now()
+              return grantIsActive(grant)
                 ? { state: "completed", redirectTo: a.completionRedirect }
                 : { state: "revoked" };
             }
@@ -638,12 +642,12 @@ export class Registry {
           this.verifyApprovalScope(a, c);
           this.cleanup();
           if (
-            this.catalog.count("grant") >=
+            this.catalog.activeGrantCount(Date.now()) >=
             configuredBudget(this.env.REGISTRY_GRANT_BUDGET, 1000)
           )
             throw new ApiError(
               "QUOTA_EXCEEDED",
-              "Grant budget reached; revoke and wait for expired grants to retire.",
+              "Active Grant budget reached; explicitly revoke an unused Grant before authorizing another.",
               429,
             );
           const g: GrantRecord = {
@@ -656,7 +660,7 @@ export class Registry {
               audience: a.audience, credentialEpoch: a.credentialEpoch } : {}),
             state: "active",
             clientId: a.clientId,
-            expiresAt: Date.now() + 30 * 86400000,
+            expiresAt: a.contractVersion === 2 ? null : Date.now() + 30 * 86400000,
             revision: 1,
           };
           a.state = "consumed";
@@ -741,6 +745,7 @@ export class Registry {
         const g = this.db.get<GrantRecord>("grant/" + grantId);
         if (g && g.state === "active") {
           g.state = "revoked";
+          g.revokedAt = Date.now();
           g.revision++;
           this.db.put("grant/" + g.id, g);
         }
@@ -763,6 +768,18 @@ export class Registry {
           },
         ),
       );
+    }
+    // Token renewal authenticates consent, not current execution eligibility.
+    if (path === "/internal/oauth/token-authorize") {
+      const b = await parseBody(request);
+      return json(this.db.transaction(() => {
+        if ((b.props as AuthProps | undefined)?.contractVersion === 2) {
+          this.authenticateConnector(b, true);
+          return { ok: true };
+        }
+        this.authorize(b);
+        return { ok: true };
+      }));
     }
     if (path === "/internal/authorize") {
       const b = await parseBody(request);
@@ -1485,7 +1502,7 @@ export class Registry {
       throw new ApiError("AUTH_REQUIRED", "Grant context required.", 401);
     const c = this.core(),
       g = this.db.get<GrantRecord>("grant/" + id(props.grantId));
-    if (!g || g.contractVersion !== undefined || g.state !== "active" || g.expiresAt <= Date.now())
+    if (!g || g.contractVersion !== undefined || !grantIsActive(g))
       throw new ApiError("REVOKED", "Grant is revoked or expired.", 403);
     const a = this.getAgent(g.agentId),
       w = this.getWorkspace(g.workspaceId);
@@ -1553,15 +1570,16 @@ export class Registry {
     if (this.env.DEVELOPMENT_CONTRACT_V2_ENABLED !== 'true' || core.assignmentContractVersion !== 2)
       throw new ApiError('UPGRADE_REQUIRED', 'The v2 assignment contract is disabled.', 409);
   }
-  private authenticateConnector(b: Record<string, unknown>): { agent: AgentRecord; grant: GrantRecord; core: Core } {
+  private authenticateConnector(b: Record<string, unknown>, renewal = false): { agent: AgentRecord; grant: GrantRecord; core: Core } {
     const props = b.props as AuthProps | undefined;
     const core = this.core();
-    this.requireDevelopmentContract(core);
+    if (!renewal) this.requireDevelopmentContract(core);
+    else if (core.assignmentContractVersion !== 2)
+      throw new ApiError('UPGRADE_REQUIRED', 'Connector authority is unavailable.', 409);
     if (!props || props.contractVersion !== 2)
       throw new ApiError('AUTH_REQUIRED', 'A v2 Grant is required.', 401);
     const grant = this.db.get<GrantRecord | undefined>('grant/' + id(props.grantId));
-    if (!grant || grant.contractVersion !== 2 || grant.state !== 'active' ||
-        !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= Date.now() ||
+    if (!grant || grant.contractVersion !== 2 || !grantIsActive(grant) ||
         grant.agentId !== props.agentId || grant.agentId !== b.agentId ||
         grant.credentialEpoch !== core.credentialEpoch || grant.credentialEpoch !== props.credentialEpoch ||
         grant.clientId !== props.clientId || grant.audience !== props.audience ||
@@ -1571,9 +1589,11 @@ export class Registry {
         grant.workspaceId !== '' || grant.bindingRevision !== 0)
       throw new ApiError('REVOKED', 'Connector Grant is unavailable.', 403);
     const agent = this.getAgent(grant.agentId);
-    if (agent.contractVersion !== 2 || agent.suspended || agent.endpoint !== grant.audience ||
+    if (agent.contractVersion !== 2 || agent.endpoint !== grant.audience ||
         agent.endpoint !== core.issuer + '/mcp/' + agent.id)
       throw new ApiError('REVOKED', 'Connector Grant is unavailable.', 403);
+    if (agent.suspended && !renewal)
+      throw new ApiError('PAUSED', 'Connector execution is suspended; authorization is retained.', 403);
     const ceiling = permissionCeiling(agent.permissionCeiling);
     const granted = permissionCeiling(grant.permissions);
     return { agent, grant: { ...grant, permissions: granted.filter((value) => ceiling.includes(value)) }, core };
@@ -2036,6 +2056,7 @@ export class Registry {
       if (!g) throw new ApiError("NOT_FOUND", "Grant not found.", 404);
       revision(b.expectedRevision, g.revision);
       g.state = "revoked";
+      g.revokedAt = Date.now();
       g.revision++;
       this.db.put("grant/" + g.id, g);
       return g;

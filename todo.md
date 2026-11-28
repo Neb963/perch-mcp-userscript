@@ -10,13 +10,15 @@ Baseline `298f3b9619335364c668a69b6f04570ae530fcab` (tree `c07b3e7e25ea0e4d063ee
 | R00 | Pin authority and baseline, build an atomic requirement inventory, rerun the offline suite, replay the P0 reports, and record measured baselines. | Baseline verified |
 | R01 | Preflight full batches, fence execution at effect boundaries, preserve receipt uncertainty, and bind operator actions and consent to exact intent. | Regressions verified |
 | R02 | Recover transfers and historical local state, deduplicate immutable storage, and exercise publication faults. | Scoped recovery verified. Historical reclamation remains open. |
-| R03 | Qualify permanent OAuth, clean installation, all feasible development behavior, and the local-first manager. | Next |
+| R03 | Qualify permanent OAuth, clean installation, all feasible development behavior, and the local-first manager. | In progress: persistent OAuth candidate and SDK qualification tests |
 | R04 | Meter comparable workflows and quotas, calibrate admission, and qualify long finite access lifetimes. | Pending |
 | R05 | Rebuild and test the exact candidate, reconcile every requirement, and verify artifact bytes and the unmerged PR. | Pending |
 
 R01 local verification passed strict TypeScript, 615 tests with zero failures and four phase-gated probes, and the final focused renderer detected zero external requests. [R01 evidence](docs/verification/v0.3-remediation/r01/README.md).
 
 R02 scoped historical recovery, staged transfers, and exact operator writer fencing were verified in local fixtures. [R02 evidence](docs/verification/v0.3-remediation/r02/README.md).
+
+R03 takeover: extend v2 Grants with explicit null expiry, separate token renewal from execution, preserve suspended Connector resource metadata, exclude revoked Grants from active capacity, and add bounded revoked retention. Qualify actual SDK exchange/rotation/revoke and KV expiry across nine finite TTL candidates. One-year default is provisional until ten-year evidence; no production credentials touched. New tests remain unverified until exact-head offline execution.
 
 Local Chromium and workerd fixtures use synthetic data. Production, provider, live OAuth and browser acceptance, deployment, preview, and merge are reserved for the operator.
 

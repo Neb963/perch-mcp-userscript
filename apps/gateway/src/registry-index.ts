@@ -89,7 +89,7 @@ export class RegistryIndex {
             if(!v||typeof v!=="object"||Array.isArray(v))throw new Error("SQLITE_RECORD_CORRUPT");
             let due:number|null=null, expires:number|null=null, hold=0;
             const event=v.event as Event|undefined;
-            if(kind==="approval"||kind==="grant"){due=expires=num(v.expiresAt);}
+            if(kind==="approval"||kind==="grant"){due=expires=num(v.expiresAt); if(kind==="grant"&&v.state==="revoked"&&num(v.revokedAt)!==null)due=Number(v.revokedAt)+RETENTION;}
             else if(kind==="idempotency")due=num(v.expires);
             else if(kind==="permit"&&v.state==="terminal"&&num(v.createdAt)!==null)due=Number(v.createdAt)+RETENTION;
             else if(kind==="terminal-notice"){
@@ -174,6 +174,7 @@ export class RegistryIndex {
   due(kind:Kind,now:number):string[]{this.sync();return this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind=? AND due IS NOT NULL AND due<? ORDER BY due LIMIT 128",kind,now).map(r=>r.key);}
   nextDue():number|undefined {this.sync();const times=(["approval","grant","permit","terminal-notice","idempotency"] as const).map(kind=>this.db.query<{due:number}>("SELECT due FROM registry_entity_v1 WHERE kind=? AND due IS NOT NULL ORDER BY due LIMIT 1",kind)[0]?.due).filter((n):n is number=>n!==undefined);return times.length?Math.min(...times):undefined;}
   count(kind:Kind):number {this.sync();return this.db.query<{count:number}>("SELECT count FROM registry_counts_v1 WHERE kind=?",kind)[0]?.count??0;}
+  activeGrantCount(now:number):number {this.sync();return this.db.query<{count:number}>("SELECT count(*) AS count FROM registry_entity_v1 WHERE kind='grant' AND state='active' AND (expires IS NULL OR expires>?)",now)[0]?.count??0;}
   approvalFull(now:number):boolean {this.sync();return this.db.query("SELECT key FROM registry_entity_v1 WHERE kind='approval' AND expires>? ORDER BY expires LIMIT 1 OFFSET 99",now).length>0;}
   page(kind:Kind,offset:number,now:number):string[]{this.sync();return (kind==="approval"?this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind=? AND expires>? ORDER BY key LIMIT 100 OFFSET ?",kind,now,offset):this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind=? ORDER BY key LIMIT 100 OFFSET ?",kind,offset)).map(r=>r.key);}
   grants(workspace:string):string[]{this.sync();return this.db.query<Key>("SELECT key FROM registry_entity_v1 WHERE kind='grant' AND workspace=? AND state='active'",workspace).map(r=>r.key);}

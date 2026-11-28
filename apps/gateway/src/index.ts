@@ -1,3 +1,4 @@
+import { persistentAccessTokenTTL } from './oauth-lifetime.js';
 import { developmentToolDefinitions, hasEffectV2, parseDevelopmentCall, requiredPermissionsV2,
   type developmentToolArgs } from '../../../packages/contracts/src/development-v2.js';
 import { parseTarget } from '../../../packages/contracts/src/target.js';
@@ -198,7 +199,9 @@ function manualCallback(url: string): Response {
   headers.set("X-Perch-OAuth-Outcome", "CALLBACK_RECOVERY_AVAILABLE");
   return new Response(result.body, { status: result.status, headers });
 }
-function oauthServer(config: Configuration) {
+function oauthServer(config: Configuration, env: Env) {
+  const persistent = env.DEVELOPMENT_CONTRACT_V2_ENABLED === 'true';
+  const accessTokenTTL = persistent ? persistentAccessTokenTTL(env.OAUTH_ACCESS_TOKEN_TTL_SECONDS) : 900;
   if (!config.issuer)
     throw new ApiError(
       "SETUP_REQUIRED",
@@ -214,13 +217,14 @@ function oauthServer(config: Configuration) {
     tokenEndpoint: "/token",
     clientRegistrationEndpoint: "/register",
     scopesSupported: ["mcp", "offline_access"],
-    accessTokenTTL: 900,
-    refreshTokenTTL: 30 * 86400,
+    accessTokenTTL,
+    refreshTokenTTL: persistent ? undefined : 30 * 86400,
+    ...(persistent ? { clientRegistrationTTL: undefined } : {}),
     clientIdMetadataDocumentEnabled: true,
     clientIdMetadataDocumentFallback: false,
     tokenExchangeCallback: async (options) => {
       try {
-        await rpc(registry(options.env), "/internal/authorize", {
+        await rpc(registry(options.env), "/internal/oauth/token-authorize", {
           props: options.props,
           agentId: options.props.agentId,
           ...(options.props.contractVersion === 2 ? { authenticatedClientId: options.clientId } : {}),
@@ -708,7 +712,7 @@ async function route(
       "Gateway canonical issuer is not configured for this origin.",
       503,
     );
-  const authorizationServer = oauthServer(config);
+  const authorizationServer = oauthServer(config, env);
   if (path === "/authorize") {
     const oauth = authorizationServer.getOAuthApi(env);
     let auth: AuthRequest;
