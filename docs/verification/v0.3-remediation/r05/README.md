@@ -1,3 +1,5 @@
+> **R05 UI/digest reconciliation (2026-11-28):** The [bundled manager closure report](MANAGER-CLOSURE.md) and reproducible Playwright script verify nine additional previously failed atomic rows, with downloaded bytes checked against PR #25. Inventory now 82 PASS, 10 FAIL, 1186 NOT_STARTED, 24 DEFERRED_OWNER, 1 BLOCKED_FEASIBILITY and 14 SUPERSEDED_BY_OWNER_AMENDMENT (1317 total). Historical snapshot numbers below refer only to their original source SHA and are preserved as such. Strict release gate remains blocked.
+
 > **Newer exact-head check (2026-11-28):** [5c045bc, CI 46140138366](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46140138366) passed 701 tests, 0 failures, 1 skip. The [F09/OAuth/UI qualification](F09-OAUTH-UI-QUALIFICATION.md) supports 19 specific atomic status changes, not a blanket release approval. Native benchmark 187/46 remains over 120/40; actual preview capture and OWNER gates remain open. Historical baseline sections below stay labeled by source SHA.
 
 # R05 exact-head requirement inventory and release gates

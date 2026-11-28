@@ -3,6 +3,13 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### R05 synthetic bundled manager closure and digest correction (2026-11-28)
+
+- Added reproducible offline Playwright `tests/offline-manager/closure-r05.py` (actual shipped manager, local Chromium, zero network). F18 urgent approval survives foreign Connector filter; F22 three local filter operations add 0 GET; F19 all 6 conflicting controls disabled with delayed rebind; F26 Recovery/Settings local-first during 60s pending Gateway read; F25 no Library destination across v1/v2/outage/unpaired.
+- Downloaded candidate `perch-mcp-candidate.zip` SHA-256 `0f0121f5740328ffdbfc3834d10eebb39d771678f5100cb72b6ca7b9b5d20076`; matching PR body, RELEASE metadata and artifacts. TXT/JS digest `7eeb0c71a050bc040cd820b93db51c01ad6a46a7f68e9896e839398c141f2059`.
+- Direct evidence [R05 manager closure](docs/verification/v0.3-remediation/r05/MANAGER-CLOSURE.md). Nine previously FAIL rows moved to PASS. Revised 1,317-row register: 82 PASS, 10 FAIL, 1,186 NOT_STARTED, 24 OWNER, 1 capture blocker, 14 superseded; strict release gate remains blocked. Independently unresolved actual preview pixels and native 187/46 vs ≤120/40.
+- Offline UI fixture is NOT live Firefox/provider evidence; no production calls, cloud operations or merge.
+
 ### 2026-11-28 exact-head F09/OAuth/manager qualification
 
 - Safe demand-driven native compute read path committed at `5c045bc` after detecting and fixing a write-only manual-edit race. The existing size/prefix negatives remain intact, with added 100-file selector and same-size-edit regressions.
