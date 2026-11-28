@@ -1,12 +1,12 @@
 # Implementation ledger
 
 
-## R06 — bounded synchronous transaction read reuse (candidate; pending full workerd measurement)
+## R06 — reject ineffective transaction read cache; qualify eight documentation contracts
 
-- **Authority and goal:** retain exact fail-closed Grant/Target scope, fresh authorization across requests/RPC awaits, durable terminal/recovery and old physical schemas. Starting verified code `0c4a44e`, 708 PASS/0 FAIL/1 historical skip, native lifecycle **187 reads / 44 writes**, objective ≤120/40. This candidate is not a claim that either target is met.
-- **Design:** SqlRecords caches only canonical JSON read by the same synchronous `transactionSync`; uses isolated defensive snapshots; invalidates the entire cache before every direct non-SELECT SQL statement, including failed writes; clears at transaction exit (success/rollback). Bound 32 entries, individual payload ≤16,384 UTF-16 units, total ≤65,536. No data cached across transaction boundary, RPC await or DO request; large archives bypass it.
-- **Pre-CI focused test:** five real SQLite checks passed locally (Node 22 built-in SQLite; independent of Cloudflare runtime): nested read reuse and alias isolation, direct SQL and put/delete invalidation, rollback/error, corrupt chunk fail-closed, large/over-capacity bypass. These do not prove Cloudflare billing or full compatibility.
-- **Exit criteria:** run exact-head locked offline CI/Miniflare, compare same native and legacy five-stage benchmarks to 187/44 and 251/74, verify no regressions and no inflated PASS statuses; revert if benefit insufficient or integrity tests fail. Keep draft PR unmerged and all external/live gates unqualified.
+- [Trial 6a25baf / offline CI 46148963399](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46148963399): **713 pass / 0 fail / 1 historical skip**; locked typecheck, full tests, source/build hashes and Wrangler dry-run PASS. Direct native lifecycle counters are **44/10 admission, 50/8 poll, 14/1 RUNNING, 56/25 terminal, 23/0 status; total 187/44**. Legacy **251/74**. The cache trial has **exactly zero savings** versus verified 0c4a44e. No cross-request or cross-await cache was attempted.
+- **Decision:** restore byte-exact baseline `apps/gateway/src/sql.ts`, delete the rejected experimental cache test and retain no production feature/complexity without benefit. Preserve canonical part corruption checks from 0c4a44e.
+- **Independent DOC work:** add eight T0-only assertions (S00-001,002,004,005,006,007,008,009) against actual authority documents. Direct local prototype passed 8/0, including exact ordered v2 19-name catalog. Evidence: [r06/S00-DOC-QUALIFICATION.md](docs/verification/v0.3-remediation/r06/S00-DOC-QUALIFICATION.md). Do not promote rows until exact-head locked CI has executed these tests.
+- **Release unchanged:** S07-023 exact screenshot pixel capability remains unsupported, native SQL ≤120/40 failed by 67 reads/4 writes, remaining individually unqualified requirements and owner-only gates unresolved. No provider, preview, deployment or merge.
 
 ## R00–R05 v0.3 conformance remediation
 
