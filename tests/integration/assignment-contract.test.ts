@@ -23,7 +23,7 @@ test('S02-009 generation boundaries use canonical zero and MAX_SAFE_INTEGER, rej
   for (const value of [-1, -0.5, 1.5, maximum + 1, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY,
     Number.NaN, '0', null, undefined]) assert.equal(validGeneration(value), false, String(value));
   for (const [assignmentGeneration, bindingGeneration] of [[0, 0], [maximum, maximum],
-    [0, maximum], [maximum, 0]]) {
+    [0, maximum], [maximum, 0]] as const) {
     const identity = {workspaceId: 'scope_9-A', assignmentGeneration, bindingGeneration};
     const encoded = encodeTarget(identity);
     assert.equal(encoded, 'w2.scope_9-A.' + assignmentGeneration + '.' + bindingGeneration);
