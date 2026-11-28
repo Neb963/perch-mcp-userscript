@@ -42,7 +42,7 @@ test('S02-009 generation boundaries use canonical zero and MAX_SAFE_INTEGER, rej
       /Invalid Workspace Target/);
 });
 
-test('S02-020 S02-023 S02-024 v2 Connector discovery and Target isolation in local workerd', async () => {
+test('S02-020 S02-023 v2 Connector discovery and Target isolation in local workerd', async () => {
   const h = await createCapacityHarness(1, { DEVELOPMENT_CONTRACT_V2_ENABLED: 'true' });
   try {
     const legacy = h.fixtures[0]!;
@@ -129,7 +129,7 @@ test('S02-020 S02-023 S02-024 v2 Connector discovery and Target isolation in loc
   }
 });
 
-test('A01 S02-012 exact owned targets, isolated discovery trace, 50-Workspace pagination and stale cursor', async()=>{
+test('A01 S02-012 S02-024 exact owned targets, isolated discovery trace, 50-Workspace pagination and stale cursor', async()=>{
   const h=await createCapacityHarness(0,{DEVELOPMENT_CONTRACT_V2_ENABLED:'true',
     DEVELOPMENT_CONTRACT_V2_EXECUTION_ENABLED:'true',REGISTRY_WORKSPACE_BUDGET:'60'},
     {entryPoint:'tests/fixtures/optimization-runtime.ts'});
@@ -182,6 +182,17 @@ test('A01 S02-012 exact owned targets, isolated discovery trace, 50-Workspace pa
     }
     const ap=await discover(a,pa,[a1,a2]);
     assert.deepEqual(ap.workspaces.map(row=>parseTarget(row.target).workspaceId).sort(),[a1.id,a2.id].sort());
+    // S02-024: use a real verified Binding, not the already-unbound
+    // Workspace from the separate negative-case discovery test.
+    const originallyBound = encodeTarget({workspaceId:String(a1.id),
+      assignmentGeneration:Number(a1.assignmentGeneration),
+      bindingGeneration:Number(a1.bindingGeneration)});
+    assert.ok(ap.workspaces.some(row=>row.target===originallyBound));
+    const wrongGeneration = encodeTarget({workspaceId:String(a1.id),
+      assignmentGeneration:Number(a1.assignmentGeneration)+1,
+      bindingGeneration:Number(a1.bindingGeneration)});
+    await assert.rejects(h.internal(h.registry,'/internal/v2/discover',{
+      agentId:a.id,props:pa,args:{target:wrongGeneration}}),/STALE_TARGET/);
     assert.equal(ap.nextCursor,null);
     const bp=await discover(b,pb,[b1]);
     assert.deepEqual(bp.workspaces.map(row=>parseTarget(row.target).workspaceId),[b1.id]);
