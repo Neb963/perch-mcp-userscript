@@ -67,11 +67,28 @@ export class Registry extends BaseRegistry {
 }
 export class Workspace extends BaseWorkspace {
   private fixtureMetrics: Metrics;
+  private readonly rawState:DurableObjectState;
   constructor(state: DurableObjectState, env: Env) {
     const m=metrics(); super(wrappedState(state,m),env); this.fixtureMetrics=m;
+    this.rawState=state;
   }
   async fetch(request: Request): Promise<Response> {
     if (new URL(request.url).pathname === '/__fixture_metrics') return Response.json(this.fixtureMetrics);
+    if (new URL(request.url).pathname === '/__fixture_expire_operation') {
+      if(request.method!=='POST')return Response.json({code:'METHOD_NOT_ALLOWED'},{status:405});
+      const body=await request.json() as {operationId?:unknown};
+      if(typeof body.operationId!=='string'||!/^[A-Za-z0-9_-]{1,128}$/.test(body.operationId))
+        return Response.json({code:'INVALID_INPUT'},{status:400});
+      const old=Date.now()-1,key='operation/'+body.operationId;
+      // Test-only fault injection. The deployed Worker cannot access this route.
+      // Force exactly one native DISPATCHED operation past its own deadline;
+      // production must refuse a late RUNNING ack and retain a truthful
+      // UNKNOWN/noneffective receipt, not rely on a global cleanup scan.
+      const changed=this.rawState.storage.sql.exec<{key:string}>(
+        "UPDATE operation_native_v2 SET deadline=?,due=? WHERE key=? AND phase='DISPATCHED' AND terminal IS NULL RETURNING key",
+        old,old,key).toArray();
+      return Response.json({changed:changed.length});
+    }
     this.fixtureMetrics.requests++;
     const at=performance.now();
     try {return await super.fetch(request);}
