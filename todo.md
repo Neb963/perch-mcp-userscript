@@ -3,6 +3,12 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### 2026-11-28 F12 integration-test fixture and R05 semantic evidence fix
+
+- The offline public-generator adapter reads provider metadata twice per independent snapshot and does two independent snapshots. Synthetic version generation must therefore advance every **four** requests, not two. The 89ac2b3 offline test correctly failed on inconsistent fake snapshots before publication; fixed the test fixture without altering the production source or weakening the check.
+- R05 evidence audit heuristically rejected two `PASS` rows solely because their **operational** descriptions included `pending` (a live state, not a verification state). Retained exact tests, SHA and PASS criteria; clarified these as **unanswered approval** and **unresolved request**, keeping the strict verifier unchanged. Earlier 7c688d9 run had 700 pass / 1 fail / 1 skip; 89ac2b3 run had 701 pass / 2 fail / 1 skip, with these two specific causes.
+- Recheck exact new source tree via complete offline CI. No deployment, preview, production request or release-gate relaxation.
+
 ### R03 F12 immutable public import publication (2026-11-28)
 
 - Restore verified revision-addressed source under `imports/<slug>/perch-revisions/<snapshotId>/files/`, with an immutable `manifest.json`. Keep backward-compatible `imports/<slug>/<path>` and active `perch-receipt.json` pointing at the exact immutable manifest.

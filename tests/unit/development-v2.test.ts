@@ -245,7 +245,7 @@ test('F12 immutable snapshots retain prior public revisions while advancing only
   let generation=0;
   const publicSource=(n:number)=>({generator:{id:42,name:'fixture',modelText:'output = version-'+n,
     outputTemplate:'<p>fixture</p>',srcManifest:{}}});
-  const fetcher=(async()=>Response.json(publicSource(Math.floor(generation++/2)))) as typeof fetch;
+  const fetcher=(async()=>Response.json(publicSource(Math.floor(generation++/4)))) as typeof fetch;
   const first=await executeDevelopment(f.context,undefined,fetcher) as {imports:Array<{manifestPath:string;sourcePrefix:string;snapshotId:string}>};
   const receipt1=first.imports[0]!;
   const old=await f.vfs.localView();
