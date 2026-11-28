@@ -3,6 +3,12 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### 2026-11-28 exact S10-004 Workspace observation proof
+
+- `9956d04` [CI 46142955098](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46142955098): 705 PASS, 0 FAIL, 1 historical skip; typecheck/build/hashes/dry-run passed. Verified native revision hashes only when the projection supplies `verified:true`; unverified Source, Preview, Saved remain UNKNOWN. Local Activity observation includes Workspace, phase, tool and observedAt with installation scope; does not assert a current clear Hold.
+- Same installer rendered 30 screenshots in local Chromium, 10/8/2 complete Workspace rows at 1440×900, 1024×768, 390×844, no overflow or external requests. Extended `tests/offline-manager/closure-r05.py` also checked UNKNOWN/observed outcome on expanded row and 0 Gateway requests on expansion.
+- [Direct acceptance evidence](docs/verification/v0.3-remediation/r05/S10-004-PROVENANCE-QUALIFICATION.md) promotes S10-004 to PASS. Register now 1317: PASS 88, FAIL 4, NOT_STARTED 1186, OWNER 24, BLOCKED_CAPTURE 1, SUPERSEDED 14. The SQL target 187/46 vs 120/40 and actual unsaved preview capture remain unresolved. No production, provider or deployment action.
+
 ### R03 S10-004 local-first Workspace detail evidence
 
 - Workspace `More actions` detail now discloses SourceRevision, PreviewRevision and SavedRevision; only explicitly verified SHA-256 projections are shown, and unverified/missing native state is labeled UNKNOWN.

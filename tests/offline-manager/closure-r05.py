@@ -64,6 +64,32 @@ def main():
             page.close()
 
             page=start(browser)
+            row=page.get_by_role('row').filter(has_text='Image studio').first
+            disclosure=row.locator('summary',has_text='More actions')
+            disclosure.wait_for()
+            before=page.evaluate('fixture.requests.length')
+            disclosure.click()
+            details=row.locator('details.secondary-actions').inner_text()
+            assert 'SourceRevision: UNKNOWN (no verified native readback)' in details,details[:500]
+            assert 'PreviewRevision: UNKNOWN (no verified native readback)' in details
+            assert 'SavedRevision: UNKNOWN (no verified native readback)' in details
+            assert 'Last result: UNKNOWN (' in details
+            assert 'In-flight/Hold: UNKNOWN (' in details
+            assert page.evaluate('fixture.requests.length')==before,'Detail expansion must remain local.'
+            page.get_by_role('tab',name='Activity',exact=True).click()
+            page.get_by_role('tab',name='Workspaces',exact=True).click()
+            row=page.get_by_role('row').filter(has_text='Image studio').first
+            row.locator('summary',has_text='More actions').click()
+            details=row.locator('details.secondary-actions').inner_text()
+            assert 'Last result (observed ' in details and 'UNKNOWN · batch' in details,details[:1000]
+            assert 'In-flight/Hold: UNKNOWN — inspect Recovery' in details
+            evidence['S10_004_revisionAndResult']={'verifiedRevisionNotFabricated':True,
+                'lastObservedWorkspaceOperationShown':True,'explicitHoldUncertainty':True,
+                'extraRequestsOnExpansion':0}
+            page.screenshot(path=args.output/'S10-004-revision-provenance.png')
+            page.close()
+
+            page=start(browser)
             page.get_by_role('tab',name='Connectors',exact=True).click()
             page.get_by_role('button',name='Approve exact request',exact=True).wait_for()
             search=page.get_by_role('searchbox',name='Filter')
