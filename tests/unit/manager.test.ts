@@ -588,3 +588,58 @@ test('OAUTH-PERSIST-01 manager displays permanent v2 Grant and exact revocation 
  assert.doesNotMatch(f.root.querySelector('tbody')?.textContent??'',/expires null/);
  f.handle.destroy();
 });
+
+test('F18.04 expired pending approval stays visible as disabled and cannot execute any decision',async()=>{
+  const now=Date.now();
+  const connector={id:'connector-a',label:'Terminal Client',endpoint:'https://gateway.example.workers.dev/mcp/connector-a',
+    contractVersion:2,permissionCeiling:['READ_SOURCE'],revision:3,assignmentCount:0,suspended:false};
+  let mutations=0;
+  const f=fixture({request:async(method,path,body)=>{
+    if(method!=='GET'){mutations++;throw new Error('No decision may be dispatched');}
+    if(path.endsWith('/state'))return {revision:3,policyRevision:3,version:'0.3.0',assignmentContractVersion:2};
+    if(path.endsWith('/connectors'))return {items:[connector],revision:3};
+    if(path.endsWith('/workspaces'))return {items:[],revision:3};
+    if(path.endsWith('/approvals'))return {items:[{id:'approval-old',kind:'oauth',agentId:'connector-a',
+      state:'pending',code:'ABCD-1234',audience:connector.endpoint,clientId:'client-a',redirectUri:'https://example.org/return',
+      scope:['mcp'],permissionSnapshot:['READ_SOURCE'],revision:1,digest:'f'.repeat(64),expiresAt:now-1000}],revision:3};
+    return {items:[],revision:3};
+  }});
+  await f.handle.open('Agents');
+  await until(()=>/Expired — restart authorization/.test(f.root.textContent??''));
+  const oldRow=[...f.root.querySelectorAll('tbody tr')].find(row=>row.textContent?.includes('approval-old') || row.textContent?.includes('ABCD-1234'));
+  assert.ok(oldRow);
+  assert.match(oldRow.textContent??'',/Expired — restart authorization/);
+  const buttons=[...oldRow.querySelectorAll('button')];
+  assert.deepEqual(buttons.map(b=>({name:b.textContent,disabled:b.disabled})),[
+    {name:'Approve exact request',disabled:true},{name:'Deny',disabled:true}
+  ]);
+  for(const button of buttons)button.click();
+  assert.equal(mutations,0);
+  f.handle.destroy();
+});
+test('F22.03 table count and no-match state update without extra Gateway requests',async()=>{
+  const f=fixture();
+  const old=f.client.request;
+  f.client.request=async(method,path,body,opts)=>{
+    if(path.endsWith('/workspaces'))return {items:[
+      {id:'w1',label:'Alpha',revision:1,permissions:[],paused:false,binding:null},
+      {id:'w2',label:'Bravo',revision:1,permissions:[],paused:false,binding:null}],revision:1};
+    return old(method,path,body,opts);
+  };
+  await f.handle.open('Workspaces');
+  assert.match(f.root.textContent??'',/Showing 2 of 2 entries/);
+  const count=f.root.querySelector<HTMLElement>('.table-count');
+  assert.ok(count);
+  assert.equal(count.getAttribute('aria-live'),'polite');
+  const filter=f.root.querySelector<HTMLInputElement>('[aria-label="Filter"]')!;
+  const baseline=f.requests.length;
+  filter.value='Bravo';
+  filter.dispatchEvent(new f.dom.window.Event('input',{bubbles:true}));
+  assert.match(f.root.textContent??'',/Showing 1 of 2 entries/);
+  filter.value='Not present';
+  filter.dispatchEvent(new f.dom.window.Event('input',{bubbles:true}));
+  assert.match(f.root.textContent??'',/Showing 0 of 2 entries/);
+  assert.match(f.root.textContent??'',/No matching entries/);
+  assert.equal(f.requests.length,baseline);
+  f.handle.destroy();
+});

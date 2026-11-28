@@ -59,6 +59,16 @@ jobs:
             ${{ runner.temp }}/remediation-legacy.json
           if-no-files-found: error
           retention-days: 30
+      - name: Enumerate atomic requirements (strict release gate remains separate)
+        run: |
+          node scripts/audit-requirements.mjs --out "$RUNNER_TEMP/requirement-coverage.json"
+      - name: Publish atomic requirement inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: perch-mcp-requirement-inventory
+          path: ${{ runner.temp }}/requirement-coverage.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Build userscript and Worker package
         run: npm run build
       - name: Verify release package hashes

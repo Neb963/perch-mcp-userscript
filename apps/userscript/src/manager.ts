@@ -802,6 +802,8 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     const t = el("table"), thead = el("thead"), tr = el("tr"), tbody = el("tbody");
     let sortField = "label", sortDirection = 1;
     const empty = el("p", "No entries.", "empty");
+    const count=el("p", "", "muted table-count");
+    count.setAttribute("aria-live","polite");
     const renderRows = () => {
       if (confirmation && t.contains(confirmation.box)) dismissConfirmation();
       tbody.replaceChildren();
@@ -822,7 +824,9 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         }
         tbody.append(r);
       }
+      empty.textContent=rows.length && !selected.length?"No matching entries.":"No entries.";
       empty.hidden=selected.length!==0;
+      if(useFilter)count.textContent=`Showing ${selected.length} of ${rows.length} entries`;
       refreshRemoteButtons();
     };
     for (const c of columns) {
@@ -842,6 +846,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     }
     thead.append(tr);
     t.append(thead, tbody);
+    if(useFilter)parent.append(count);
     parent.append(t,empty);
     if (useFilter) localTables.set(t,renderRows);
     renderRows();
@@ -1729,10 +1734,8 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
       const approvals = await loadList(`${ADMIN}/approvals`);
       if (own !== generation || destroyed || !opened || tab !== "Agents")
         return;
-      const pending = approvals.items.filter(
-        (item) => item.state === "pending" && num(item.expiresAt) > Date.now(),
-      );
-      pendingApprovalCount = pending.length;
+      const pending = approvals.items.filter(item => item.state === "pending");
+      pendingApprovalCount = pending.filter(item=>num(item.expiresAt)>Date.now()).length;
       const fingerprint = JSON.stringify(pending);
       if (fingerprint === lastApprovalState) return; // Preserve focus while polling.
       lastApprovalState = fingerprint;
@@ -1783,18 +1786,20 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
             key: "state",
             label: "Decision",
             render(a, td) {
-              p(str(a.state), td);
+              const expired=num(a.expiresAt)<=Date.now();
+              p(expired?"Expired — restart authorization":str(a.state), td);
               const connector = agents.items.find(item => item.id === a.agentId);
               const requiresExact = a.kind === "oauth" && v2;
-              const valid = !requiresExact || (
+              const valid = !expired && (!requiresExact || (
                 !!connector && connector.contractVersion === 2 &&
                 typeof a.audience === "string" && !!a.audience &&
                 a.audience === connector.endpoint && !!str(a.clientId) && !!str(a.redirectUri) &&
                 !!str(a.code) && Array.isArray(a.permissionSnapshot) &&
                 a.permissionSnapshot.every(permission => v2Permissions.some(accepted => accepted === permission)) &&
                 Number.isSafeInteger(a.revision) && /^[a-f0-9]{64}$/.test(str(a.digest))
-              );
-              if (!valid) p("Approval blocked because the exact authorization details could not be verified.", td);
+              ));
+              if (expired) p("The authorization window expired. Restart the external Connector authorization.", td);
+              else if (!valid) p("Approval blocked because the exact authorization details could not be verified.", td);
               const approval = {
                 id: str(a.id), expectedRevision: num(a.revision) || approvals.revision,
                 digest: str(a.digest), expiresAt: num(a.expiresAt),
@@ -1814,7 +1819,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
                   );
                   await refresh();
                 })), !valid),
-                remoteButton(
+                markRemote(remoteButton(
                   "Deny",
                   own,
                   async () => {
@@ -1831,7 +1836,7 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
                     await refresh();
                   },
                   "danger",
-                ),
+                ),expired),
               );
             },
           },
