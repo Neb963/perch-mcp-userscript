@@ -94,3 +94,33 @@ test('F09 guest rejects unauthorized staged writes before exposing stage or invo
   assert.deepEqual(response.result,{failure:'SCOPE_DENIED',list:[]});
   assert.deepEqual(f.permits,['read-view']);
 });
+
+
+test('F09 oversized declared prefix rejects before any native content read or guest start', async () => {
+  const f = await fixture({js:'return await fs.list();',access:{read:['src/']}});
+  for (let i=0;i<200;i++) f.native.set('more-' + i,utf8.encode('fixture'));
+  await assert.rejects(executeDevelopment(f.context,{execute:async()=>{
+    assert.fail('Guest started after an oversized view');
+  }}),/selected file limit/);
+  assert.deepEqual(f.readAssets,[]);
+  assert.deepEqual(f.permits,['read-view']);
+});
+
+test('F09 total selected bytes over budget reject before guest start or publication', async () => {
+  const f = await fixture({js:'return await fs.list();',access:{read:['src/lib/'],maxBytes:5}});
+  await assert.rejects(executeDevelopment(f.context,{execute:async()=>{
+    assert.fail('Guest started after a view capacity refusal');
+  }}),/Selected source exceeded its byte limit/);
+  assert.deepEqual(f.readAssets,['lib/module.js']);
+  assert.deepEqual(f.permits,['read-view']);
+});
+
+test('F09 console and result share one serialized output budget before staged writes publish', async () => {
+  const f = await fixture({js:`await fs.writeTextFile("scratch/staged","fixture");
+    console.log("λ".repeat(3500));
+    return "λ".repeat(98000);`,access:{write:['scratch/staged']}});
+  await assert.rejects(executeDevelopment(f.context,{execute:executeCompute}),
+    (e:unknown)=>e instanceof ExecutionError&&e.code==='LIMIT_EXCEEDED'&&e.effectState==='NONE');
+  assert.deepEqual((await f.context.vfs.localView()).files,[]);
+  assert.deepEqual(f.permits,['read-view']);
+});

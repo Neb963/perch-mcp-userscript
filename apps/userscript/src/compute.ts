@@ -38,6 +38,7 @@ export class ExecutionError extends Error {
   constructor(public readonly code: string, message: string, public readonly effectState: 'NONE' | 'PARTIAL' | 'UNKNOWN' = 'NONE', public readonly effects: ComputeEffect[] = []) { super(message); this.name = 'ExecutionError'; }
 }
 const MAX_MESSAGE_BYTES = 262_144;
+const V2_OUTPUT_BYTES = 192 * 1024;
 const MAX_BROKER_CALLS = 1000;
 const CHILD_TOOLS = new Set(['page_eval', 'page_refresh', 'fetch_url', 'generate_image', 'upload_file', 'set_viewport_size', 'read', 'write', 'edit', 'patch', 'glob', 'grep', 'list_files', 'rename_file', 'delete_file', 'save_b64_file', 'read_b64_file']);
 const textEncoder = new TextEncoder();
@@ -264,6 +265,8 @@ export async function executeCompute(options: ComputeOptions): Promise<ComputeRe
       }
       await new Promise<void>(resolve => { const timer = setTimeout(() => { if (wake === wrapped) wake = undefined; resolve(); }, Math.min(10, Math.max(1, deadline - Date.now()))); const wrapped = () => { clearTimeout(timer); resolve(); }; wake = wrapped; });
     }
+    if (access && textEncoder.encode(JSON.stringify({result, consoleOutput:logs})).byteLength > V2_OUTPUT_BYTES)
+      throw new ExecutionError('LIMIT_EXCEEDED', 'Compute result and console exceed their shared 192 KiB payload budget.');
     await flush();
     return { result, consoleOutput: logs, filesWritten: [...written].sort(), effects };
   } catch (error) {

@@ -17,18 +17,18 @@ async function fixture(){
  const dom=new JSDOM(`<iframe src="https://${publicId}.perchance.org/minimal"></iframe>`,{url:'https://perchance.org/minimal#edit'});
  const frame=dom.window.document.querySelector('iframe')! as unknown as HTMLIFrameElement;
  const stamp={revision:await hash(['minimal','animal\n  otter','<p>hello</p>']),srcRevision:await hash([['asset.png','abc.png']]),epoch:1,srcHasPending:false,srcChangedDuringRender:false};
- let revision='r1',generation:string|null=null,preambleRan=false,onUser:(()=>void)|undefined,userResult:unknown=42;
+ let revision='r1',generation:string|null=null,preambleRan=false,onUser:(()=>void)|undefined,userResult:unknown=42,droppedCommand:string|undefined;
  const requests:Record<string,unknown>[]=[];
  const page:Record<string,unknown>={generatorPublicId:publicId,app:{data:{generator:{name:'minimal'}}},modelTextEditor:{getValue:()=> 'animal\n  otter'},outputTemplateEditor:{getValue:()=>'<p>hello</p>'},srcState:{manifestForIframe:()=>({'asset.png':{key:'abc.png'}}),hasPending:()=>false}};
  page.hardReloadOutputIframe=async()=>{const preamble=String(page.__aiAgentPreambleJs);generation=/generation:"([^"]+)"/.exec(preamble)?.[1]??null;preambleRan=true;stamp.epoch++;};
  const emit=(request:Record<string,unknown>,result:unknown,override:Record<string,unknown>={})=>dom.window.dispatchEvent(new dom.window.MessageEvent('message',{source:frame.contentWindow as unknown as Window,origin:`https://${publicId}.perchance.org`,data:{type:'evaluateJsResponse',callerId:request.callerId,result,error:null},...override}));
  frame.contentWindow!.postMessage=((request:Record<string,unknown>,origin:string)=>{requests.push(request);assert.equal(origin,`https://${publicId}.perchance.org`);const diagnostic=String(request.js).startsWith('return (() => { const p=document.__perchanceInternal');
-   queueMicrotask(()=>{if(!diagnostic)onUser?.();const result=diagnostic?{receipt:{...stamp},generation,consoleOutput:['log: fixture'],errors:[],warnings:[],preambleRan}:request.js==='return 6 * 7;'?42:userResult;
+   queueMicrotask(()=>{if(request.js===droppedCommand)return;if(!diagnostic)onUser?.();const result=diagnostic?{receipt:{...stamp},generation,consoleOutput:['log: fixture'],errors:[],warnings:[],preambleRan}:request.js==='return 6 * 7;'?42:userResult;
     emit(request,'forged',{origin:'https://evil.invalid'});emit(request,'forged',{source:null});emit({...request,callerId:'wrong'},'forged');emit(request,result);
    });}) as Window['postMessage'];
  const options={host:dom.window as unknown as Window,frame:()=>frame,revision:async()=>revision};
  const bridge=createNativePreviewBridge(page,options)!;
- return{dom,frame,page,stamp,requests,bridge,setRevision:(r:string)=>{revision=r},onUser:(fn:()=>void)=>{onUser=fn},returnUser:(result:unknown)=>{userResult=result}};
+ return{dom,frame,page,stamp,requests,bridge,setRevision:(r:string)=>{revision=r},onUser:(fn:()=>void)=>{onUser=fn},returnUser:(result:unknown)=>{userResult=result},drop:(command:string)=>{droppedCommand=command}};
 }
 
 test('actual native evaluateJs wire format maps results and rejects forged replies',async()=>{
@@ -365,5 +365,34 @@ test('F11 repeated diagnostics reads do not regenerate receipt sequence entries'
   assert.deepEqual(second.entries,[]);
   assert.deepEqual(second.nextCursor,first.nextCursor);
   assert.deepEqual(f.permits,['preview-effect']);
+ } finally {f.preview.dispose();f.dom.window.close();}
+});
+
+
+test('F11 a timed-out post-dispatch native preview evaluation retains unknown outcome without retry',async()=>{
+ const f=await developmentFixture();
+ try {
+  await f.preview.run('page_refresh',{},f.context,f.scope);
+  const js='return "fixture timeout";';
+  f.drop(js);
+  await assert.rejects(f.preview.run('page_eval',{js,timeoutMs:60,resultPath:'scratch/missing'},f.context,f.scope),
+   (e:unknown)=>e instanceof ExecutionError&&e.code==='TIMEOUT'&&e.effectState==='UNKNOWN');
+  assert.equal(f.requests.filter(request=>request.js===js).length,1);
+  assert.deepEqual((await f.context.vfs.localView()).files,[]);
+  assert.deepEqual(f.permits,['preview-effect','preview-effect']);
+ } finally {f.preview.dispose();f.dom.window.close();}
+});
+
+test('F11 a timed-out native refresh clears its temporary preamble without retrying reload',async()=>{
+ const f=await developmentFixture();
+ try {
+  let attempts=0;
+  f.page.hardReloadOutputIframe=()=>{attempts++;return new Promise(()=>{});};
+  await assert.rejects(f.preview.run('page_refresh',{timeoutMs:60},f.context,f.scope),
+   (e:unknown)=>e instanceof ExecutionError&&e.code==='TIMEOUT'&&e.effectState==='UNKNOWN');
+  assert.equal(attempts,1);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(Object.hasOwn(f.page,'__aiAgentPreambleJs'),false);
+  assert.equal((await f.preview.preview.freshness()).pageFreshnessUnknown,true);
  } finally {f.preview.dispose();f.dom.window.close();}
 });
