@@ -42,6 +42,43 @@ test('catalog contains 19 names and rejects nested management, Save, POST and mi
     args:{requests:[{method:'POST',url:'https://fixture.test/',path:'scratch/out',body:'x',ifAbsent:true}]}}]}),/Invalid development/);
 });
 
+
+test('S03-015/021/022/023 wire input enforces closed batch and exact delivery fields',()=>{
+  const target='w2.workspace.1.1', operationKey='k2.'+Date.now()+'.'+crypto.randomUUID();
+  const read=()=>({files:[{path:'main.pjs'}]});
+  const write=()=>({files:[{path:'scratch/new.txt',encoding:'utf8',content:'value',ifAbsent:true}]});
+  const reject=(fn:()=>unknown)=>
+    assert.throws(fn,(error:unknown)=>error instanceof ToolError && error.code==='INVALID_INPUT');
+  // A pure read accepts an omitted or explicitly supplied canonical key.
+  assert.equal(parseDevelopmentCall('read',{target,...read()}).name,'read');
+  assert.equal(parseDevelopmentCall('read',{target,operationKey,...read()}).delivery?.operationKey,operationKey);
+  // Mutations and effect-capable preview operations must retain one intent key.
+  reject(()=>parseDevelopmentCall('write',{target,...write()}));
+  reject(()=>parseDevelopmentCall('page_refresh',{target}));
+  reject(()=>parseDevelopmentCall('save_generator',{target,
+    intendedSourceRevision:'a'.repeat(64),expectedSavedRevision:'b'.repeat(64)}));
+  reject(()=>parseDevelopmentCall('batch',{target,
+    actions:[{tool:'write',args:write()}]}));
+  const accepted=parseDevelopmentCall('batch',{target,operationKey,
+    actions:[{tool:'read',args:read()},{tool:'write',args:write()}]});
+  assert.equal((accepted.args.actions as unknown[]).length,2);
+  // The nested grammar is closed: no Save, management, operation recovery,
+  // recursive batch or network POST, irrespective of argument validity.
+  for(const tool of ['save_generator','operation_status','cancel_operation','batch','workspace_status','create_generator']) {
+    reject(()=>parseDevelopmentCall('batch',{target,operationKey,
+      actions:[{tool,args:{}}]}));
+  }
+  reject(()=>parseDevelopmentCall('batch',{target,operationKey,
+    actions:[{tool:'fetch_url',args:{requests:[{method:'POST',url:'https://example.test/data',
+      path:'scratch/resp',body:'x',ifAbsent:true}]}}]}));
+  // Nested target/operationKey/waitMs may not override the one outer scope.
+  for(const extra of [{target},{operationKey},{waitMs:1}]) {
+    reject(()=>parseDevelopmentCall('batch',{target,operationKey,actions:[
+      {tool:'read',args:{...read(),...extra}},
+    ]}));
+  }
+});
+
 test('S03-002/003/004/005/006: malformed standalone requests fail before admission; valid Unicode and bytes pass', () => {
   const target = 'w2.workspace.1.1', operationKey = 'k2.' + Date.now() + '.' + crypto.randomUUID();
   const write = (content: string, encoding: 'utf8' | 'base64' = 'utf8', path = 'scratch/new') =>

@@ -9,14 +9,14 @@ This is an *operational index*, not a second requirement database. Normative aut
 | Field | Exact observed value |
 | --- | --- |
 | Default branch | `main`, `298f3b9619335364c668a69b6f04570ae530fcab` |
-| Remediation branch checkpoint before this document | `cbef2a233a1e3fdb21da2c315aa0d1eec80853c6`, tree `77f69188cc56e30518bc5a387526e864b88b3859` (R10 verified code checkpoint; inspect current HEAD for later changes) |
-| Last independently offline-verified source/docs commit | `cbef2a233a1e3fdb21da2c315aa0d1eec80853c6` |
-| Verified offline CI | [46158172940](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46158172940), successful at the R10 code SHA: 731 PASS, 0 FAIL, 1 historical SKIP |
+| Remediation branch checkpoint before this document | `8cd13c464de346167d022b83a332d387e77aef5f` (R11 verified code checkpoint; inspect current HEAD for later changes) |
+| Last independently offline-verified source/docs commit | `8cd13c464de346167d022b83a332d387e77aef5f` |
+| Verified offline CI | [46158850513](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46158850513), successful at the R11 code SHA; full suite passed (exact count in job logs) |
 | PR | [#25](https://github.com/Neb963/perch-mcp-userscript/pull/25): open, draft, unmerged |
 | Release | **NOT ELIGIBLE**; neither complete offline qualification nor production acceptance |
-| Native five-stage SQL lifecycle | **187 rows read, 44 written**; required **≤120/40**; native deficit 67 reads and 4 writes |
-| Measured stages (read/write) | admission 44/10; poll/dispatch 50/8; RUNNING 14/1; terminal/outbox 56/25; scoped status 23/0 |
-| Legacy equivalent | **251 rows read, 74 written**; separately measured, not counted toward native target |
+| Native five-stage SQL lifecycle | **180 rows read, 44 written** at R11 verified experiment; required **≤120/40**; native deficit 60 reads and 4 writes |
+| Measured stages (read/write) | admission 44/10; poll/dispatch 50/8; RUNNING 14/1; terminal/outbox 56/25; scoped status 16/0 |
+| Legacy equivalent | **244 rows read, 74 written**; separately measured, not counted toward native target |
 | Atomic requirement register | 1,317 total = **125 PASS + 4 FAIL + 1,149 NOT_STARTED + 24 DEFERRED_OWNER + 1 BLOCKED_FEASIBILITY + 14 SUPERSEDED** |
 | Active FAIL requirement IDs | `S07-023` (actual unsaved-preview pixels); `S08-058`, `F13.01`, `F13.02` (native SQL budget) |
 | Feasibility blocker | Actual authorized preview pixels lack a verified Firefox/Violentmonkey-only capture implementation |
@@ -30,7 +30,7 @@ This is an *operational index*, not a second requirement database. Normative aut
 | --- | --- | --- | --- | --- |
 | W0 — Baseline/authority | VERIFIED_OFFLINE | Exact branch/PR, AGENTS, revision-3 authority, source archive, register, CI reconciled here | Keep this index synchronized with every meaningful verified source checkpoint | None |
 | W1 — Correctness/recovery | IN_PROGRESS | R01/R02/R03/R05 findings and 727-test CI; direct assertions exist for selected F01–F27 | Prioritize unqualified P0 authorization, uncertainty and recovery paths; reproduce and test production-path assertions | Unproven clauses must not be marked PASS |
-| W2 — Native database budget | READY | [R04 measurements](r04/PERFORMANCE-RESULTS.md), exact 187/44 lifecycle and rejected zero-saving cache trial | Profile actual hot SQL shapes by stage, propose falsifiable structural reduction; rerun same denominator and negatives | 67-read / 4-write deficit |
+| W2 — Native database budget | IN_PROGRESS | [R04 measurements](r04/PERFORMANCE-RESULTS.md), exact 187/44 lifecycle and rejected zero-saving cache trial | Profile actual hot SQL shapes by stage, propose falsifiable structural reduction; rerun same denominator and negatives | 67-read / 4-write deficit |
 | W3 — Preview pixels | BLOCKED_FEASIBILITY | [Feasibility analysis](r05/FINAL-OFFLINE-STATUS.md) | Prepare minimal owner-authorized design or prove Firefox userscript-only surface identity/capture; never substitute DOM rasterization | Operator capture permission/component choice if required |
 | W4 — Requirement verification | IN_PROGRESS | [Four registers](REQUIREMENT-TRACEABILITY.md); 125 directly qualified clauses | Qualify high-risk groups with direct runtime assertions and update existing register incrementally | 1,149 individually unqualified |
 | W5 — Integration/compatibility | IN_PROGRESS | Legacy/native preservation and scoped manager evidence in R05; original A01 only partly qualified | Test exact v2 catalog, revocation, Target isolation, historical readers, failure/restart paths | Real browser/provider tests reserved |
@@ -42,7 +42,7 @@ This is an *operational index*, not a second requirement database. Normative aut
 
 **R10 completed direct qualification:** `S03-009` passed at [`cbef2a2`](https://github.com/Neb963/perch-mcp-userscript/commit/cbef2a233a1e3fdb21da2c315aa0d1eec80853c6) on [CI 46158172940](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46158172940), 731 PASS/0 FAIL/1 historical SKIP. Browser executor rejects malformed, altered and unauthorized standalone mutations before publication; positive write remains valid. See [R10 evidence](r10/DIRECT-QUALIFICATION.md). No SQL, screenshot or owner gate is waived.
 
-**W2 structural experiment (pending measurement):** Remove the duplicate pre-result Registry call for `operation_status` / `cancel_operation` and reuse the fresh Workspace Registry authorization for the original Operation ACL and bindingRevision. First CI 46158519983 passed typechecking and new original-Grant/cancel tests, but identified a real F05 regression: image hydration previously depended on the removed Worker's `bindingRevision` field. Follow-up preserves image hydration using the authorized Workspace revision and retains the image ACL plus final revocation check; adapted exact revocation hook from 4 to 3 mandatory authorizations. **Second CI and native SQL measurements pending.** Compare against 187/44, keep only if there is an actual improvement.
+**W2 structural experiment (VERIFIED partial improvement):** [CI 46158850513](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46158850513), exact SHA `8cd13c464de346167d022b83a332d387e77aef5f`, passes offline suite after preserving image hydration, final ACL and original Grant/Target constraints. Identical native five-stage lifecycle changed **187/44 → 180/44**, exactly **7 fewer Registry reads during scoped status**; legacy **251/74 → 244/74**. W2 still FAIL against ≤120/40 (deficit **60 reads / 4 writes**). See [R11 benchmark evidence](r11/SQL-EXPERIMENT.md). Next inspect terminal write/index amplification and Registry/Workspace repeated read boundaries with fresh+historical schema; no more status-only cache experiments.
 
 **R09 direct qualification:** `2e2f5221baddf0bf404accfe66ea8c3be230c46f`, [CI 46156403985](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46156403985) — 730 PASS, 0 FAIL, 1 SKIP. Explicit depth/node and serialized UTF-8 envelope limits reject malformed requests **before Registry or Workspace effects**; bounded positive inputs remain valid. S03-007 and S03-008 are independently qualified; [R09 evidence](r09/DIRECT-QUALIFICATION.md). The remaining 4 known failures and owner-only gates are unchanged.
 

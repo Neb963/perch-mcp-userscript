@@ -20,6 +20,32 @@ test('W2 v2 result and cancel enforce original Grant/Target at Workspace before 
       binding:f.binding,adapterVersion:'2',tabInstanceId:'original-grant-scope-fixture'});
     const firstToken=await issueSyntheticToken(h,f);
     const unrelatedGrantToken=await issueSyntheticToken(h,f);
+
+    // S03-011/012/014: inspect the real SDK-served v2 public catalog,
+    // including unavailable screenshot metadata and conservative hint flags.
+    const listed=await h.mf.dispatchFetch('https://capacity.test/mcp/'+f.agentId,{
+      method:'POST',headers:{Authorization:'Bearer '+firstToken,'Content-Type':'application/json',
+        Accept:'application/json, text/event-stream','MCP-Protocol-Version':'2025-11-25'},
+      body:JSON.stringify({jsonrpc:'2.0',id:crypto.randomUUID(),method:'tools/list'}),
+    });
+    assert.equal(listed.status,200);
+    const catalog=(await listed.json() as {result?:{tools:Array<{name:string;description:string;
+      annotations?:{readOnlyHint?:boolean;openWorldHint?:boolean}}>} >}).result?.tools;
+    assert.ok(catalog);
+    const expected=['read','write','delete','rename','list_files','page_eval','page_refresh',
+      'preview_diagnostics','set_viewport_size','capture_page_image','execute_js','fetch_url',
+      'fetch_generator','workspace_status','generator_info','save_generator',
+      'operation_status','cancel_operation','batch'];
+    assert.deepEqual(catalog.map(tool=>tool.name).sort(),expected.sort());
+    const capture=catalog.find(tool=>tool.name==='capture_page_image');
+    assert.match(capture?.description??'',/UNSUPPORTED_INTERFACE/);
+    assert.ok(!catalog.some(tool=>['skill','read_image','generate_image','get_workflow'].includes(tool.name)));
+    for(const name of ['page_eval','page_refresh','set_viewport_size','execute_js','fetch_url',
+      'fetch_generator','write','delete','rename','save_generator','batch']) {
+      assert.equal(catalog.find(tool=>tool.name===name)?.annotations?.readOnlyHint,false,
+        'Open-world/mixed/effectful tool must not advertise read-only: '+name);
+    }
+
     const start=await syntheticMcp(h,f,firstToken,'read',{target,
       operationKey:'k2.'+Date.now()+'.'+crypto.randomUUID(),files:[{path:'main.pjs'}]});
     const operationId=String(start.operationId);
