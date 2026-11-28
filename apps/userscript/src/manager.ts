@@ -1288,6 +1288,31 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
         const secondary=el("details",undefined,"secondary-actions");
         secondary.append(el("summary","More actions"));
         td.append(secondary);
+        // Heartbeat and cached Activity are not native revision attestations.
+        // Render only positively verified hashes; otherwise disclose UNKNOWN.
+        const revision=(field:string)=>{
+          const candidate=record(w[field]);
+          const value=str(candidate.value);
+          return candidate.verified===true&&/^sha256:[a-f0-9]{64}$/.test(value)
+            ? value : 'UNKNOWN (no verified native readback)';
+        };
+        p('SourceRevision: '+revision('sourceRevision'),secondary,'muted');
+        p('PreviewRevision: '+revision('previewRevision'),secondary,'muted');
+        p('SavedRevision: '+revision('savedRevision'),secondary,'muted');
+        const observed=lastKnown?.installation===installation()
+          ? lastKnown.activity.find(row=>row.workspaceId===w.id) : undefined;
+        if(observed) {
+          const when=num(observed.observedAt);
+          p('Last result (observed '+(when>0?new Date(when).toISOString():'time unknown')+
+            '): '+str(observed.phase,'UNKNOWN')+' · '+str(observed.tool,'operation unknown'),secondary,'muted');
+        } else p('Last result: UNKNOWN (open Activity for an authoritative update)',secondary,'muted');
+        const lastPhase=str(observed?.phase);
+        const active=str(w.inFlightOperation);
+        p('In-flight/Hold: '+(active ? 'Operation '+active+' — inspect Activity'
+          : w.transition ? 'TRANSITION_BLOCKED — reconcile before reassignment'
+          : ['UNKNOWN','PARTIAL'].includes(lastPhase) ? lastPhase+' — inspect Recovery'
+          : ['ADMITTED','DISPATCHED','RUNNING'].includes(lastPhase) ? lastPhase+' — status may have changed'
+          : 'UNKNOWN (inspect Activity/Recovery for current Holds)'),secondary,'muted');
         if (wd) {
           secondary.append(remoteButton('Reconnect',own,async()=>connectWorkspace(intent)),
             markRemote(button('Detach',()=>confirmAction(`Detach ${scope} from ${oldDraft} and preserve the native draft?`,async()=>
@@ -2244,7 +2269,14 @@ export function mountManager(options: ManagerOptions): ManagerHandle {
     const response = list(await client.request("GET", `${ADMIN}/activity`,undefined,{signal:viewAbort?.signal}));
     if (own !== generation) return;
     if(lastKnown?.installation===installation()){
-      lastKnown.activity=response.items.slice(0,100).map(row=>({operationId:str(row.operationId).slice(0,128),tool:str(row.tool).slice(0,80),phase:str(row.phase).slice(0,40)}));
+      const observedAt=Date.now();
+      lastKnown.activity=response.items.slice(0,100).map(row=>({
+        workspaceId:str(row.workspaceId).slice(0,128),
+        operationId:str(row.operationId).slice(0,128),
+        tool:str(row.tool).slice(0,80),
+        phase:str(row.phase).slice(0,40),
+        observedAt,
+      }));
     }
     heading("Activity");
     p(

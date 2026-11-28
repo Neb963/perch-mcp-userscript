@@ -3,6 +3,13 @@
 
 ## R00–R05 v0.3 conformance remediation
 
+### R03 S10-004 local-first Workspace detail evidence
+
+- Workspace `More actions` detail now discloses SourceRevision, PreviewRevision and SavedRevision; only explicitly verified SHA-256 projections are shown, and unverified/missing native state is labeled UNKNOWN.
+- After Activity is intentionally opened, bounded installation-scoped cached Activity metadata records Workspace ID, tool, phase and observedAt. The Workspace detail labels its last **observed** result and warns that current Holds must be inspected in Activity/Recovery; it does not infer a clear state from stale cached history.
+- No new auto Gateway request, no native scan, and no change to collapsed Workspace table density. Unit test `S10-004 Workspace detail...` asserts verified/unknown and cached-result cases, and 0 extra management requests while expanding. Pending exact-code CI and bundled Chromium geometry before promoting S10-004.
+- This is an operator observation improvement, not an authorization predicate or trustworthy Save revision. Owner acceptance and SQL/pixel gates remain separate.
+
 ### Clean-install Resource retirement S09-003
 
 - Source `2a49d88`, [CI 46142275476](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46142275476) passed 704 tests / 0 failed / 1 historical skip. New no-legacy `resourceStorageMaintenance` short circuit prevents inactive Resource schema/trigger writes in native/prepare mode, while legacy data appearing later still migrates.

@@ -164,6 +164,49 @@ test('Workspace pagination loads later pages and rejects inconsistent snapshots'
     await f.handle.refresh();
     assert.match(f.root.textContent ?? '', /Registry changed while paging/);
 });
+test('S10-004 Workspace detail reports verified revision provenance, last observed result and unknown Holds without extra requests',async()=>{
+  const f=fixture();
+  const original=f.client.request;
+  const known='sha256:'+'a'.repeat(64);
+  let calls=0;
+  f.client.request=async(method,path,body,options)=>{
+    calls++;
+    if(path.endsWith('/state')) return {revision:1,policyRevision:2,version:'0.3.0',assignmentContractVersion:2};
+    if(path.endsWith('/workspaces')) return {items:[{id:'w-studio',label:'Studio',revision:1,
+      binding:{generatorId:'generator-1',draftId:'',slug:'studio',browserInstallationId:'installation-1'},
+      connectorId:'c-studio',contractVersion:2,assignmentGeneration:1,bindingGeneration:1,
+      sourceRevision:{value:known,verified:true},
+      previewRevision:{value:known,verified:false},
+      savedRevision:{value:null,verified:false},
+      observation:{dirty:true,observedAt:Date.now(),epoch:1},epoch:1,permissions:['READ_SOURCE'],
+      transition:null}],revision:1};
+    if(path.endsWith('/connectors')) return {items:[{id:'c-studio',label:'Connector',
+      revision:1,assignmentCount:1,permissionCeiling:['READ_SOURCE']}],revision:1};
+    if(path.endsWith('/activity')) return {items:[{
+      workspaceId:'w-studio',phase:'UNKNOWN',tool:'write',operationId:'held-source-1',timestamp:1
+    }],revision:1};
+    return original(method,path,body,options);
+  };
+  await f.handle.open('Workspaces');
+  const summary=[...f.root.querySelectorAll('summary')].find(n=>n.textContent==='More actions')!;
+  assert.ok(summary);
+  const before=calls;
+  const details=summary.parentElement as HTMLDetailsElement;details.open=true;
+  assert.equal(calls,before,'Local evidence disclosure cannot poll the Gateway.');
+  assert.match(details.textContent??'',/SourceRevision: sha256:a{64}/);
+  assert.match(details.textContent??'',/PreviewRevision: UNKNOWN \(no verified native readback\)/);
+  assert.match(details.textContent??'',/SavedRevision: UNKNOWN \(no verified native readback\)/);
+  assert.match(details.textContent??'',/Last result: UNKNOWN/);
+  assert.match(details.textContent??'',/In-flight\/Hold: UNKNOWN/);
+  await f.handle.open('Activity');
+  await f.handle.open('Workspaces');
+  const latest=[...f.root.querySelectorAll('summary')].find(n=>n.textContent==='More actions')!.parentElement as HTMLDetailsElement;
+  latest.open=true;
+  assert.match(latest.textContent??'',/Last result \(observed .*\): UNKNOWN · write/);
+  assert.match(latest.textContent??'',/In-flight\/Hold: UNKNOWN — inspect Recovery/);
+  f.handle.destroy();
+});
+
 test('UI-STATE-01: late stale Gateway response never replaces the currently selected manager view',async()=>{
   const f=fixture();
   const original=f.client.request;
