@@ -1,5 +1,12 @@
 # Implementation ledger
 
+## R14 — result redaction, bounded wait and selected source access (CI PENDING)
+
+- **S03-010**: assert malformed image projection rejects with typed error; fallback `omitDevelopmentResult` retains original identity/status, strips source/image bytes/resolution/late-observation, and does not mutate original receipt. Direct production helpers.
+- **S03-020**: execute common admission parser for all 16 execution tools with `waitMs=0/10_000`, reject invalid values, preserve native `timeoutMs` and omit transport wait from browser args; separately assert `operation_status` wait bounds and `cancel_operation` denial.
+- **S03-028/029**: real browser executor reads exactly 64 existing selected private files, byte and line ranges, rejects 65 items, fails wrong READ_SOURCE before revealing bytes and refuses stale revision.
+- **Not qualified yet**: exact-head offline CI must pass; only then promote directly observed clauses in existing register. SQL 180/44 and screenshot/owner release gates unchanged.
+
 ## W2B — admission expiration fast-path (REJECTED AND REVERTED)
 
 - [Exact-head offline CI 46159986488](https://github.com/Neb963/perch-mcp-userscript/actions/runs/46159986488) passed typecheck and offline tests and measured identical native lifecycle **181 reads / 44 writes**, versus R11 baseline **180/44**; legacy unchanged at **244/74**. Admission was **45/10** rather than **44/10**; all other stages unchanged.

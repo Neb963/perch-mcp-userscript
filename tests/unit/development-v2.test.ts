@@ -166,6 +166,97 @@ test('S03-009 browser revalidates admitted standalone mutations before any effec
   assert.equal(new TextDecoder().decode(await (await f.vfs.localView()).read(file.path)),'safe');
 });
 
+
+test('S03-020 bounds delivery wait independently of every applicable tool execution timeout',()=>{
+  const target='w2.workspace.1.1';
+  const operationKey='k2.'+Date.now()+'.'+crypto.randomUUID();
+  const hash='a'.repeat(64);
+  const read={files:[{path:'scratch/input'}]};
+  const inputs:Record<string,Record<string,unknown>>={
+    read, write:{files:[{path:'scratch/new',encoding:'utf8',content:'x',ifAbsent:true}]},
+    delete:{paths:[{path:'scratch/input',ifSha256:hash}]},
+    rename:{moves:[{from:'scratch/input',to:'scratch/moved',ifSha256:hash,destination:'absent'}]},
+    list_files:{},page_eval:{js:'return 1',timeoutMs:20_000},page_refresh:{timeoutMs:20_000},
+    preview_diagnostics:{},set_viewport_size:{reset:true,timeoutMs:20_000},
+    capture_page_image:{},execute_js:{js:'return 1',timeoutMs:30_000,access:{}},
+    fetch_url:{requests:[{url:'https://example.test/file',path:'scratch/fetched',ifAbsent:true}]},
+    fetch_generator:{generators:[{slug:'demo'}]},
+    generator_info:{},save_generator:{intendedSourceRevision:hash,expectedSavedRevision:hash,timeoutMs:30_000},
+    batch:{actions:[{tool:'read',args:read}],timeoutMs:30_000},
+  };
+  for(const [tool,args] of Object.entries(inputs)){
+    const call=(waitMs:unknown)=>parseDevelopmentCall(tool,{target,operationKey,waitMs,...args});
+    const noWait=parseDevelopmentCall(tool,{target,operationKey,...args});
+    const early=call(0),bounded=call(10_000);
+    assert.equal(early.delivery?.waitMs,0,tool);
+    assert.equal(bounded.delivery?.waitMs,10_000,tool);
+    assert.deepEqual(early.args,noWait.args,tool+' wait should not mutate execution input');
+    assert.deepEqual(bounded.args,noWait.args,tool+' wait should not extend execution timeout');
+    assert.ok(!Object.hasOwn(bounded.args,'waitMs'),tool+' wait leaked into operation args');
+    for(const invalid of [-1,10_001,0.5,'10000']) {
+      assert.throws(()=>call(invalid),
+        (error:unknown)=>error instanceof ToolError&&error.code==='INVALID_INPUT',
+        tool+': invalid delivery wait '+invalid);
+    }
+  }
+  const status=(waitMs:unknown)=>parseDevelopmentCall('operation_status',{
+    target,operationId:'550e8400-e29b-41d4-a716-446655440000',waitMs,
+  });
+  assert.equal(status(0).args.waitMs,0);
+  assert.equal(status(10_000).args.waitMs,10_000);
+  assert.throws(()=>status(10_001),(error:unknown)=>error instanceof ToolError);
+  assert.throws(()=>parseDevelopmentCall('cancel_operation',{
+    target,operationId:'550e8400-e29b-41d4-a716-446655440000',waitMs:1,
+  }), (error:unknown)=>error instanceof ToolError);
+});
+
+test('S03-028/029 selected local read bounds, ranges, consistency and READ_SOURCE ceiling',async()=>{
+  const f=await fixture('read',{files:[{path:'scratch/input',encoding:'utf8'}]});
+  const local=await f.vfs.localView();
+  const added=Array.from({length:62},(_,i)=>({
+    path:'scratch/selected-'+String(i).padStart(2,'0'),
+    bytes:new Uint8Array([65+(i%26)]),
+  }));
+  added.push({path:'scratch/multiline',bytes:new TextEncoder().encode('alpha\nbeta\n')});
+  await f.vfs.writeLocalBatch(added,local.revision.value);
+  const correctRevision=(await f.vfs.localView()).revision.value;
+  const selected=[
+    {path:'scratch/input',encoding:'utf8' as const,range:{unit:'bytes' as const,offset:0,length:1}},
+    ...added.map(item=>({path:item.path,encoding:'utf8' as const})),
+  ];
+  assert.equal(selected.length,64);
+  const target=f.context.envelope.target;
+  const accepted=parseDevelopmentCall('read',{target,files:selected,expectedLocalRevision:correctRevision});
+  assert.equal((accepted.args.files as unknown[]).length,64);
+  const result=await executeDevelopment({...f.context,envelope:{...f.context.envelope,args:accepted.args}})
+    as {files:{path:string;content?:string;error?:unknown}[]};
+  assert.equal(result.files.length,64);
+  assert.deepEqual(result.files.map(row=>row.path),selected.map(row=>row.path));
+  assert.equal(result.files[0]?.content,'A');
+  assert.equal(result.files[1]?.content,'A');
+  assert.equal(result.files.at(-1)?.content,'alpha\nbeta\n');
+  assert.ok(result.files.every(row=>!row.error));
+  assert.deepEqual(f.permits,[],'Read must not authorize publication');
+  const line=await executeDevelopment({...f.context,envelope:{...f.context.envelope,args:{
+    files:[{path:'scratch/multiline',range:{unit:'lines',start:2,count:1}}],
+    expectedLocalRevision:correctRevision,
+  }}}) as {files:{content:string}[]};
+  assert.match(line.files[0]?.content??'',/^beta/);
+  assert.doesNotMatch(line.files[0]?.content??'',/alpha/);
+  assert.throws(()=>parseDevelopmentCall('read',{target,files:[...selected,selected[0]]}),
+    (error:unknown)=>error instanceof ToolError);
+  f.context.envelope.args={files:[{path:'scratch/input',encoding:'utf8'}]};
+  f.context.envelope.permissions=['WRITE_SOURCE'];
+  await assert.rejects(executeDevelopment(f.context),
+    (error:unknown)=>error instanceof BrowserError&&error.code==='SCOPE_DENIED');
+  assert.deepEqual(f.permits,[]);
+  f.context.envelope.permissions=['READ_SOURCE'];
+  f.context.envelope.args={files:[{path:'scratch/input',encoding:'utf8'}],expectedLocalRevision:'0:'+hash};
+  await assert.rejects(executeDevelopment(f.context),
+    (error:unknown)=>error instanceof BrowserError&&error.code==='STALE_REVISION');
+  assert.deepEqual(f.permits,[]);
+});
+
 test('100 QuickJS reads share a local read view and a denied publication leaves scratch unchanged', async () => {
   const input = {js:'let count=0; for(let i=0;i<100;i++) if(await fs.readTextFile("scratch/input")==="A") count++; return count;',
     access:{read:['scratch/input'],maxReads:100}};
